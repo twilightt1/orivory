@@ -21,12 +21,14 @@ from __future__ import annotations
 
 import logging
 import time
+from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.config import settings
 from app.models.entity import MemoryEntity
 from app.models.memory import Memory
 from app.retrieval.embedder import embed_query
@@ -57,6 +59,7 @@ class MemoryRetriever:
         entity_boost_max: float = 1.0,
         rerank_factor: int = 3,
         decay_floor: float = 0.1,
+        semantic_rerank: bool | None = None,
     ) -> None:
         self.db = db
         self.user_id = user_id
@@ -65,6 +68,12 @@ class MemoryRetriever:
         self.entity_boost_max = entity_boost_max
         self.rerank_factor = rerank_factor
         self.decay_floor = decay_floor
+        # None → defer to the deployment flag (settings.RETRIEVAL_SEMANTIC_RERANK)
+        self.semantic_rerank = (
+            settings.RETRIEVAL_SEMANTIC_RERANK
+            if semantic_rerank is None
+            else semantic_rerank
+        )
 
     # ── main entry point ─────────────────────────────────────────────────
 
@@ -119,6 +128,29 @@ class MemoryRetriever:
 
         num_candidates = len(candidates)
 
+        # 4b) Semantic rerank (Jina cross-encoder, opt-in): reorder the
+        # candidate pool by true query↔document relevance before the
+        # modifier pass. The vector cosine is an approximation; the
+        # cross-encoder reads query + document together and is materially
+        # better at "which of these 45 actually answers the question" —
+        # the exact failure mode the benchmark runs measured. Fallback to
+        # the vector order on any reranker failure (never block recall).
+        if self.semantic_rerank and num_candidates > 1:
+            try:
+                from app.retrieval.reranker import rerank
+
+                reranked = await rerank(
+                    rewritten if not llm_fallback else query,
+                    candidates,
+                )
+                if reranked:
+                    candidates = reranked
+            except Exception as e:
+                log.warning(
+                    "semantic rerank failed — using vector order",
+                    extra={"error": str(e)},
+                )
+
         # 5) Hydrate from Postgres (with entity_links)
         if candidates:
             memory_ids = [UUID(c["memory_id"]) for c in candidates]
@@ -142,9 +174,36 @@ class MemoryRetriever:
                 if link.entity is not None and link.entity.name
             }
 
-            base_score = float(cand["score"])
+            # When the cross-encoder ranked this pool, its relevance score
+            # IS the semantic signal — modifiers may only NUDGE it (±15%),
+            # never multiply it away. The n=100 run measured the failure
+            # mode: decay(0.1) × rerank(0.9) = 0.09 lost to
+            # decay(0.97) × rerank(0.2) = 0.19 — the cross-encoder's
+            # decision was overwritten by age. Salience/recency now break
+            # near-ties instead of dominating.
+            base_score = float(cand.get("rerank_score") or cand["score"])
 
-            # Entity boost first
+            if "rerank_score" in cand:
+                # modifier nudge: +7.5% if fresh-ish salient, −7.5% if not
+                salience_mult = 0.925 + 0.15 * float(memory.salience or 0.5)
+                captured = memory.captured_at
+                if captured.tzinfo is None:
+                    captured = captured.replace(tzinfo=UTC)
+                age_days = max(
+                    0.0,
+                    (datetime.now(UTC) - captured).total_seconds() / 86400.0,
+                )
+                fresh_mult = 1.0 if age_days < 90 else 0.95
+                final_score = base_score * salience_mult * fresh_mult * (
+                    1.5 if memory.pinned else 1.0
+                )
+                reasons = [f"rerank:{base_score:.2f}"]
+                if memory.pinned:
+                    reasons.append("pinned")
+                scored.append((memory, final_score, reasons))
+                continue
+
+            # Rerank-off path: full modifier chain (entity boost + decay)
             score_after_boost, boost_reasons = entity_boost(
                 base_score,
                 mem_entity_names,
@@ -153,7 +212,6 @@ class MemoryRetriever:
                 max_boost=self.entity_boost_max,
             )
 
-            # Then time-decay
             final_score, decay_reasons = time_decay_score(
                 score_after_boost,
                 captured_at=memory.captured_at,

@@ -63,6 +63,10 @@ if os.environ.get("OPENAI_BASE_URL"):
 # Chroma local path: default /data/chroma is a Docker volume; on a dev box
 # point it inside the results dir.
 os.environ["CHROMA_LOCAL_PATH"] = str(_RESULTS_DIR / "chroma")
+# Benchmark answers from top-15: the reranker's own top_n must not truncate
+# the pool below that (default JINA_RERANKER_TOP_N=5 is the API default).
+os.environ["JINA_RERANKER_TOP_N"] = "15"
+os.environ["RETRIEVAL_SEMANTIC_RERANK"] = "1"
 
 from eval.benchmarks.llm_judge import JUDGE_PROMPT_VERSION, build_judge_messages  # noqa: E402
 from eval.benchmarks.longmemeval_s import load_instances  # noqa: E402
