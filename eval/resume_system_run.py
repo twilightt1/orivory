@@ -139,7 +139,7 @@ async def main_async(args) -> int:
         instance = all_instances[qid]
         async with AsyncSessionLocal() as db:
             user_row = await db.get(User, user_id)
-            deleted = await delete_instance_memories(db, user_id, qid)
+            await delete_instance_memories(db, user_id, qid)
             user_id_str = str(user_row.id)
         # re-ingest under the resume user (fresh embeds with recovered API)
         user_uuid = uuid.UUID(user_id_str)
