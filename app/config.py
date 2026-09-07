@@ -113,6 +113,10 @@ class Settings(BaseSettings):
     JINA_RERANKER_TOP_N: int = 5
     # Use jina for embeddings instead of OpenAI
     USE_JINA_EMBEDDINGS: bool = True
+    # Local ONNX MiniLM embeddings (chromadb-bundled, 384-dim, no API key).
+    # Takes precedence over Jina/OpenAI when true — keeps lite mode and
+    # benchmarks fully self-contained. Do not mix backends in one store.
+    USE_LOCAL_EMBEDDINGS: bool = False
 
     # ── Corrective-RAG (CRAG) ────────────────────────────────────────────────────
     # CRAG self-critiques retrieval quality and falls back to web search when needed.
