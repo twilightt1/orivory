@@ -152,7 +152,10 @@ async def ingest_instance(user_id, instance, run_dir: Path, session_level: bool 
                 for line in turn_lines:
                     if current and current_len + len(line) > chunk_chars:
                         chunks.append(current)
-                        current, current_len = [], 0
+                        # 1-turn overlap: a fact whose statement straddles
+                        # the boundary ("...ordered it on the 15th." | next
+                        # chunk starts with the reply) lives in BOTH chunks.
+                        current, current_len = [current[-1]], len(current[-1])
                     current.append(line)
                     current_len += len(line)
                 if current:
@@ -229,33 +232,58 @@ async def ingest_instance(user_id, instance, run_dir: Path, session_level: bool 
     return created
 
 
-async def stack_recall(user_id, query: str, top_k: int) -> list[dict]:
-    """Real retrieval: MemoryRetriever over the ingested memories."""
-    from uuid import uuid4 as _u4  # noqa: F401 — placeholder if needed
+async def stack_recall(user_id, query: str, top_k: int,
+                       fuse: bool = False) -> list[dict]:
+    """Real retrieval: MemoryRetriever over the ingested memories.
 
+    Two-pass fusion: pass 1 recalls with the raw question; pass 2 recalls
+    with the retriever's own LLM-rewritten query (a differently-phrased
+    angle). Union by memory id, keeping each memory's best rank — multi-hop
+    facts phrased differently in different sessions surface from one pass
+    even when the other misses them.
+    """
     from app.database import AsyncSessionLocal
     from app.retrieval.memory.retriever import MemoryRetriever
 
     async with AsyncSessionLocal() as db:
         retriever = MemoryRetriever(db, user_id)
         response = await retriever.recall(query, top_k=top_k)
-        return [
-            {
-                "title": m.title,
-                # 4000 chars: matches the ingest chunk size — a 1200-char
-                # excerpt truncated 4k chunks mid-context (PR #15 finding).
-                "content": (m.content or "")[:4000],
-                "captured_at": m.captured_at.isoformat() if m.captured_at else None,
-            }
-            for m in getattr(response, "results", []) or []
-        ]
+        results = list(getattr(response, "results", []) or [])
+        rewritten = None
+        trace = getattr(response, "trace", None)
+        if trace is not None:
+            rewritten = getattr(trace, "rewritten_query", None)
+        if fuse and rewritten and rewritten.strip().lower() != query.strip().lower():
+            second = await retriever.recall(rewritten, top_k=top_k)
+            results.extend(getattr(second, "results", []) or [])
+
+        # Union by id, best (lowest) rank wins
+        seen: dict[str, dict] = {}
+        for rank, m in enumerate(results):
+            mid = str(m.id)
+            if mid not in seen:
+                seen[mid] = {
+                    "title": m.title,
+                    # 4000 chars: matches the ingest chunk size — a
+                    # 1200-char excerpt truncated 4k chunks mid-context
+                    # (PR #15 finding).
+                    "content": (m.content or "")[:4000],
+                    "captured_at": (
+                        m.captured_at.isoformat() if m.captured_at else None
+                    ),
+                    "_rank": rank,
+                }
+        fused = sorted(seen.values(), key=lambda r: r["_rank"])
+        for row in fused:
+            del row["_rank"]
+        return fused[: top_k * 2]
 
 
-async def answer_from_stack(user_id, instance, top_k: int) -> tuple[str, int]:
+async def answer_from_stack(user_id, instance, top_k: int, fuse: bool = False) -> tuple[str, int]:
     """Answer the question from what the stack recalls."""
     from openai import AsyncOpenAI
 
-    recalled = await stack_recall(user_id, instance.question, top_k)
+    recalled = await stack_recall(user_id, instance.question, top_k, fuse=fuse)
     if not recalled:
         return "I have no information about that.", 0
     excerpts = "\n\n".join(
@@ -294,14 +322,17 @@ async def judge_one(client, instance, response: str) -> bool:
 
 
 async def run_instance(client, user_id, instance, top_k, run_dir: Path,
-                      session_level: bool = True, chunk_chars: int = 0) -> dict:
+                      session_level: bool = True, chunk_chars: int = 0,
+                      fuse: bool = False) -> dict:
     t0 = time.time()
     try:
         ingested = await ingest_instance(
             user_id, instance, run_dir, session_level=session_level,
             chunk_chars=chunk_chars,
         )
-        response, recalled = await answer_from_stack(user_id, instance, top_k)
+        response, recalled = await answer_from_stack(
+            user_id, instance, top_k, fuse=fuse
+        )
         correct = await judge_one(client, instance, response)
         error = None
     except Exception as exc:
@@ -377,6 +408,7 @@ async def main_async(args) -> int:
             await run_instance(
                 client, benchmark_user_id, inst, args.top_k, run_dir,
                 session_level=args.session, chunk_chars=args.chunk_chars,
+                fuse=args.fuse,
             )
         )
     total = round(time.time() - t0, 1)
@@ -461,6 +493,11 @@ def main() -> int:
     parser.add_argument("--session", action="store_true",
                         help="session-level memories (v2 strategy) — "
                              "one memory per haystack session")
+    parser.add_argument("--fuse", action="store_true",
+                        help="two-pass recall fusion (raw + rewritten "
+                             "query, union by id) — 0.650 on the seed "
+                             "sample vs 0.700 single-pass; multi-hop "
+                             "experiments only")
     parser.add_argument("--chunk-chars", type=int, default=0,
                         help="split each session into turn-aligned chunks of "
                              "at most this many chars (session-level only; "
