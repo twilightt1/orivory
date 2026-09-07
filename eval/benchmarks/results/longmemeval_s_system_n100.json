@@ -1,0 +1,1082 @@
+{
+  "benchmark": "longmemeval_s",
+  "run_kind": "orivory_stack",
+  "chunking": "session_level",
+  "note": "OFFICIAL statistics-grade run: real LongMemEval-S, n=100 (seed 20260906), winning config (session 4k turn-aligned chunks + 1-turn overlap + decay floor + top-15). Wilson 95% CI [0.394, 0.587]. Honest reading: the stack is STRONG on assistant (14/14) and single-session-user (12/13) questions, WEAK on multi-session (8/26), temporal-reasoning (6/22) and preference (2/8). The n=20 0.700 was an optimistic small sample; at n=100 the CI spans the 0.600 full-context baseline \u2014 no claim that the stack beats full-context reading at scale is supported yet. 16 questions re-run after transient Jina rate-limits (resumed block) \u2014 all 16 recovered normally, confirming the failures were infrastructure, not retrieval.",
+  "dataset_path": "eval/benchmarks/data/longmemeval_s_cleaned.json",
+  "dataset_sha256": "d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442",
+  "dataset_instances": 500,
+  "sample": {
+    "n": 100,
+    "seed": 20260906
+  },
+  "model": "clm/claude-opus-5",
+  "judge_prompt_version": "longmemeval-official-v1",
+  "stack": {
+    "database": "sqlite (lite mode)",
+    "vector_store": "chroma local (in-process)",
+    "embeddings": "jina-embeddings-v5-text-small",
+    "retriever": "MemoryRetriever (vector + salience + entity boost + rerank)",
+    "recall_top_k": 15
+  },
+  "mean": 0.49,
+  "questions": 100,
+  "correct": 49,
+  "errors": 0,
+  "wilson_95": [
+    0.394,
+    0.587
+  ],
+  "by_type": {
+    "single-session-user": {
+      "n": 13,
+      "correct": 12
+    },
+    "multi-session": {
+      "n": 26,
+      "correct": 8
+    },
+    "single-session-preference": {
+      "n": 8,
+      "correct": 2
+    },
+    "temporal-reasoning": {
+      "n": 22,
+      "correct": 6
+    },
+    "knowledge-update": {
+      "n": 17,
+      "correct": 7
+    },
+    "single-session-assistant": {
+      "n": 14,
+      "correct": 14
+    }
+  },
+  "comparison_to_baseline": null,
+  "total_seconds": 12309.2,
+  "timestamp_utc": "2026-09-07T10:39:36.464702+00:00",
+  "per_question": [
+    {
+      "question_id": "118b2229",
+      "question_type": "single-session-user",
+      "correct": true,
+      "response": "Based on your previous mention, your daily commute takes 45 minutes each way, so that's a total of 90 minutes round trip.",
+      "memories_ingested": 187,
+      "memories_recalled": 15,
+      "seconds": 122.0,
+      "error": null
+    },
+    {
+      "question_id": "58bf7951",
+      "question_type": "single-session-user",
+      "correct": true,
+      "response": "You attended a production of The Glass Menagerie.",
+      "memories_ingested": 181,
+      "memories_recalled": 15,
+      "seconds": 110.1,
+      "error": null
+    },
+    {
+      "question_id": "6f9b354f",
+      "question_type": "single-session-user",
+      "correct": true,
+      "response": "Based on the memories, you repainted your bedroom walls a lighter shade of gray.",
+      "memories_ingested": 189,
+      "memories_recalled": 15,
+      "seconds": 132.6,
+      "error": null
+    },
+    {
+      "question_id": "7527f7e2",
+      "question_type": "single-session-user",
+      "correct": true,
+      "response": "You spent $800 on a designer handbag.",
+      "memories_ingested": 183,
+      "memories_recalled": 15,
+      "seconds": 100.8,
+      "error": null
+    },
+    {
+      "question_id": "8ebdbe50",
+      "question_type": "single-session-user",
+      "correct": true,
+      "response": "You completed a certification in Data Science last month.",
+      "memories_ingested": 188,
+      "memories_recalled": 15,
+      "seconds": 132.1,
+      "error": null
+    },
+    {
+      "question_id": "a06e4cfe",
+      "question_type": "single-session-user",
+      "correct": true,
+      "response": "Based on the memories provided, your preferred gin-to-vermouth ratio for a classic gin martini is 3:1, with a dash of citrus bitters.",
+      "memories_ingested": 186,
+      "memories_recalled": 15,
+      "seconds": 150.2,
+      "error": null
+    },
+    {
+      "question_id": "8550ddae",
+      "question_type": "single-session-user",
+      "correct": true,
+      "response": "Based on the memories, you tried a lavender gin fizz recipe last weekend, but it didn't turn out as expected because you didn't have simple syrup and had to improvise with honey and water instead.",
+      "memories_ingested": 183,
+      "memories_recalled": 15,
+      "seconds": 108.5,
+      "error": null
+    },
+    {
+      "question_id": "86b68151",
+      "question_type": "single-session-user",
+      "correct": true,
+      "response": "You bought your new bookshelf from IKEA.",
+      "memories_ingested": 181,
+      "memories_recalled": 15,
+      "seconds": 112.7,
+      "error": null
+    },
+    {
+      "question_id": "ec81a493",
+      "question_type": "single-session-user",
+      "correct": true,
+      "response": "Based on the memory provided, your favorite artist's debut album was a limited edition of only 500 copies released worldwide.",
+      "memories_ingested": 193,
+      "memories_recalled": 15,
+      "seconds": 125.3,
+      "error": null
+    },
+    {
+      "question_id": "001be529",
+      "question_type": "single-session-user",
+      "correct": true,
+      "response": "According to your previous message, you waited **over a year** for your asylum application to be approved.",
+      "memories_ingested": 186,
+      "memories_recalled": 15,
+      "seconds": 125.2,
+      "error": null
+    },
+    {
+      "question_id": "c19f7a0b",
+      "question_type": "single-session-user",
+      "correct": false,
+      "response": "I have no information about that.",
+      "memories_ingested": 185,
+      "memories_recalled": 15,
+      "seconds": 144.8,
+      "error": null
+    },
+    {
+      "question_id": "29f2956b",
+      "question_type": "single-session-user",
+      "correct": true,
+      "response": "Based on the memories, you dedicate 30 minutes daily to practicing guitar.",
+      "memories_ingested": 175,
+      "memories_recalled": 15,
+      "seconds": 98.5,
+      "error": null
+    },
+    {
+      "question_id": "29f2956b_abs",
+      "question_type": "single-session-user",
+      "correct": true,
+      "response": "I have no information about that. The memories show you're interested in learning violin and received advice to start with short 5-10 minute sessions, but they don't mention your actual current violin practice duration.",
+      "memories_ingested": 187,
+      "memories_recalled": 15,
+      "seconds": 104.4,
+      "error": null
+    },
+    {
+      "question_id": "e831120c",
+      "question_type": "multi-session",
+      "correct": true,
+      "response": "Based on the memories, it took you about **two weeks** to watch all 22 MCU movies, and about **a week and a half** to watch the main Star Wars films\u2014so roughly three and a half weeks total for both marathons.",
+      "memories_ingested": 174,
+      "memories_recalled": 15,
+      "seconds": 116.6,
+      "error": null
+    },
+    {
+      "question_id": "gpt4_d84a3211",
+      "question_type": "multi-session",
+      "correct": false,
+      "response": "Based on the information in the memories, you spent $65 on bike-related expenses this year: $25 for a chain replacement and $40 for new bike lights installed during your April 20th tune-up.",
+      "memories_ingested": 181,
+      "memories_recalled": 15,
+      "seconds": 189.9,
+      "error": null
+    },
+    {
+      "question_id": "gpt4_31ff4165",
+      "question_type": "multi-session",
+      "correct": false,
+      "response": "Based on your previous mentions, you use at least **5 health-related devices/apps**: a fitness app, a Fitbit Versa 3, an Apple Watch, the Clue app for menstrual cycle tracking, and an energy usage tracking app.",
+      "memories_ingested": 176,
+      "memories_recalled": 15,
+      "seconds": 141.6,
+      "error": null
+    },
+    {
+      "question_id": "60bf93ed",
+      "question_type": "multi-session",
+      "correct": false,
+      "response": "I have no information about that.",
+      "memories_ingested": 184,
+      "memories_recalled": 15,
+      "seconds": 132.4,
+      "error": null
+    },
+    {
+      "question_id": "9d25d4e0",
+      "question_type": "multi-session",
+      "correct": false,
+      "response": "I have no information about that. The memories discuss various jewelry pieces you've mentioned (engagement ring, silver \"sister\" necklace, vintage pearl earrings, emerald earrings, and grandma's diamond earrings), but they don't provide specific acquisition dates or a complete list of pieces acquired in the last two months.",
+      "memories_ingested": 186,
+      "memories_recalled": 15,
+      "seconds": 121.0,
+      "error": null
+    },
+    {
+      "question_id": "129d1232",
+      "question_type": "multi-session",
+      "correct": false,
+      "response": "Based on the information in your memories, you raised $250 for the \"Walk for a Cure\" charity walk and $5,000 during the Bike-a-Thon for Cancer Research, for a combined total of at least $5,250 from those two events. However, I don't have information about your total fundraising across all charity events you've participated in.",
+      "memories_ingested": 174,
+      "memories_recalled": 15,
+      "seconds": 123.5,
+      "error": null
+    },
+    {
+      "question_id": "60472f9c",
+      "question_type": "multi-session",
+      "correct": false,
+      "response": "Based on the project details you shared, you were working on 5 projects simultaneously (excluding your thesis): Marketing Campaign, Website Update, Sales Report, Product Launch, and Team Meeting.",
+      "memories_ingested": 169,
+      "memories_recalled": 15,
+      "seconds": 111.3,
+      "error": null
+    },
+    {
+      "question_id": "5a7937c8",
+      "question_type": "multi-session",
+      "correct": false,
+      "response": "I have no information about that. Based on the memories provided, I can only confirm one specific faith-related activity in December: your Bible study group on December 17th. The memories do not contain a comprehensive log of all your December faith-related activities.",
+      "memories_ingested": 173,
+      "memories_recalled": 15,
+      "seconds": 115.6,
+      "error": null
+    },
+    {
+      "question_id": "81507db6",
+      "question_type": "multi-session",
+      "correct": false,
+      "response": "Based on the information provided, you attended one graduation ceremony in the past three months \u2014 your friend's sister's law school graduation at the Auditorium Theatre in Chicago.",
+      "memories_ingested": 196,
+      "memories_recalled": 15,
+      "seconds": 151.3,
+      "error": null
+    },
+    {
+      "question_id": "88432d0a_abs",
+      "question_type": "multi-session",
+      "correct": true,
+      "response": "I have no information about that.",
+      "memories_ingested": 178,
+      "memories_recalled": 15,
+      "seconds": 130.8,
+      "error": null
+    },
+    {
+      "question_id": "60bf93ed_abs",
+      "question_type": "multi-session",
+      "correct": true,
+      "response": "I have no information about that.",
+      "memories_ingested": 180,
+      "memories_recalled": 15,
+      "seconds": 109.3,
+      "error": null
+    },
+    {
+      "question_id": "0edc2aef",
+      "question_type": "single-session-preference",
+      "correct": false,
+      "response": "I have no information about specific hotel recommendations for Miami based on the provided memories.",
+      "memories_ingested": 190,
+      "memories_recalled": 15,
+      "seconds": 200.2,
+      "error": null
+    },
+    {
+      "question_id": "35a27287",
+      "question_type": "single-session-preference",
+      "correct": false,
+      "response": "I have no information about that.",
+      "memories_ingested": 186,
+      "memories_recalled": 15,
+      "seconds": 156.7,
+      "error": null
+    },
+    {
+      "question_id": "caf03d32",
+      "question_type": "single-session-preference",
+      "correct": false,
+      "response": "Based on the memories provided, here are some key tips for getting better results with your slow cooker:\n\n1. **Don't overfill** - Leave about 1-2 inches of space between ingredients and the top of the slow cooker to allow for expansion.\n\n2. **Brown the meat first** - Before adding meat to the slow cooker, brown it in a pan to enhance flavor and texture.\n\n3. **Taste and adjust** - Check the seasoning before serving and adjust as needed.\n\n4. **Read recipes carefully** - Make sure you understand in",
+      "memories_ingested": 179,
+      "memories_recalled": 15,
+      "seconds": 137.3,
+      "error": null
+    },
+    {
+      "question_id": "54026fce",
+      "question_type": "single-session-preference",
+      "correct": true,
+      "response": "Based on my earlier suggestions, here are some effective ways to stay connected with colleagues:\n\n1. **Virtual Coffee Breaks**: Schedule regular informal video calls for casual chats, just like around the water cooler.\n2. **Online Team Activities**: Organize virtual games or team-building exercises like trivia or online escape rooms.\n3. **Collaborative Projects**: Work on cross-departmental projects or join working groups to increase interactions.\n4. **Social Channels**: Create or join informal ",
+      "memories_ingested": 182,
+      "memories_recalled": 15,
+      "seconds": 129.0,
+      "error": null
+    },
+    {
+      "question_id": "1a1907b4",
+      "question_type": "single-session-preference",
+      "correct": false,
+      "response": "Based on our previous conversations, you seem to enjoy lavender-infused cocktails, citrus-forward drinks, and spicy-fruity combinations. For your get-together, I'd recommend trying the **Lavender Gin Fizz** if you want something light and floral, the **Triple Citrus Collins** for a refreshing citrus burst, or the **Spicy Pineapple Margarita** if you're in the mood for something with a kick.",
+      "memories_ingested": 191,
+      "memories_recalled": 15,
+      "seconds": 125.1,
+      "error": null
+    },
+    {
+      "question_id": "57f827a0",
+      "question_type": "single-session-preference",
+      "correct": false,
+      "response": "Great timing for a bedroom refresh! Based on previous conversations, here are some tips for rearranging your bedroom furniture:\n\n1. **Create a focal point** \u2013 Make your bed or a statement piece like the oak dresser the central focus of the room.\n\n2. **Leave breathing room** \u2013 Aim for at least 3-4 feet of clearance between furniture pieces to avoid a cramped feel.\n\n3. **Use the traffic path principle** \u2013 Imagine the path you'll take when entering and moving around the room, and arrange furniture ",
+      "memories_ingested": 189,
+      "memories_recalled": 15,
+      "seconds": 131.8,
+      "error": null
+    },
+    {
+      "question_id": "d6233ab6",
+      "question_type": "single-session-preference",
+      "correct": true,
+      "response": "Based on the memories provided, I don't have specific information about your high school reunion. However, your past conversations suggest you've been actively interested in reconnecting with people from your past and have found value in attending alumni events. A high school reunion could be a great opportunity to rekindle old friendships and create new memories, similar to the college reunion you were considering attending.",
+      "memories_ingested": 180,
+      "memories_recalled": 15,
+      "seconds": 137.0,
+      "error": null
+    },
+    {
+      "question_id": "1c0ddc50",
+      "question_type": "single-session-preference",
+      "correct": false,
+      "response": "Based on your interests, you could try listening to audiobooks or podcasts during your commute\u2014 you've already enjoyed \"The 7 Habits of Highly Effective People\" and \"How I Built This.\" You might also use language learning apps like Duolingo, catch up on news, or take notes to review before meetings.",
+      "memories_ingested": 183,
+      "memories_recalled": 15,
+      "seconds": 120.1,
+      "error": null
+    },
+    {
+      "question_id": "d3ab962e",
+      "question_type": "multi-session",
+      "correct": false,
+      "response": "I have no information about that.",
+      "memories_ingested": 188,
+      "memories_recalled": 15,
+      "seconds": 107.0,
+      "error": null
+    },
+    {
+      "question_id": "4f54b7c9",
+      "question_type": "multi-session",
+      "correct": false,
+      "response": "Based on the memories, you personally acquired **4 antique items from family members**: a Victorian-era wooden dresser from your grandmother's estate, your great-grandmother's antique locket, an antique tea set from your cousin Rachel, and a vintage typewriter that belonged to your dad. Your siblings received the vintage sewing machine and silverware from the same estate.",
+      "memories_ingested": 168,
+      "memories_recalled": 15,
+      "seconds": 130.8,
+      "error": null
+    },
+    {
+      "question_id": "51c32626",
+      "question_type": "multi-session",
+      "correct": false,
+      "response": "I have no information about the specific date when you submitted your research paper on sentiment analysis. I only know from memory [10] that you mentioned submitting a research paper on sentiment analysis to ACL, but the submission date was not specified.",
+      "memories_ingested": 190,
+      "memories_recalled": 15,
+      "seconds": 114.8,
+      "error": null
+    },
+    {
+      "question_id": "f35224e0",
+      "question_type": "multi-session",
+      "correct": false,
+      "response": "I have no information about the total number of episodes you've listened to from those specific podcasts. The memories indicate you've finished episode 12 of \"My Favorite Murder\" and at least 15 episodes of \"How I Built This\" before completing the entire series, but they don't provide exact totals for both podcasts combined.",
+      "memories_ingested": 186,
+      "memories_recalled": 15,
+      "seconds": 131.9,
+      "error": null
+    },
+    {
+      "question_id": "4bc144e2",
+      "question_type": "multi-session",
+      "correct": true,
+      "response": "Based on your expenses, you spent **$15 on a car wash** (on February 3rd) and **$50 on a parking ticket** (on January 5th near your work), for a combined total of **$65**.",
+      "memories_ingested": 185,
+      "memories_recalled": 15,
+      "seconds": 106.3,
+      "error": null
+    },
+    {
+      "question_id": "91b15a6e",
+      "question_type": "multi-session",
+      "correct": true,
+      "response": "Based on the memories provided, the vintage diamond necklace was appraised at $5,000, while the antique vanity was purchased for $150, and you've expressed confidence it's worth at least that amount after restoration. However, the memories don't specify what minimum price you could expect to receive when actually selling these items, as the final sale price would depend on factors like buyer interest, market conditions, and negotiation.",
+      "memories_ingested": 176,
+      "memories_recalled": 15,
+      "seconds": 143.1,
+      "error": null
+    },
+    {
+      "question_id": "3fe836c9",
+      "question_type": "multi-session",
+      "correct": true,
+      "response": "The pre-approval amount was $350,000, and the final sale price was $325,000, so the pre-approval amount was $25,000 more than the final sale price.",
+      "memories_ingested": 180,
+      "memories_recalled": 15,
+      "seconds": 111.0,
+      "error": null
+    },
+    {
+      "question_id": "6c49646a",
+      "question_type": "multi-session",
+      "correct": false,
+      "response": "I have no information about that.",
+      "memories_ingested": 186,
+      "memories_recalled": 15,
+      "seconds": 108.3,
+      "error": null
+    },
+    {
+      "question_id": "61f8c8f8",
+      "question_type": "multi-session",
+      "correct": false,
+      "response": "Based on the memories, you improved by **17 minutes and 48 seconds** - from your previous year's 5K time of 45 minutes to your personal best of 27 minutes and 12 seconds.",
+      "memories_ingested": 194,
+      "memories_recalled": 15,
+      "seconds": 114.0,
+      "error": null
+    },
+    {
+      "question_id": "d6062bb9",
+      "question_type": "multi-session",
+      "correct": false,
+      "response": "Based on the information in your memories, your most popular YouTube video (the watercolor painting tutorial) has 2,500 views, and your most popular TikTok video (Luna chasing a laser pointer) has 1,456 views, giving you a combined total of 3,956 views across both platforms.",
+      "memories_ingested": 189,
+      "memories_recalled": 15,
+      "seconds": 141.2,
+      "error": null
+    },
+    {
+      "question_id": "c18a7dc8",
+      "question_type": "multi-session",
+      "correct": false,
+      "response": "I have no information about when you graduated from college.",
+      "memories_ingested": 187,
+      "memories_recalled": 15,
+      "seconds": 126.8,
+      "error": null
+    },
+    {
+      "question_id": "a3332713",
+      "question_type": "multi-session",
+      "correct": true,
+      "response": "Based on the memories, you spent **$200** on gifts for your coworker and brother: $100 for your brother's graduation gift and $100 for your coworker's baby shower gift.",
+      "memories_ingested": 178,
+      "memories_recalled": 15,
+      "seconds": 118.7,
+      "error": null
+    },
+    {
+      "question_id": "f0e564bc",
+      "question_type": "multi-session",
+      "correct": false,
+      "response": "Based on the information in your memories, you spent $500 on the Gucci designer handbag and $500 on high-end skincare products during the Nordstrom anniversary sale, for a total of $1,000.",
+      "memories_ingested": 186,
+      "memories_recalled": 15,
+      "seconds": 143.9,
+      "error": null
+    },
+    {
+      "question_id": "8cf4d046",
+      "question_type": "multi-session",
+      "correct": false,
+      "response": "I have no information about that.",
+      "memories_ingested": 183,
+      "memories_recalled": 15,
+      "seconds": 147.2,
+      "error": null
+    },
+    {
+      "question_id": "a96c20ee_abs",
+      "question_type": "multi-session",
+      "correct": true,
+      "response": "I have no information about which university you presented your poster at for your undergrad course research project.",
+      "memories_ingested": 194,
+      "memories_recalled": 15,
+      "seconds": 144.2,
+      "error": null
+    },
+    {
+      "question_id": "71017276",
+      "question_type": "temporal-reasoning",
+      "correct": false,
+      "response": "I have no information about that.",
+      "memories_ingested": 173,
+      "memories_recalled": 15,
+      "seconds": 130.4,
+      "error": null
+    },
+    {
+      "question_id": "gpt4_fa19884c",
+      "question_type": "temporal-reasoning",
+      "correct": true,
+      "response": "Based on the memories, you started playing along to your favorite songs on your old keyboard on March 25, 2023, and discovered a bluegrass band on March 31, 2023. That's **6 days** between those two events.",
+      "memories_ingested": 173,
+      "memories_recalled": 15,
+      "seconds": 121.4,
+      "error": null
+    },
+    {
+      "question_id": "gpt4_b5700ca9",
+      "question_type": "temporal-reasoning",
+      "correct": false,
+      "response": "Based on the memories provided, you attended the Maundy Thursday service at the Episcopal Church on April 6th, 2023. From that date to the current conversation date of January 10th, 2024, that would be approximately 279 days ago.",
+      "memories_ingested": 176,
+      "memories_recalled": 15,
+      "seconds": 122.1,
+      "error": null
+    },
+    {
+      "question_id": "gpt4_61e13b3c",
+      "question_type": "temporal-reasoning",
+      "correct": true,
+      "response": "Approximately 3 weeks passed between selling baked goods at the Farmers' Market on February 26, 2023, and participating in the Spring Fling Market on March 21, 2023.",
+      "memories_ingested": 177,
+      "memories_recalled": 15,
+      "seconds": 121.7,
+      "error": null
+    },
+    {
+      "question_id": "6e984301",
+      "question_type": "temporal-reasoning",
+      "correct": true,
+      "response": "You had been taking sculpting classes for about 3 weeks when you got your own set of sculpting tools.",
+      "memories_ingested": 192,
+      "memories_recalled": 15,
+      "seconds": 169.8,
+      "error": null
+    },
+    {
+      "question_id": "8077ef71",
+      "question_type": "temporal-reasoning",
+      "correct": false,
+      "response": "I have no information about that. The memories mention you attended networking events like TechCon and industry conferences in New York and Chicago, but no specific dates were provided for when these events occurred.",
+      "memories_ingested": 184,
+      "memories_recalled": 15,
+      "seconds": 132.9,
+      "error": null
+    },
+    {
+      "question_id": "gpt4_74aed68e",
+      "question_type": "temporal-reasoning",
+      "correct": false,
+      "response": "Based on the memories, both events occurred on the same date (March 15, 2023), so zero days passed between replacing the spark plugs and participating in the Turbocharged Tuesdays auto racing event.",
+      "memories_ingested": 185,
+      "memories_recalled": 15,
+      "seconds": 129.6,
+      "error": null
+    },
+    {
+      "question_id": "gpt4_98f46fc6",
+      "question_type": "temporal-reasoning",
+      "correct": false,
+      "response": "I have no information about you participating in a charity gala. The memories only mention your participation in charity walks/runs (including the Walk for a Cure and a 5K), a charity dinner at a local restaurant, and hosting a charity bake sale for the women's shelter.",
+      "memories_ingested": 188,
+      "memories_recalled": 15,
+      "seconds": 131.5,
+      "error": null
+    },
+    {
+      "question_id": "eac54adc",
+      "question_type": "temporal-reasoning",
+      "correct": true,
+      "response": "Based on the memories provided, you launched your website on February 10, 2023, and signed a contract with your first client on March 1, 2023 \u2014 meaning you launched your website 19 days before signing your first client.",
+      "memories_ingested": 185,
+      "memories_recalled": 15,
+      "seconds": 121.2,
+      "error": null
+    },
+    {
+      "question_id": "gpt4_85da3956",
+      "question_type": "temporal-reasoning",
+      "correct": false,
+      "response": "I have no information about that.",
+      "memories_ingested": 173,
+      "memories_recalled": 15,
+      "seconds": 114.5,
+      "error": null
+    },
+    {
+      "question_id": "gpt4_7bc6cf22",
+      "question_type": "temporal-reasoning",
+      "correct": false,
+      "response": "Based on memory [8], you read the March 15th issue of The New Yorker on March 20, 2023 (the same day you mentioned it). I don't have access to today's date, so I cannot calculate the exact number of days ago that was from your current perspective.",
+      "memories_ingested": 187,
+      "memories_recalled": 15,
+      "seconds": 153.6,
+      "error": null
+    },
+    {
+      "question_id": "gpt4_76048e76",
+      "question_type": "temporal-reasoning",
+      "correct": false,
+      "response": "Based on the information in your memories, you took care of your car first in February. Specifically, you got a car wash on February 3rd, and then had your car serviced (air filter replacement) on February 10th. There was no mention of bike maintenance in February \u2014 your bike was last serviced on January 25th.",
+      "memories_ingested": 186,
+      "memories_recalled": 15,
+      "seconds": 122.8,
+      "error": null
+    },
+    {
+      "question_id": "0bb5a684",
+      "question_type": "temporal-reasoning",
+      "correct": true,
+      "response": "Based on the memories provided, you attended the workshop on \"Effective Communication in the Workplace\" on January 10th, and your team meeting was scheduled for January 17th \u2014 that's 7 days before the meeting.",
+      "memories_ingested": 188,
+      "memories_recalled": 15,
+      "seconds": 113.2,
+      "error": null
+    },
+    {
+      "question_id": "08f4fc43",
+      "question_type": "temporal-reasoning",
+      "correct": false,
+      "response": "I have no information about an Ash Wednesday service at a cathedral. The memories provided contain information about a Sunday mass at St. Mary's Church on January 10th, 2023, and Easter Sunday on April 17th, but no mention of an Ash Wednesday service.",
+      "memories_ingested": 188,
+      "memories_recalled": 15,
+      "seconds": 138.5,
+      "error": null
+    },
+    {
+      "question_id": "gpt4_385a5000",
+      "question_type": "temporal-reasoning",
+      "correct": false,
+      "response": "I have no information about when the tomato seeds were started. The memories only indicate that marigold seeds arrived and germinated around March 3rd, but they do not specify when the tomato seeds were started.",
+      "memories_ingested": 180,
+      "memories_recalled": 15,
+      "seconds": 150.5,
+      "error": null
+    },
+    {
+      "question_id": "gpt4_65aabe59",
+      "question_type": "temporal-reasoning",
+      "correct": false,
+      "response": "Based on the memories, you set up the **mesh network system first** (mentioned around April 2023), and then set up the **smart thermostat later** (mentioned around May 2023).",
+      "memories_ingested": 182,
+      "memories_recalled": 15,
+      "seconds": 145.3,
+      "error": null
+    },
+    {
+      "question_id": "982b5123",
+      "question_type": "temporal-reasoning",
+      "correct": false,
+      "response": "I have no information about that.",
+      "memories_ingested": 186,
+      "memories_recalled": 15,
+      "seconds": 139.5,
+      "error": null
+    },
+    {
+      "question_id": "b9cfe692",
+      "question_type": "temporal-reasoning",
+      "correct": true,
+      "response": "Based on your earlier mentions, it took you about two and a half weeks to finish \"The Seven Husbands of Evelyn Hugo\" and approximately three weeks to finish \"The Nightingale\", which totals roughly five and a half weeks combined.",
+      "memories_ingested": 184,
+      "memories_recalled": 15,
+      "seconds": 120.0,
+      "error": null
+    },
+    {
+      "question_id": "gpt4_2c50253f",
+      "question_type": "temporal-reasoning",
+      "correct": false,
+      "response": "Based on the memories, you wake up at 6:30 AM on Tuesdays and Thursdays.",
+      "memories_ingested": 186,
+      "memories_recalled": 15,
+      "seconds": 139.4,
+      "error": null
+    },
+    {
+      "question_id": "gpt4_0a05b494",
+      "question_type": "temporal-reasoning",
+      "correct": false,
+      "response": "Based on the memories, you met the tourist from Australia first. In memory [1], you mentioned meeting the Australian tourist \"last Thursday\" on your way to work, and that conversation took place before the farmer's market discussion in memory [2] which is dated May 21, 2023.",
+      "memories_ingested": 180,
+      "memories_recalled": 15,
+      "seconds": 148.3,
+      "error": null
+    },
+    {
+      "question_id": "gpt4_2f584639",
+      "question_type": "temporal-reasoning",
+      "correct": false,
+      "response": "Based on the memories, you bought the silver necklace for your sister first \u2014 you got it at the Holiday Market in March 2023, along with earrings. The photo album for your mom was being discussed later, in May 2023.",
+      "memories_ingested": 175,
+      "memories_recalled": 15,
+      "seconds": 176.7,
+      "error": null
+    },
+    {
+      "question_id": "gpt4_93159ced_abs",
+      "question_type": "temporal-reasoning",
+      "correct": false,
+      "response": "I have no information about that.",
+      "memories_ingested": 177,
+      "memories_recalled": 15,
+      "seconds": 135.2,
+      "error": null
+    },
+    {
+      "question_id": "6aeb4375",
+      "question_type": "knowledge-update",
+      "correct": false,
+      "response": "Based on the memories, you have tried **three** Korean restaurants in your city.",
+      "memories_ingested": 175,
+      "memories_recalled": 15,
+      "seconds": 132.4,
+      "error": null
+    },
+    {
+      "question_id": "ce6d2d27",
+      "question_type": "knowledge-update",
+      "correct": true,
+      "response": "Based on the memories, you take a cocktail-making class on **Friday**.",
+      "memories_ingested": 187,
+      "memories_recalled": 15,
+      "seconds": 120.9,
+      "error": null
+    },
+    {
+      "question_id": "9ea5eabc",
+      "question_type": "knowledge-update",
+      "correct": false,
+      "response": "Based on your memories, your most recent family trip was a week-long road trip to the beach, where you drove for 7 hours and stayed in a cozy beach house.",
+      "memories_ingested": 172,
+      "memories_recalled": 15,
+      "seconds": 111.0,
+      "error": null
+    },
+    {
+      "question_id": "07741c44",
+      "question_type": "knowledge-update",
+      "correct": true,
+      "response": "Based on the memories, you initially keep your old sneakers under your bed for storage.",
+      "memories_ingested": 197,
+      "memories_recalled": 15,
+      "seconds": 156.8,
+      "error": null
+    },
+    {
+      "question_id": "08e075c7",
+      "question_type": "knowledge-update",
+      "correct": false,
+      "response": "According to your previous messages, you've been using your Fitbit Charge 3 for 6 months.",
+      "memories_ingested": 184,
+      "memories_recalled": 15,
+      "seconds": 120.0,
+      "error": null
+    },
+    {
+      "question_id": "5a4f22c0",
+      "question_type": "knowledge-update",
+      "correct": false,
+      "response": "According to your contact tracker spreadsheet, Rachel is currently listed as working at \"Old Company.\" However, this appears to be placeholder information you entered in your tracker, as this detail came from the spreadsheet template rather than verified current employment information.",
+      "memories_ingested": 188,
+      "memories_recalled": 15,
+      "seconds": 179.2,
+      "error": null
+    },
+    {
+      "question_id": "6a27ffc2",
+      "question_type": "knowledge-update",
+      "correct": false,
+      "response": "I have no information about that.",
+      "memories_ingested": 185,
+      "memories_recalled": 15,
+      "seconds": 111.5,
+      "error": null
+    },
+    {
+      "question_id": "22d2cb42",
+      "question_type": "knowledge-update",
+      "correct": true,
+      "response": "Based on your memories, your friend mentioned a music shop called \"Rhythm Central\" on Main St that has a good reputation for guitar servicing.",
+      "memories_ingested": 182,
+      "memories_recalled": 15,
+      "seconds": 120.7,
+      "error": null
+    },
+    {
+      "question_id": "eace081b",
+      "question_type": "knowledge-update",
+      "correct": false,
+      "response": "I have no information about where you are planning to stay for your birthday trip to Hawaii. The memories indicate you were considering beaches on Oahu for your birthday, but I don't have details about your specific accommodation plans for that trip.",
+      "memories_ingested": 190,
+      "memories_recalled": 15,
+      "seconds": 127.4,
+      "error": null
+    },
+    {
+      "question_id": "affe2881",
+      "question_type": "knowledge-update",
+      "correct": false,
+      "response": "Based on your previous messages, you've managed to spot 27 different species of birds in your local park.",
+      "memories_ingested": 181,
+      "memories_recalled": 15,
+      "seconds": 100.1,
+      "error": null
+    },
+    {
+      "question_id": "dfde3500",
+      "question_type": "knowledge-update",
+      "correct": true,
+      "response": "Based on the memories, you meet with Juan on **Wednesday evening**.",
+      "memories_ingested": 183,
+      "memories_recalled": 15,
+      "seconds": 102.9,
+      "error": null
+    },
+    {
+      "question_id": "69fee5aa",
+      "question_type": "knowledge-update",
+      "correct": false,
+      "response": "You have 37 pre-1920 American coins in your collection.",
+      "memories_ingested": 184,
+      "memories_recalled": 15,
+      "seconds": 101.6,
+      "error": null
+    },
+    {
+      "question_id": "7401057b",
+      "question_type": "knowledge-update",
+      "correct": false,
+      "response": "Based on the information from your previous conversations, you have accumulated enough points for a single free night's stay at any Hilton property. Since you mentioned the Hilton Lake Las Vegas Resort is a Category 5 hotel, a standard room reward night would typically require around 40,000 points.",
+      "memories_ingested": 176,
+      "memories_recalled": 15,
+      "seconds": 100.8,
+      "error": null
+    },
+    {
+      "question_id": "06db6396",
+      "question_type": "knowledge-update",
+      "correct": true,
+      "response": "Based on your memories, you've completed 5 projects since starting painting classes.",
+      "memories_ingested": 187,
+      "memories_recalled": 15,
+      "seconds": 99.0,
+      "error": null
+    },
+    {
+      "question_id": "3ba21379",
+      "question_type": "knowledge-update",
+      "correct": false,
+      "response": "Based on the memories, you're currently working on multiple vehicle models. Your most recently discussed active project appears to be your **Nissan GT-R**, which you drive for drifting events at Sonoma Raceway. You've also been building a **Ford Mustang Shelby GT350R** scale model (with discussions about dashboard and seatbelt details), and you have an **F-15E Strike Eagle** diorama project in progress featuring a desert landscape.",
+      "memories_ingested": 172,
+      "memories_recalled": 15,
+      "seconds": 116.4,
+      "error": null
+    },
+    {
+      "question_id": "9bbe84a2",
+      "question_type": "knowledge-update",
+      "correct": true,
+      "response": "Your previous goal was to reach level 100 in Apex Legends before the end of the year, which you later updated to level 150.",
+      "memories_ingested": 180,
+      "memories_recalled": 15,
+      "seconds": 87.5,
+      "error": null,
+      "resumed": true
+    },
+    {
+      "question_id": "6aeb4375_abs",
+      "question_type": "knowledge-update",
+      "correct": true,
+      "response": "I have no information about that.",
+      "memories_ingested": 185,
+      "memories_recalled": 15,
+      "seconds": 82.9,
+      "error": null,
+      "resumed": true
+    },
+    {
+      "question_id": "e9327a54",
+      "question_type": "single-session-assistant",
+      "correct": true,
+      "response": "The unique dessert shop with the giant milkshakes was The Sugar Factory, located at Icon Park.",
+      "memories_ingested": 182,
+      "memories_recalled": 15,
+      "seconds": 102.0,
+      "error": null,
+      "resumed": true
+    },
+    {
+      "question_id": "f523d9fe",
+      "question_type": "single-session-assistant",
+      "correct": true,
+      "response": "Yes, you mentioned the show \"Doc Martin\" as an example. You said that show went down after a while, and you only had access to the last season.",
+      "memories_ingested": 183,
+      "memories_recalled": 15,
+      "seconds": 93.2,
+      "error": null,
+      "resumed": true
+    },
+    {
+      "question_id": "fea54f57",
+      "question_type": "single-session-assistant",
+      "correct": true,
+      "response": "Based on our previous conversation, I said \"Evolution\" best exemplified the band's growth and development as artists on the Fifth Album. I noted it features more sophisticated instrumentation with electronic and synthetic sounds, more complex introspective lyrics about personal growth, and represents a departure from their earlier straightforward pop rock sound toward a more experimental, genre-bending approach.",
+      "memories_ingested": 184,
+      "memories_recalled": 15,
+      "seconds": 84.6,
+      "error": null,
+      "resumed": true
+    },
+    {
+      "question_id": "1d4da289",
+      "question_type": "single-session-assistant",
+      "correct": true,
+      "response": "Based on our previous conversation, the two-factor authentication methods I mentioned were biometric authentication (such as fingerprint or facial recognition) and one-time passwords (OTP), which are typically sent via SMS or generated by an authenticator app.",
+      "memories_ingested": 193,
+      "memories_recalled": 15,
+      "seconds": 97.3,
+      "error": null,
+      "resumed": true
+    },
+    {
+      "question_id": "2bf43736",
+      "question_type": "single-session-assistant",
+      "correct": true,
+      "response": "Based on our previous conversation, the chapter that discusses vocal prayer and meditation in Tanqueray's Spiritual Life treatise is **Chapter 4 of Book 1 of the Second Part**, titled \"Vocal Prayer and Meditation.\"",
+      "memories_ingested": 187,
+      "memories_recalled": 15,
+      "seconds": 91.6,
+      "error": null,
+      "resumed": true
+    },
+    {
+      "question_id": "d596882b",
+      "question_type": "single-session-assistant",
+      "correct": true,
+      "response": "Based on our previous conversation, the vegan eatery with multiple locations throughout New York City that I recommended is **By Chloe**. They offer vegan burgers, salads, pastas, and baked goods at their various locations throughout the city.",
+      "memories_ingested": 184,
+      "memories_recalled": 15,
+      "seconds": 98.3,
+      "error": null,
+      "resumed": true
+    },
+    {
+      "question_id": "51b23612",
+      "question_type": "single-session-assistant",
+      "correct": true,
+      "response": "Yes, the Soviet cartoon I mentioned was **\"Nu, pogodi!\"** (translated as \"Well, Just You Wait!\"). It was a popular Soviet animated series that used humor and satire to mock Western culture and promote the Soviet Union as superior. The show featured a cat and hare in comedic situations that often depicted the West in a unfavorable light.",
+      "memories_ingested": 177,
+      "memories_recalled": 15,
+      "seconds": 88.4,
+      "error": null,
+      "resumed": true
+    },
+    {
+      "question_id": "8b9d4367",
+      "question_type": "single-session-assistant",
+      "correct": true,
+      "response": "The company is **Jaipur Rugs**, which employs over 40,000 people in the rug-manufacturing industry and provides training and employment opportunities to rural women.",
+      "memories_ingested": 185,
+      "memories_recalled": 15,
+      "seconds": 102.4,
+      "error": null,
+      "resumed": true
+    },
+    {
+      "question_id": "4388e9dd",
+      "question_type": "single-session-assistant",
+      "correct": true,
+      "response": "Andy was wearing an untidy, stained white shirt.",
+      "memories_ingested": 172,
+      "memories_recalled": 15,
+      "seconds": 92.8,
+      "error": null,
+      "resumed": true
+    },
+    {
+      "question_id": "4baee567",
+      "question_type": "single-session-assistant",
+      "correct": true,
+      "response": "The Chiefs played the Jaguars 12 times at Arrowhead Stadium, with the Chiefs winning 10 of those games.",
+      "memories_ingested": 175,
+      "memories_recalled": 15,
+      "seconds": 89.1,
+      "error": null,
+      "resumed": true
+    },
+    {
+      "question_id": "28bcfaac",
+      "question_type": "single-session-assistant",
+      "correct": true,
+      "response": "MusicTheory.net was the website I recommended for free lessons and exercises on music theory, covering topics such as rhythm, chords, and scales.",
+      "memories_ingested": 184,
+      "memories_recalled": 15,
+      "seconds": 94.5,
+      "error": null,
+      "resumed": true
+    },
+    {
+      "question_id": "16c90bf4",
+      "question_type": "single-session-assistant",
+      "correct": true,
+      "response": "I specifically recommended a **pilsner or lager** for the Seco de Cordero, as the light-to-medium body helps avoid overpowering the lamb and spices. I also suggested using a local beer from Ancash for a more authentic touch.",
+      "memories_ingested": 190,
+      "memories_recalled": 15,
+      "seconds": 95.7,
+      "error": null,
+      "resumed": true
+    },
+    {
+      "question_id": "eaca4986",
+      "question_type": "single-session-assistant",
+      "correct": true,
+      "response": "The chord progression for the chorus in the second, more romantic song was: **C D E F G A B A G F E D C**.",
+      "memories_ingested": 185,
+      "memories_recalled": 15,
+      "seconds": 99.1,
+      "error": null,
+      "resumed": true
+    },
+    {
+      "question_id": "65240037",
+      "question_type": "single-session-assistant",
+      "correct": true,
+      "response": "Based on the information provided, the recommended dilution ratio for tea tree oil is **1:10** (one part tea tree oil to ten parts carrier oil). This applies when using it for skin conditions like acne, scars, dark spots, scalp conditions like dandruff, or fungal infections like athlete's foot.",
+      "memories_ingested": 184,
+      "memories_recalled": 15,
+      "seconds": 94.1,
+      "error": null,
+      "resumed": true
+    }
+  ],
+  "resumed": {
+    "questions": 16,
+    "reason": "transient embedding-provider rate limits near the end of the original run (recalled=0); re-ran with the same config once the provider recovered",
+    "timestamp_utc": "2026-09-07T11:28:03.189603+00:00"
+  }
+}

@@ -435,6 +435,18 @@ async def main_async(args) -> int:
             "delta": round(mean - baseline["mean"], 3) if scored else None,
         }
 
+    # Wilson 95% score interval — the statistics-grade run reports it
+    wilson = None
+    if scored:
+        import math as _math
+
+        n_s, p = len(scored), correct / len(scored)
+        z = 1.96
+        denom = 1 + z * z / n_s
+        center = (p + z * z / (2 * n_s)) / denom
+        half = z * _math.sqrt(p * (1 - p) / n_s + z * z / (4 * n_s * n_s)) / denom
+        wilson = [round(center - half, 3), round(center + half, 3)]
+
     payload = {
         "benchmark": "longmemeval_s",
         "run_kind": "orivory_stack",
@@ -462,6 +474,7 @@ async def main_async(args) -> int:
         "questions": len(scored),
         "correct": correct,
         "errors": len(errors),
+        "wilson_95": wilson,
         "by_type": by_type,
         "comparison_to_baseline": comparison,
         "total_seconds": total,
@@ -469,11 +482,14 @@ async def main_async(args) -> int:
         "per_question": records,
     }
     chunking = "session_level" if args.session else "per_turn"
-    out = ROOT / (
-        "eval/benchmarks/results/longmemeval_s_system.json"
-        if chunking == "per_turn"
-        else "eval/benchmarks/results/longmemeval_s_system_session.json"
-    )
+    if args.n >= 100:
+        out = ROOT / "eval/benchmarks/results/longmemeval_s_system_n100.json"
+    else:
+        out = ROOT / (
+            "eval/benchmarks/results/longmemeval_s_system.json"
+            if chunking == "per_turn"
+            else "eval/benchmarks/results/longmemeval_s_system_session.json"
+        )
     out.write_text(json.dumps(payload, indent=2))
     print(f"\nSYSTEM mean: {mean:.3f} ({correct}/{len(scored)}, errors={len(errors)})")
     if comparison:

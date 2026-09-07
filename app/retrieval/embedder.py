@@ -18,6 +18,7 @@ def __getattr__(name):
 
 _async_client: AsyncOpenAI | None = None
 _sync_client: OpenAI | None = None
+_local_embed_fn = None  # chromadb ONNX MiniLM (USE_LOCAL_EMBEDDINGS)
 
 
 def _get_async_client() -> AsyncOpenAI:
@@ -105,7 +106,11 @@ async def _embed_with_jina(texts: list[str]) -> list[list[float]]:
 
         return embeddings
     except httpx.HTTPStatusError as e:
-        log.error("Jina API error", status_code=e.response.status_code, detail=e.response.text)
+        log.error(
+            "Jina API error status=%s detail=%s",
+            e.response.status_code,
+            e.response.text[:200],
+        )
         raise ValueError(f"Jina API error: {e}") from e
     except Exception as e:
         log.error("Jina embedding failed", exc_info=True)
@@ -143,17 +148,39 @@ def _embed_sync_with_jina(texts: list[str]) -> list[list[float]]:
 
         return embeddings
     except httpx.HTTPStatusError as e:
-        log.error("Jina API error", status_code=e.response.status_code, detail=e.response.text)
+        log.error(
+            "Jina API error status=%s detail=%s",
+            e.response.status_code,
+            e.response.text[:200],
+        )
         raise ValueError(f"Jina API error: {e}") from e
     except Exception as e:
         log.error("Jina embedding failed (sync)", exc_info=True)
         raise ValueError(f"Failed to get Jina embeddings: {e}") from e
 
 
+def _embed_with_local(texts: list[str]) -> list[list[float]]:
+    """Embed with chromadb's bundled ONNX MiniLM — fully local, no API key.
+
+    384-dim vectors. Chosen explicitly via USE_LOCAL_EMBEDDINGS=true (or
+    automatically when Jina/OpenAI are unconfigured): keeps lite mode and
+    benchmarks self-contained and free. Different dim than Jina/OpenAI —
+    fine for a fresh collection, do NOT mix backends in one store.
+    """
+    global _local_embed_fn
+    if _local_embed_fn is None:
+        import chromadb.utils.embedding_functions as ef
+
+        _local_embed_fn = ef.ONNXMiniLM_L6_V2()
+    return [list(map(float, v)) for v in _local_embed_fn(texts)]
+
+
 async def embed_texts(texts: list[str]) -> list[list[float]]:
     if not texts:
         return []
 
+    if settings.USE_LOCAL_EMBEDDINGS:
+        return _embed_with_local(texts)
     if settings.USE_JINA_EMBEDDINGS and settings.JINA_API_KEY:
         return await _embed_with_jina(texts)
     else:
@@ -168,6 +195,8 @@ def embed_texts_sync(texts: list[str]) -> list[list[float]]:
     if not texts:
         return []
 
+    if settings.USE_LOCAL_EMBEDDINGS:
+        return _embed_with_local(texts)
     if settings.USE_JINA_EMBEDDINGS and settings.JINA_API_KEY:
         return _embed_sync_with_jina(texts)
     else:
