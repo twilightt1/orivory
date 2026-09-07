@@ -135,7 +135,7 @@ async def test_rerank_off_keeps_vector_order(recall_env, monkeypatch):
     )
     retr = MemoryRetriever(_FakeDB([decoy, relevant]), uid, semantic_rerank=False)
     resp = await retr.recall("when did my backpack arrive", top_k=2)
-    assert [str(m.id) for m in resp.results][0] == str(decoy.id)
+    assert next(str(m.id) for m in resp.results) == str(decoy.id)
 
 
 @pytest.mark.asyncio
