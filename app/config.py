@@ -109,6 +109,10 @@ class Settings(BaseSettings):
     JINA_API_KEY: str = ""
     JINA_EMBED_MODEL: str = "jina-embeddings-v3"
     JINA_EMBED_DIMENSIONS: int = 1024
+    # Cross-encoder rerank inside MemoryRetriever: reorder the vector
+    # candidate pool by true query-document relevance (Jina reranker)
+    # before salience/decay modifiers. Off by default — per-deployment.
+    RETRIEVAL_SEMANTIC_RERANK: bool = False
     JINA_RERANKER_MODEL: str = "jina-reranker-v2-base-multilingual"
     JINA_RERANKER_TOP_N: int = 5
     # Use jina for embeddings instead of OpenAI
