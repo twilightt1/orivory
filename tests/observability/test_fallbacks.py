@@ -34,33 +34,3 @@ def test_snapshot_is_a_copy():
     snapshot = fallback_counts()
     snapshot["a"] = 999
     assert fallback_counts() == {"a": 1}
-
-
-def test_retrieval_agent_wires_vector_unavailable_counter():
-    """The chroma-down branch must count, not just log."""
-    import inspect
-
-    from app.agents import retrieval_agent
-
-    src = inspect.getsource(retrieval_agent.retrieval_agent)
-    assert "count_fallback" in src
-    assert "retrieval.vector_unavailable" in src
-
-
-def test_retrieval_agent_wires_rerank_counter():
-    import inspect
-
-    from app.agents import retrieval_agent
-
-    src = inspect.getsource(retrieval_agent.retrieval_agent)
-    assert "retrieval.rerank_failed" in src
-
-
-def test_crag_grading_failure_counts():
-    import inspect
-
-    from app.agents import crag_agent
-
-    src = inspect.getsource(crag_agent)
-    assert "count_fallback" in src
-    assert "crag.grading_failed" in src

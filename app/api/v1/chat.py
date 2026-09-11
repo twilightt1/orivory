@@ -230,21 +230,13 @@ async def delete_session(
     await db.commit()
 
 
+# LangGraph agents dropped — chat endpoints that need the graph raise 501.
+# ``rag_graph`` stays None so tests can still monkeypatch(chat, "rag_graph", fake).
+rag_graph = None
+
+
 def _load_rag_graph():
-    """Lazy loader for the compiled RAG graph.
-
-    The graph is exposed as a module-level symbol (``rag_graph``) so that
-    integration tests can ``monkeypatch.setattr(chat, "rag_graph", fake)``.
-    We resolve it lazily on first access (and re-resolve if a test patches
-    it) to avoid pulling the full LangGraph stack at import time.
-    """
-    from app.agents.graph import rag_graph as _compiled
-    return _compiled
-
-
-# Module-level binding. Tests may monkeypatch this attribute.
-# Initialize to the compiled graph so non-patched callers still work.
-rag_graph = _load_rag_graph()
+    raise RuntimeError("RAG graph removed with LangGraph agents")
 
 
 def _get_rag_graph():
@@ -446,6 +438,12 @@ async def send_message(
             nonlocal final_response_emitted
             try:
                 graph = _get_rag_graph()
+                if graph is None:
+                    await emit(
+                        {"type": "error", "message": "Chat RAG graph is unavailable (LangGraph agents removed)."},
+                        event="error",
+                    )
+                    return
                 await emit({"type": "status", "stage": "started"}, event="status")
                 async for event in graph.astream(state):
                     node, data = next(iter(event.items()))

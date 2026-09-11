@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import pytest
 
-from app.agents.memory_agent import _used_memory_ids
 from app.retrieval.memory.salience import DEFAULT_BUMP_STEP, SALIENCE_MAX, next_salience
 
 pytestmark = pytest.mark.rag
@@ -32,19 +31,3 @@ class TestNextSalience:
         assert low_gain > high_gain
 
 
-class TestUsedMemoryIds:
-    def test_extracts_unique_memory_ids_from_grounding(self):
-        state = {
-            "grounding_context_chunks": [
-                {"metadata": {"memory_id": "m1"}},
-                {"metadata": {"memory_id": "m2"}},
-                {"metadata": {"memory_id": "m1"}},  # dup
-                {"metadata": {"document_id": "d1"}},  # no memory_id
-                {"content": "no metadata"},
-            ]
-        }
-        assert _used_memory_ids(state) == ["m1", "m2"]
-
-    def test_empty_when_no_grounding(self):
-        assert _used_memory_ids({}) == []
-        assert _used_memory_ids({"grounding_context_chunks": []}) == []

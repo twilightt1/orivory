@@ -1,63 +1,12 @@
-"""P3 tests: grounding confidence + quality trend aggregation."""
+"""P3 tests: quality trend aggregation."""
 from __future__ import annotations
 
 import pytest
 
-from app.agents.grounding import compute_grounding_confidence
 from app.services.quality_service import aggregate_traces
 
 pytestmark = pytest.mark.rag
 
-
-def _state(*, query_type="rag", retry=0, grounded=True, cited=True, sources=2):
-    return {
-        "query_type": query_type,
-        "retry_count": retry,
-        "agent_trace": {
-            "hallucination": {"grounded": grounded},
-            "citation": {"has_citation": cited, "source_count": sources},
-        },
-    }
-
-
-class TestGroundingConfidence:
-    def test_best_case_is_high(self):
-        c = compute_grounding_confidence(_state(grounded=True, cited=True, sources=3, retry=0))
-        assert c["label"] == "high"
-        assert c["score"] >= 0.75
-
-    def test_worst_case_is_low(self):
-        c = compute_grounding_confidence(_state(grounded=False, cited=False, sources=0, retry=2))
-        assert c["label"] == "low"
-        assert c["score"] <= 0.45
-
-    def test_chitchat_not_applicable(self):
-        c = compute_grounding_confidence({"query_type": "chitchat", "agent_trace": {}})
-        assert c["label"] == "not_applicable"
-
-    def test_save_note_not_applicable(self):
-        c = compute_grounding_confidence({"query_type": "save_note", "agent_trace": {}})
-        assert c["label"] == "not_applicable"
-
-    def test_citation_increases_score(self):
-        with_cite = compute_grounding_confidence(_state(cited=True))["score"]
-        without = compute_grounding_confidence(_state(cited=False))["score"]
-        assert with_cite > without
-
-    def test_retries_decrease_score(self):
-        no_retry = compute_grounding_confidence(_state(retry=0))["score"]
-        retried = compute_grounding_confidence(_state(retry=2))["score"]
-        assert retried < no_retry
-
-    def test_signals_are_reported(self):
-        c = compute_grounding_confidence(_state(sources=2))
-        assert c["signals"]["source_count"] == 2
-        assert "grounded" in c["signals"]
-
-    def test_missing_trace_defaults_safely(self):
-        # No hallucination/citation keys → should not raise, grounded defaults true.
-        c = compute_grounding_confidence({"query_type": "rag", "agent_trace": {}})
-        assert 0.0 <= c["score"] <= 1.0
 
 
 class TestAggregateTraces:

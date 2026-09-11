@@ -39,22 +39,3 @@ class TestVectorUnavailableSignal:
         monkeypatch.setattr(vector_retriever, "_get_async_client", fake_client)
         assert await vector_retriever.search("q", 5, "cid") == []
 
-
-class TestVectorUnavailableFlag:
-    def test_all_failed_no_results_is_unavailable(self):
-        from app.agents.retrieval_agent import _vector_unavailable
-        from app.retrieval.vector_retriever import VectorUnavailableError
-
-        assert _vector_unavailable([VectorUnavailableError("x")], []) is True
-
-    def test_empty_without_errors_is_genuine_no_results(self):
-        from app.agents.retrieval_agent import _vector_unavailable
-
-        assert _vector_unavailable([], []) is False
-
-    def test_partial_success_is_available(self):
-        from app.agents.retrieval_agent import _vector_unavailable
-        from app.retrieval.vector_retriever import VectorUnavailableError
-
-        chunk = {"content": "c", "score": 0.9}
-        assert _vector_unavailable([VectorUnavailableError("x"), [chunk]], [chunk]) is False

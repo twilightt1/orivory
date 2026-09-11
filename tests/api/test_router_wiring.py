@@ -22,8 +22,6 @@ ROUTERS_TO_CHECK = [
     "app.api.v1.workspaces",
     "app.api.v1.memories",
     "app.api.v1.entities",
-    "app.api.v1.insights",
-    "app.api.v1.discovery",
     "app.api.v1.sources",
     "app.api.v1.chat",
     "app.api.v1.auth",
