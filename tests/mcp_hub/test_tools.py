@@ -331,3 +331,46 @@ async def test_correct_memory_foreign_id_rejected(writer):
     _p, _db = writer
     out = await hub_tools.correct_memory(memory_id=str(uuid.uuid4()), content="x")
     assert out == {"error": "memory not found"}
+
+
+# ── Task 5: add via resolve, search state, get provenance ────────────────────
+
+
+async def test_search_hides_superseded_by_default(writer, monkeypatch):
+    p, db = writer
+    new = _memory_row(uuid.uuid4(), p.user_id)
+    old = _memory_row(uuid.uuid4(), p.user_id)
+    old.extra_metadata = {"cm_superseded_by": str(new.id)}
+    db.rows = [old, new]
+    monkeypatch.setattr(hub_tools, "_recall_memory_ids", _fake_recall([old.id, new.id]))
+    out = await hub_tools.search_memory("x")
+    assert [r["id"] for r in out["results"]] == [str(new.id)]
+    assert out["results"][0]["state"] == "current"
+    out2 = await hub_tools.search_memory("x", include_history=True)
+    assert {r["id"] for r in out2["results"]} == {str(old.id), str(new.id)}
+
+
+async def test_add_never_supersedes(writer, monkeypatch):
+    p, db = writer
+    old = _memory_row(uuid.uuid4(), p.user_id)
+    old.extra_metadata = {"cm_subject": "proj-x", "cm_attribute": "db", "cm_scope": "prod"}
+    db.rows = [old]
+
+    async def _noop_index(memory):
+        return None
+
+    monkeypatch.setattr(hub_tools, "index_new_memory", _noop_index)
+    out = await hub_tools.add_memory(title="DB", content="SQLite")
+    assert old.extra_metadata.get("cm_superseded_by") is None
+    assert out["state"] == "current"
+
+
+async def test_get_carries_provenance(reader):
+    p, db = reader
+    m = _memory_row(uuid.uuid4(), p.user_id)
+    m.extra_metadata = {"cm_subject": "proj-x", "cm_scope": "prod",
+                        "cm_supersedes": "prev-id", "cm_evidence_ids": ["e1"]}
+    db.rows = [m]
+    out = await hub_tools.get_memory(str(m.id))
+    assert out["scope"] == "prod" and out["supersedes"] == "prev-id"
+    assert out["evidence_ids"] == ["e1"] and out["state"] == "current"

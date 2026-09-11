@@ -16,7 +16,7 @@ import logging
 from contextvars import ContextVar
 from datetime import datetime
 from typing import Any
-from uuid import UUID, uuid4
+from uuid import UUID
 
 from sqlalchemy import select
 
@@ -93,6 +93,7 @@ def _memory_index_row(memory: Memory) -> dict[str, Any]:
         "tags": list(memory.tags or []),
         "salience": memory.salience,
         "captured_at": _iso(memory.captured_at),
+        "state": state_of(memory),
     }
 
 
@@ -137,7 +138,7 @@ async def _recall_memory_ids(query: str, limit: int) -> list[tuple[UUID, float]]
     return [(row.id, float(row.salience)) for row in rows]
 
 
-async def search_memory(query: str, limit: int = 8) -> dict[str, Any]:
+async def search_memory(query: str, limit: int = 8, include_history: bool = False) -> dict[str, Any]:
     """Search the caller's memories — returns an INDEX, not full content.
 
     Progressive-disclosure step 1 (the workflow that saves ~10x tokens):
@@ -166,7 +167,10 @@ async def search_memory(query: str, limit: int = 8) -> dict[str, Any]:
                 )
             ).scalars().all()
             by_id = {row.id: row for row in rows}
-            results = [_memory_index_row(by_id[mid]) for mid, _ in recalled if mid in by_id]
+            rows_in_rank = [_f for _f in (by_id.get(mid) for mid, _ in recalled) if _f is not None]
+            if not include_history:
+                rows_in_rank = [m for m in rows_in_rank if state_of(m) != "superseded"]
+            results = [_memory_index_row(m) for m in rows_in_rank]
         db.add(
             _ledger_entry(
                 principal,
@@ -278,7 +282,7 @@ async def get_memory(memory_id: str) -> dict[str, Any]:
         await db.commit()
     if row is None:
         return {"error": "memory not found"}
-    return _memory_brief(row)
+    return {**_memory_brief(row), **_memory_provenance(row)}
 
 
 async def list_recent(limit: int = 20) -> dict[str, Any]:
@@ -326,19 +330,12 @@ async def add_memory(title: str, content: str, tags: list[str] | None = None) ->
     if compressed is not None:
         content, summary_out = compressed[1], compressed[0]
 
-    memory = Memory(
-        id=uuid4(),  # client-side id so the ledger + indexing can reference it
-        user_id=principal.user_id,
-        title=title,
-        content=content,
-        summary=summary_out,
-        tags=list(tags or []),
-        source_type="mcp_agent",
-        source_ref=f"agent:{principal.name}",
-    )
     async with _session() as db:
-        db.add(memory)
-        await db.commit()
+        out = await resolve_correction(
+            db, user_id=principal.user_id, title=title, content=content,
+            tags=list(tags or []), source_ref=f"agent:{principal.name}",
+            summary=summary_out)
+        memory = out["memory"]
     try:
         await index_new_memory(memory)  # best-effort: embed + graph enqueue
     except Exception as exc:
@@ -353,7 +350,7 @@ async def add_memory(title: str, content: str, tags: list[str] | None = None) ->
             )
         )
         await db.commit()
-    return _memory_brief(memory)
+    return {**_memory_brief(memory), **_memory_provenance(memory)}
 
 
 async def delete_memory(memory_id: str) -> dict[str, Any]:

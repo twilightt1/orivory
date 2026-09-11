@@ -73,7 +73,7 @@ def find_derived_dependent_ids(memories, erased_ids: set[str]) -> list[str]:
 async def resolve_correction(db, *, user_id, title, content, tags=None,
         source_type="mcp_agent", source_ref=None, subject="", attribute="",
         scope=DEFAULT_SCOPE, assertion="fact", valid_from=None,
-        evidence_ids=None, memory_id=None) -> dict:
+        evidence_ids=None, memory_id=None, summary=None) -> dict:
     """Single creation path for add + correct. One commit, never raises."""
 
     subj, attr, sc = normalize_slot(subject), normalize_slot(attribute), normalize_slot(scope)
@@ -126,7 +126,8 @@ async def resolve_correction(db, *, user_id, title, content, tags=None,
 
     new = Memory(id=uuid4(), user_id=user_id, title=title, content=content,
                  tags=list(tags or []), source_type=source_type,
-                 source_ref=source_ref, captured_at=now, extra_metadata=meta)
+                 source_ref=source_ref, captured_at=now, extra_metadata=meta,
+                 summary=summary)
     db.add(new)
     if status == "superseded":
         for m in exact:

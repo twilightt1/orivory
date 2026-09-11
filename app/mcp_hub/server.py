@@ -124,12 +124,12 @@ def _build_server() -> FastMCP:
     )
 
     @mcp.tool()
-    async def search_memory(query: str, limit: int = 8, ctx: Context = None) -> dict[str, Any]:
+    async def search_memory(query: str, limit: int = 8, include_history: bool = False, ctx: Context = None) -> dict[str, Any]:
         """Search the user's memory hub — returns an INDEX (id/title/snippet),
         NOT full content. Progressive disclosure: review the index, then call
         get_memory on the few ids that matter or timeline for context around
         one. Do NOT fetch details for every hit (requires memory:read)."""
-        return await _call_with_identity(hub_tools.search_memory(query=query, limit=limit), ctx)
+        return await _call_with_identity(hub_tools.search_memory(query=query, limit=limit, include_history=include_history), ctx)
 
     @mcp.tool()
     async def timeline(memory_id: str, window: int = 4, ctx: Context = None) -> dict[str, Any]:
