@@ -1,7 +1,13 @@
 """cm_* metadata helpers + pure rules for correctable memory (spec 2026-09-12)."""
 from __future__ import annotations
+
 import re
-from uuid import UUID
+from datetime import UTC, datetime
+from uuid import uuid4
+
+from sqlalchemy import select
+
+from app.models.memory import Memory
 
 CM_ASSERTION = "cm_assertion"
 CM_SUBJECT = "cm_subject"
@@ -64,16 +70,11 @@ def find_derived_dependent_ids(memories, erased_ids: set[str]) -> list[str]:
     return out
 
 
-from datetime import UTC, datetime
-from sqlalchemy import select
-
 async def resolve_correction(db, *, user_id, title, content, tags=None,
         source_type="mcp_agent", source_ref=None, subject="", attribute="",
         scope=DEFAULT_SCOPE, assertion="fact", valid_from=None,
         evidence_ids=None, memory_id=None) -> dict:
     """Single creation path for add + correct. One commit, never raises."""
-    from uuid import uuid4
-    from app.models.memory import Memory
 
     subj, attr, sc = normalize_slot(subject), normalize_slot(attribute), normalize_slot(scope)
     rows = (await db.execute(
@@ -151,7 +152,6 @@ async def resolve_correction(db, *, user_id, title, content, tags=None,
 
 async def collect_derived_ids(db, user_id, erased_ids: list) -> list:
     """Return ids of memories deriving from erased ids. Never raises."""
-    from app.models.memory import Memory
     try:
         erased = {str(e) for e in erased_ids}
         rows = (await db.execute(
