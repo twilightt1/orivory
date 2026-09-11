@@ -5,47 +5,51 @@ services:
   app:
     environment:
       ENVIRONMENT: production
-    volumes: []
+    volumes: !override []
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4
 
   frontend:
     build:
       context: ./frontend
       target: runner
+      # NEXT_PUBLIC_* vars are inlined into the client bundle at BUILD time —
+      # runtime `environment:` alone is silently ignored by Next.js.
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
     environment:
       - NODE_ENV=production
       - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://localhost:8000}
-    volumes: []
+    volumes: !override []
     command: npm run start
 
   celery_worker:
     environment:
       ENVIRONMENT: production
-    volumes: []
+    volumes: !override []
 
   celery_beat:
     environment:
       ENVIRONMENT: production
-    volumes: []
+    volumes: !override []
 
   postgres:
-    ports: []
+    ports: !override []
 
   redis:
-    ports: []
+    ports: !override []
 
   chromadb:
-    ports: []
+    ports: !override []
 
   minio:
     environment:
       MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
       MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin}
-    ports: []
+    ports: !override []
 
   flower:
     profiles:
       - ops
     environment:
       ENVIRONMENT: production
-    ports: []
+    ports: !override []

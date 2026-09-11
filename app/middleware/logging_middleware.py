@@ -14,7 +14,22 @@ class LoggingMiddleware(BaseHTTPMiddleware):
         request.state.request_id = request_id
         start = time.perf_counter()
 
-        response = await call_next(request)
+        try:
+            response = await call_next(request)
+        except Exception as exc:
+            # Handlers that raise must still appear in the access log —
+            # unhandled 5xx are exactly the requests operators need most.
+            duration = round((time.perf_counter() - start) * 1000, 2)
+            log.info(
+                "request",
+                method=request.method,
+                path=request.url.path,
+                status=500,
+                duration_ms=duration,
+                request_id=request_id,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            raise
 
         duration = round((time.perf_counter() - start) * 1000, 2)
         log.info(

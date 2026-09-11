@@ -106,3 +106,28 @@ def test_state_survives_new_file_addition(tmp_path, monkeypatch):
     b.write_text("**User:** second\n")
     captured, _ = capture.scan_and_capture(tmp_path, state, "http://x", "oa_t")
     assert captured == 1  # only the new file
+
+
+def test_dry_run_does_not_mutate_state(tmp_path, monkeypatch):
+    """Regression: --dry-run recorded fingerprints as if captured, so the
+    next REAL run skipped those files and silently captured nothing."""
+    md = tmp_path / "note.md"
+    md.write_text("**User:** dry-run me\n")
+    state: dict = {}
+
+    def _fail_on_post(url, token, payload):
+        raise AssertionError("dry run must never POST")
+
+    monkeypatch.setattr(capture, "post_import", _fail_on_post)
+    captured, _ = capture.scan_and_capture(
+        tmp_path, state, "http://x", "oa_t", dry_run=True
+    )
+    assert captured == 1
+    assert state == {}, "dry run must leave persistent state untouched"
+
+    # A subsequent real run still captures the file.
+    posted: list[dict] = []
+    monkeypatch.setattr(capture, "post_import",
+                        lambda url, token, payload: posted.append(payload) or {"created": 1})
+    captured2, _ = capture.scan_and_capture(tmp_path, state, "http://x", "oa_t")
+    assert captured2 == 1 and len(posted) == 1

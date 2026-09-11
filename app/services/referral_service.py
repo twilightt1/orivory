@@ -32,7 +32,14 @@ def generate_referral_code(length: int = 8) -> str:
 
 
 async def get_or_create_referral_code(db: AsyncSession, user_id: UUID) -> ReferralCode:
-    """Get existing referral code or create a new one for user."""
+    """Get existing referral code or create a new one for user.
+
+    Race-safe: the DB enforces one active code per user
+    (uq_referral_codes_user_active). A concurrent first call wins; the loser
+    catches IntegrityError, rolls back, and re-reads the winner's row.
+    """
+    from sqlalchemy.exc import IntegrityError
+
     result = await db.execute(
         select(ReferralCode).where(
             and_(
@@ -41,7 +48,7 @@ async def get_or_create_referral_code(db: AsyncSession, user_id: UUID) -> Referr
             )
         )
     )
-    existing = result.scalar_one_or_none()
+    existing = result.scalars().first()
 
     if existing:
         return existing
@@ -62,7 +69,23 @@ async def get_or_create_referral_code(db: AsyncSession, user_id: UUID) -> Referr
         max_uses=10
     )
     db.add(referral_code)
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError:
+        # Lost the race: another request created the user's code first.
+        await db.rollback()
+        winner = await db.scalar(
+            select(ReferralCode).where(
+                and_(
+                    ReferralCode.user_id == user_id,
+                    ReferralCode.is_active
+                )
+            ).order_by(ReferralCode.created_at.asc()).limit(1)
+        )
+        if winner is not None:
+            log.info(f"Referral code race lost for user {user_id} — returning winner")
+            return winner
+        raise
     await db.refresh(referral_code)
 
     log.info(f"Created referral code {code} for user {user_id}")
@@ -200,7 +223,7 @@ async def get_referral_stats(db: AsyncSession, user_id: UUID) -> dict:
         select(func.count(ReferralReward.id)).where(
             and_(
                 ReferralReward.user_id == user_id,
-                not ReferralReward.is_claimed
+                ReferralReward.is_claimed.is_(False),
             )
         )
     )

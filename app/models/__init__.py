@@ -23,6 +23,7 @@ from app.models.memory import Memory
 from app.models.memory_access_log import MemoryAccessLog
 from app.models.message import Message
 from app.models.password_reset_session import PasswordResetSession
+from app.models.referral import Referral, ReferralCode, ReferralReward
 from app.models.source import SOURCE_STATUS, SOURCE_TYPES, MemorySource, Source
 from app.models.system_setting import SystemSetting
 from app.models.user import User
@@ -44,6 +45,10 @@ __all__ = [
     "EmailVerification",
     "PasswordResetSession",
     "UserQuota",
+    # Referral
+    "Referral",
+    "ReferralCode",
+    "ReferralReward",
     # RAG (legacy, kept for backward compat)
     "Conversation",
     "Message",

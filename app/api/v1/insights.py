@@ -457,10 +457,16 @@ async def refresh_insights_endpoint(
     updated_count = 0
     expired_count = 0
 
+    # Ownership guard: update IDs come from LLM output, which may echo a
+    # foreign or hallucinated ID. Only honor IDs from the caller's own
+    # already-filtered card set — never trust the model for authorization.
+    owned_ids = {c.id for c in existing_cards}
     for update in updates:
         insight_id = UUID(update["insight_id"])
+        if insight_id not in owned_ids:
+            continue
         card = await db.get(InsightCard, insight_id)
-        if card:
+        if card and card.user_id == current_user.id:
             action = update["action"]
             if action == "expire":
                 card.status = InsightStatusEnum.EXPIRED.value

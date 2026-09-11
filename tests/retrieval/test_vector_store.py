@@ -183,10 +183,12 @@ class TestMemoryToMetadata:
 
         assert isinstance(result["salience"], float)
         assert isinstance(result["pinned"], bool)
-        assert result["tags"] == []
+        # Empty/None tags are OMITTED (ChromaDB rejects empty-list metadata
+        # values) — see _memory_to_metadata docstring.
+        assert "tags" not in result
 
     def test_metadata_handles_none_tags(self):
-        """Should handle None tags as empty list."""
+        """None tags are omitted (ChromaDB rejects empty lists)."""
         mock_memory = MagicMock()
         mock_memory.id = uuid4()
         mock_memory.user_id = uuid4()
@@ -198,7 +200,7 @@ class TestMemoryToMetadata:
 
         result = vector_store._memory_to_metadata(mock_memory)
 
-        assert result["tags"] == []
+        assert "tags" not in result
 
 
 class TestCollectionName:

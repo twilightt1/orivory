@@ -17,7 +17,15 @@ from app.ingestion.import_formats import SOURCE_FORMATS
 from app.main import app
 from app.schemas.Orivory import ImportSummary
 from app.services import import_service
-from app.utils.dependencies import get_current_verified_user
+
+
+@pytest.fixture(autouse=True)
+async def _require_test_database():
+    """These suites manage their own loop-local engines (not the shared `db`
+    fixture), so they probe Postgres directly and skip when it is down."""
+    from tests.conftest import require_db_available
+
+    await require_db_available()
 
 
 def test_imports_routes_registered():
@@ -265,7 +273,10 @@ async def test_import_endpoint_passes_bytes_full_request(monkeypatch):
     async def _db_override():
         yield object()
 
-    app.dependency_overrides[get_current_verified_user] = _current_user_override
+    # The endpoint authenticates via `_optional_user` (dual human-JWT /
+    # agent-token auth), not `get_current_verified_user` — overriding the
+    # latter leaves the real auth in place and every call 401s.
+    app.dependency_overrides[imports_module._optional_user] = _current_user_override
     app.dependency_overrides[get_db] = _db_override
     try:
         payload = b'[{"content": "hello", "ref": "r1"}]'
@@ -325,7 +336,10 @@ async def test_import_endpoint_happy_path_real_service(monkeypatch):
     async def _current_user_override():
         return SimpleNamespace(id=uuid.uuid4())
 
-    app.dependency_overrides[get_current_verified_user] = _current_user_override
+    # The endpoint authenticates via `_optional_user` (dual human-JWT /
+    # agent-token auth), not `get_current_verified_user` — overriding the
+    # latter leaves the real auth in place and every call 401s.
+    app.dependency_overrides[imports_module._optional_user] = _current_user_override
     app.dependency_overrides[get_db] = _db_override
     try:
         payload = json.dumps([
@@ -395,7 +409,10 @@ async def test_blank_source_format_over_http_behaves_as_omitted(monkeypatch):
     async def _db_override():
         yield object()
 
-    app.dependency_overrides[get_current_verified_user] = _current_user_override
+    # The endpoint authenticates via `_optional_user` (dual human-JWT /
+    # agent-token auth), not `get_current_verified_user` — overriding the
+    # latter leaves the real auth in place and every call 401s.
+    app.dependency_overrides[imports_module._optional_user] = _current_user_override
     app.dependency_overrides[get_db] = _db_override
     try:
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -430,7 +447,10 @@ async def test_content_length_header_over_cap_early_rejected(monkeypatch):
     async def _db_override():
         yield object()
 
-    app.dependency_overrides[get_current_verified_user] = _current_user_override
+    # The endpoint authenticates via `_optional_user` (dual human-JWT /
+    # agent-token auth), not `get_current_verified_user` — overriding the
+    # latter leaves the real auth in place and every call 401s.
+    app.dependency_overrides[imports_module._optional_user] = _current_user_override
     app.dependency_overrides[get_db] = _db_override
     try:
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:

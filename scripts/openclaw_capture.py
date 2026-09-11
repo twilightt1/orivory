@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import sys
 import time
@@ -162,16 +163,20 @@ def scan_and_capture(watch_dir: Path, state: dict[str, str], url: str, token: st
             continue
         text = md_file.read_text(errors="replace")
         if not text.strip():
-            state[key] = fingerprint
+            # Dry runs never touch persistent state: recording a fingerprint
+            # for a file we did not capture makes the next real run skip it
+            # silently. (Regression: --dry-run used to poison the state file.)
+            if not dry_run:
+                state[key] = fingerprint
             continue
         payload = to_session_payload(md_file, text)
         if not payload["entries"]:
-            state[key] = fingerprint
+            if not dry_run:
+                state[key] = fingerprint
             continue
         if dry_run:
             print(f"[dry-run] would capture: {key} "
                   f"({len(payload['entries'])} entries)")
-            state[key] = fingerprint
             captured += 1
             continue
         try:
@@ -199,8 +204,10 @@ def main() -> int:
                         help=f"OpenClaw session/memory directory (default: {DEFAULT_WATCH_DIR})")
     parser.add_argument("--url", default=DEFAULT_URL,
                         help=f"Orivory base URL (default: {DEFAULT_URL})")
-    parser.add_argument("--token", required=True,
-                        help="Agent token (oa_...) with memory:write scope")
+    parser.add_argument("--token", default=None,
+                        help="Agent token (oa_...) with memory:write scope. "
+                             "Prefer the ORIVORY_TOKEN env var — argv is visible "
+                             "in `ps` output and shell history.")
     parser.add_argument("--interval", type=int, default=DEFAULT_INTERVAL,
                         help=f"Seconds between scans (default: {DEFAULT_INTERVAL})")
     parser.add_argument("--state-file", default=None,
@@ -219,13 +226,17 @@ def main() -> int:
     )
     state = load_state(state_file)
 
+    token = args.token or os.environ.get("ORIVORY_TOKEN")
+    if not token:
+        parser.error("agent token required: pass --token or set ORIVORY_TOKEN")
+
     print(f"watching {watch_dir} → {args.url} (interval {args.interval}s, "
           f"{'once' if args.once else 'looping'})")
 
     while True:
         try:
             captured, skipped = scan_and_capture(
-                watch_dir, state, args.url, args.token, dry_run=args.dry_run
+                watch_dir, state, args.url, token, dry_run=args.dry_run
             )
             save_state(state_file, state)
             if args.once:

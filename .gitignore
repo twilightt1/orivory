@@ -36,3 +36,6 @@ eval/costs.db
 
 # git worktrees
 .worktrees/
+
+# runtime artifacts
+eval/experiments.db

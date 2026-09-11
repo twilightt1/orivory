@@ -27,6 +27,15 @@ from app.services.agent_token_service import generate_token, hash_token
 pytestmark = pytest.mark.api
 
 
+@pytest.fixture(autouse=True)
+async def _require_test_database():
+    """These suites manage their own loop-local engines (not the shared `db`
+    fixture), so they probe Postgres directly and skip when it is down."""
+    from tests.conftest import require_db_available
+
+    await require_db_available()
+
+
 async def _seed_agent(monkey=None, name="capture-agent",
                      scopes=("memory:read", "memory:write")):
     """Create a verified user + agent client on a loop-local engine and

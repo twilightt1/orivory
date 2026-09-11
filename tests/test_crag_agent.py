@@ -538,3 +538,74 @@ class TestIntegration:
         # Check web doc has lower score (0.7 * 0.8 = 0.56)
         web_doc = next(d for d in result["reranked_chunks"] if d["id"] == "web_0")
         assert web_doc["crag_score"] == pytest.approx(0.56, rel=0.01)
+
+
+class TestCRAGWebFallbackBudget:
+    """Regression: the web-fallback merge overwrote `reranked_chunks` AFTER
+    context_merge_agent had enforced MAX_GROUNDING_CHUNKS / CONTEXT_CHAR_BUDGET,
+    so the answer prompt could receive ~15 full-page web docs with zero budget
+    enforcement. The merged set must respect the same caps."""
+
+    @pytest.mark.asyncio
+    @patch("app.agents.crag_agent.execute_web_fallback")
+    @patch("app.agents.crag_agent.grade_retrieval")
+    @patch("app.agents.crag_agent.settings")
+    async def test_web_fallback_respects_chunk_cap_and_char_budget(
+        self, mock_settings, mock_grade, mock_fallback
+    ):
+        from app.agents.context_merge_agent import MAX_GROUNDING_CHUNKS
+
+        mock_settings.CRAG_ENABLED = True
+        mock_settings.CRAG_FALLBACK_THRESHOLD = 0.5
+        mock_settings.CRAG_MAX_WEB_RESULTS = 10
+        mock_settings.CONTEXT_CHAR_BUDGET = 24000
+
+        huge = "w" * 20000
+        web_docs = [
+            {"id": f"web_{i}", "content": huge, "metadata": {"source": "web"}}
+            for i in range(10)
+        ]
+        mock_grade.side_effect = [
+            GradingResult(
+                graded_documents=[
+                    GradedDocument("doc1", 0.2, RetrievalGrade.IRRELEVANT, "bad", "local"),
+                ],
+                needs_web_fallback=True,
+                relevant_count=0,
+                partial_count=0,
+                irrelevant_count=1,
+            ),
+            GradingResult(
+                graded_documents=[
+                    GradedDocument("doc1", 0.24, RetrievalGrade.IRRELEVANT, "bad", "local"),
+                ]
+                + [
+                    GradedDocument(f"web_{i}", 0.7, RetrievalGrade.RELEVANT, "good", "web")
+                    for i in range(10)
+                ],
+                needs_web_fallback=False,
+                relevant_count=10,
+                partial_count=0,
+                irrelevant_count=1,
+            ),
+        ]
+        mock_fallback.return_value = MagicMock(
+            merged_documents=web_docs,
+            search_query_used="query",
+            domains_included=["web.com"],
+        )
+
+        state = {
+            "query": "test",
+            "rewritten_query": "test",
+            "reranked_chunks": [
+                {"id": "doc1", "content": "local", "metadata": {"source": "local"}}
+            ],
+        }
+
+        result = await crag_agent(state)
+
+        merged = result["reranked_chunks"]
+        assert len(merged) <= MAX_GROUNDING_CHUNKS
+        total_chars = sum(len(d.get("content") or "") for d in merged)
+        assert total_chars <= mock_settings.CONTEXT_CHAR_BUDGET

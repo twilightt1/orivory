@@ -21,7 +21,13 @@ import httpx
 
 from app.config import settings
 from app.models.memory import Memory
-from app.retrieval.embedder import embed_texts, embed_texts_sync
+from app.retrieval.embedder import (
+    astamp_collection_dim,
+    check_collection_dim,
+    embed_texts,
+    embed_texts_sync,
+    stamp_collection_dim,
+)
 
 # Lazily imported so this module is importable in test/CLI contexts
 # that don't have ChromaDB running.
@@ -240,6 +246,7 @@ async def upsert_memory(memory: Memory) -> None:
     document = _memory_to_document(memory)
     metadata = _memory_to_metadata(memory)
     embedding = (await embed_texts([document]))[0]
+    await astamp_collection_dim(collection, len(embedding))
     await collection.upsert(
         ids=[str(memory.id)],
         documents=[document],
@@ -262,6 +269,7 @@ def upsert_memory_sync(memory: Memory) -> None:
     document = _memory_to_document(memory)
     metadata = _memory_to_metadata(memory)
     embedding = embed_texts_sync([document])[0]
+    stamp_collection_dim(collection, len(embedding))
     collection.upsert(
         ids=[str(memory.id)],
         documents=[document],
@@ -292,6 +300,7 @@ def upsert_memories_sync(memories: list[Memory]) -> int:
     metadatas = [_memory_to_metadata(m) for m in memories]
     ids = [str(m.id) for m in memories]
     embeddings = embed_texts_sync(documents)
+    stamp_collection_dim(collection, len(embeddings[0]))
     collection.upsert(
         ids=ids,
         documents=documents,
@@ -397,6 +406,9 @@ async def search_memories(
     except Exception as e:
         log.warning("Chroma unavailable for search", extra={"error": str(e)})
         return []
+
+    # Fail loud on backend/dim switches; never stamp here (read path).
+    check_collection_dim(collection, len(query_embedding))
 
     count = await collection.count()
     if count == 0:

@@ -96,16 +96,90 @@ def _service_block(compose_text: str, service_name: str) -> str:
 
 
 def check_internal_ports_removed() -> CheckResult:
-    compose_text = _read("docker-compose.prod.yml")
-    services = ["postgres", "redis", "chromadb", "minio", "flower"]
-    missing: list[str] = []
-    for service in services:
-        block = _service_block(compose_text, service)
-        if "ports: []" not in block:
-            missing.append(service)
-    if missing:
-        return CheckResult("production internal ports", "FAIL", f"Missing ports: [] for {', '.join(missing)}")
-    return CheckResult("production internal ports", "PASS", "Internal service host ports are removed in prod override")
+    """Prod must not host-publish internal services or keep dev bind-mounts.
+
+    Validates BEHAVIOR, not YAML text: renders the merged prod configuration
+    (`docker compose -f docker-compose.yml -f docker-compose.prod.yml
+    config`) and asserts no `published:` ports on internal services and no
+    host `bind` mounts on app containers. A plain `ports: []` in the override
+    file is a Compose merge no-op, so grepping the YAML can report PASS while
+    the exposure persists — this check would have caught that class of bug.
+
+    When docker is unavailable, falls back to asserting the override file
+    uses merge-replacing `!override []` syntax (which at least cannot pass
+    with the no-op form).
+    """
+    import shutil
+    import subprocess
+
+    if shutil.which("docker") is not None:
+        try:
+            merged = subprocess.run(
+                [
+                    "docker", "compose",
+                    "-f", str(ROOT / "docker-compose.yml"),
+                    "-f", str(ROOT / "docker-compose.prod.yml"),
+                    "config",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                cwd=str(ROOT),
+            )
+            if merged.returncode == 0 and merged.stdout.strip():
+                return check_merged_prod_config(merged.stdout)
+        except (OSError, subprocess.SubprocessError):
+            pass  # fall through to the static syntax check below
+
+    prod_text = _read("docker-compose.prod.yml")
+    if "!override []" in prod_text or "!reset []" in prod_text:
+        return CheckResult(
+            "production internal ports",
+            "PASS",
+            "docker unavailable — override file uses merge-replacing syntax",
+        )
+    return CheckResult(
+        "production internal ports",
+        "FAIL",
+        "docker unavailable and override file lacks `!override []` — "
+        "plain `ports: []` is a Compose merge no-op",
+    )
+
+
+def check_merged_prod_config(merged_yaml: str) -> CheckResult:
+    """Assert a MERGED `docker compose config` rendering exposes nothing.
+
+    Fails when any internal service (postgres/redis/chromadb/minio/flower)
+    carries a host-published port, or when app-tier services (app/frontend/
+    celery_*) retain a host `bind` mount (dev bind-mounts must not survive
+    into prod). Pure function of the rendered text — unit-testable.
+    """
+    internal = ["postgres", "redis", "chromadb", "minio", "flower"]
+    app_tier = ["app", "frontend", "celery_worker", "celery_beat", "celery"]
+    leaks: list[str] = []
+
+    current: str | None = None
+    for line in merged_yaml.splitlines():
+        svc = re.match(r"^  ([A-Za-z0-9_-]+):\s*$", line)
+        if svc:
+            current = svc.group(1)
+            continue
+        if current in internal and re.search(r"^\s+published:", line):
+            leaks.append(f"{current}: host-published port")
+            current = None  # report once per service
+        elif current in app_tier and re.search(r"-\s+type:\s*bind\s*$", line):
+            leaks.append(f"{current}: host bind mount")
+            current = None
+
+    if leaks:
+        return CheckResult(
+            "production internal ports", "FAIL", "; ".join(sorted(set(leaks)))
+        )
+    return CheckResult(
+        "production internal ports",
+        "PASS",
+        "Merged prod config publishes no internal ports and keeps no bind mounts",
+    )
 
 
 def check_flower_ops_profile() -> CheckResult:

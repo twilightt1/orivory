@@ -33,10 +33,10 @@ jobs:
         run: python -m ruff check app tests eval scripts
 
       - name: Run API tests
-        run: python -m pytest --confcutdir=tests/api tests/api/test_health_api.py tests/api/test_sse.py tests/api/test_chat_streaming.py tests/api/test_admin_diagnostics.py -q
+        run: python -m pytest --confcutdir=tests/api tests/api/test_health_api.py tests/api/test_sse.py tests/api/test_chat_streaming.py tests/api/test_admin_diagnostics.py tests/api/test_insights_refresh.py -q
 
       - name: Run service tests
-        run: python -m pytest --confcutdir=tests/services tests/services/test_health_service.py tests/services/test_diagnostics_service.py -q
+        run: python -m pytest --confcutdir=tests/services tests/services/test_health_service.py tests/services/test_diagnostics_service.py tests/services/test_referral_service.py -q
 
       - name: Run RAG tests
         run: |
@@ -48,7 +48,25 @@ jobs:
             -q
 
       - name: Run evaluation tests
-        run: python -m pytest --confcutdir=tests/eval tests/eval/test_eval_metrics.py tests/eval/test_live_api_eval.py -q
+        run: python -m pytest --confcutdir=tests/eval tests/eval/test_eval_metrics.py tests/eval/test_live_api_eval.py tests/eval/test_llm_judge_provenance.py -q
+
+      - name: Run schema-fidelity tests (migrations vs models, DB-free)
+        run: python -m pytest --confcutdir=tests/migrations tests/migrations -q
+
+      - name: Run middleware unit tests (DB-free)
+        run: python -m pytest --confcutdir=tests/middleware tests/middleware -q
+
+      - name: Run script unit tests (DB-free)
+        run: python -m pytest --confcutdir=tests/scripts tests/scripts -q
+
+      - name: Run agent unit tests (DB-free)
+        run: python -m pytest --confcutdir=tests/agents tests/agents/test_llm_client_loop.py -q
+
+      - name: Run retrieval unit tests (DB-free)
+        run: python -m pytest --confcutdir=tests/retrieval tests/retrieval/test_embedding_dim_guard.py tests/retrieval/test_vector_store.py tests/retrieval/test_scoring.py -q
+
+      - name: Run benchmark unit tests (DB-free)
+        run: python -m pytest --confcutdir=tests/benchmarks tests/benchmarks -q
 
       - name: Run config tests
         run: python -m pytest --confcutdir=tests/config tests/config/test_settings_validation.py -q

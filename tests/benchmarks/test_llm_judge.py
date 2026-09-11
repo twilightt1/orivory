@@ -129,3 +129,37 @@ async def test_judge_rejects_incorrect_not_substring(monkeypatch):
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     monkeypatch.setattr("openai.AsyncOpenAI", _FakeOpenAI)
     assert await judge_answer("Q?", "gold", "wrong answer") is False
+
+
+async def test_judge_verdict_logging_survives_info_level(monkeypatch, caplog):
+    """Regression: the verdict log call used structlog-style kwargs on a
+    stdlib logger — TypeError whenever the effective level reached INFO
+    (production, full-suite runs), silently failing every judged answer."""
+    import logging
+
+    from eval.benchmarks import llm_judge as judge_mod
+
+    class _FakeMessage:
+        content = "correct"
+
+    class _FakeChoice:
+        message = _FakeMessage()
+
+    class _FakeCompletion:
+        choices = [_FakeChoice()]
+
+    class _FakeCompletions:
+        async def create(self, **kwargs):
+            return _FakeCompletion()
+
+    class _FakeChat:
+        completions = _FakeCompletions()
+
+    class _FakeOpenAI:
+        def __init__(self, **kwargs):
+            self.chat = _FakeChat()
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setattr("openai.AsyncOpenAI", _FakeOpenAI)
+    caplog.set_level(logging.INFO, logger=judge_mod.log.name)
+    assert await judge_mod.judge_answer("Q?", "gold", "resp") is True

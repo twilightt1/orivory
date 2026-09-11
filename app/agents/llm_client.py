@@ -96,14 +96,34 @@ class ResilientAsyncOpenAI:
         return getattr(self._inner, name)
 
 
+_client_loop: asyncio.AbstractEventLoop | None = None
+
+
 def get_llm_client() -> AsyncOpenAI:
     """Return the shared configured client (OpenRouter by default).
 
     Returns a ResilientAsyncOpenAI duck-type: transparent to callers, but
     every ``chat.completions.create`` gains the structured-outputs fallback.
+
+    The cached httpx pool is bound to the event loop that created it, so the
+    client is rebuilt whenever the running loop changes. Without this, sync
+    contexts that drive one coroutine per ``asyncio.run()`` (Celery graph
+    tasks) reuse a pool bound to an already-closed loop from the second task
+    on — every call raises and extraction silently degrades to fallback.
     """
-    global _client
-    if _client is None:
+    global _client, _client_loop
+    try:
+        running_loop: asyncio.AbstractEventLoop | None = asyncio.get_running_loop()
+    except RuntimeError:
+        running_loop = None
+    if _client is None or (
+        running_loop is not None
+        and _client_loop is not None
+        and running_loop is not _client_loop
+    ):
+        # Drop the stale pool without awaiting its close: its loop is either
+        # closed already or belongs to another task — either way we cannot
+        # cleanly shut it down here, and abandoning beats reusing poison.
         _client = ResilientAsyncOpenAI(
             AsyncOpenAI(
                 api_key=settings.OPENROUTER_API_KEY,
@@ -116,6 +136,7 @@ def get_llm_client() -> AsyncOpenAI:
                 },
             )
         )
+        _client_loop = running_loop
     return _client
 
 

@@ -88,7 +88,9 @@ async def judge_answer(question: str, answer: str, response: str) -> bool:
         max_tokens=8,
     )
     verdict = (completion.choices[0].message.content or "").strip().lower().strip("`.*!\n ")
-    log.info("benchmark judge verdict", verdict=verdict, question=question[:80])
+    # stdlib logger: no structlog-style kwargs (they raise TypeError once the
+    # effective level reaches INFO — i.e. in production and full-suite runs).
+    log.info("benchmark judge verdict verdict=%s question=%.80s", verdict, question)
     # EXACT token match: "correct" is a substring of "incorrect", so a naive
     # substring test flips every rejection into a pass — caught by a real
     # gateway run (the fixture pilot scored 2/2 while wrong answers also

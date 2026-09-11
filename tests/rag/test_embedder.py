@@ -8,6 +8,14 @@ from app.retrieval import embedder
 from app.retrieval.embedder import embed_query, embed_texts, embed_texts_sync
 
 
+@pytest.fixture(autouse=True)
+def _dummy_provider_keys(monkeypatch):
+    """Client construction requires keys but never touches the network:
+    every test below replaces the transport (embeddings/post) with fakes."""
+    monkeypatch.setattr(settings, "OPENAI_API_KEY", "test-key")
+    monkeypatch.setattr(settings, "JINA_API_KEY", "test-key")
+
+
 class _FakeAsyncEmbeddings:
     def __init__(self):
         self.calls: list[dict] = []

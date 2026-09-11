@@ -70,6 +70,10 @@ class CaseJudgeResult:
     # Metadata
     model_used: str | None = None
     latency_ms: float | None = None
+    # Provenance: "llm" for real judged results, "heuristic" for the offline
+    # fallback. Aggregates must split on this — heuristic constants blended
+    # into headline scores present fabricated numbers as judged quality.
+    judged_by: str = "llm"
 
 
 def _build_judge_prompt(
@@ -268,14 +272,13 @@ def evaluate_case_offline(
     else:
         answer_relevancy = 0.3
 
-    # Reasoning quality: based on difficulty
-    difficulty_scores = {
-        "extreme": 0.5,
-        "hard": 0.65,
-        "medium": 0.75,
-        "easy": 0.85,
-    }
-    reasoning_quality = difficulty_scores.get(case.get("difficulty", "medium"), 0.65)
+    # Reasoning quality: the offline path cannot judge reasoning — there is no
+    # model reading the answer. Historically this was a constant keyed on the
+    # case's difficulty LABEL (easy=0.85 whatever the answer), which fabricated
+    # scores. Now it mirrors the only measured offline signal (keyword
+    # grounding); the result is tagged judged_by="heuristic" and headline
+    # aggregates split heuristic rows out.
+    reasoning_quality = faithfulness
 
     overall = (faithfulness + answer_relevancy + reasoning_quality) / 3
 
@@ -304,6 +307,7 @@ def evaluate_case_offline(
         judge_reasoning="Heuristic evaluation (LLM not available)",
         errors=errors,
         suggestions=suggestions,
+        judged_by="heuristic",
     )
 
 
@@ -371,6 +375,10 @@ def summarize_judge_results(results: list[CaseJudgeResult]) -> dict[str, Any]:
     if not results:
         return {
             "total_cases": 0,
+            "heuristic_cases": 0,
+            "llm_cases": 0,
+            "avg_overall_score_llm": 0.0,
+            "pass_rate_llm": 0.0,
             "avg_faithfulness": 0.0,
             "avg_answer_relevancy": 0.0,
             "avg_reasoning_quality": 0.0,
@@ -383,6 +391,20 @@ def summarize_judge_results(results: list[CaseJudgeResult]) -> dict[str, Any]:
 
     total = len(results)
     reasoning_total = len(reasoning_cases)
+
+    # Provenance split: heuristic rows must never silently blend into headline
+    # judged aggregates. LLM-only figures are the citable ones; the blended
+    # avgs below are kept for backward compat alongside explicit counts.
+    heuristic_cases = [r for r in results if r.judged_by == "heuristic"]
+    llm_cases = [r for r in results if r.judged_by != "heuristic"]
+    n_heuristic = len(heuristic_cases)
+    n_llm = len(llm_cases)
+    avg_overall_score_llm = (
+        sum(r.overall_score for r in llm_cases) / n_llm if n_llm else 0.0
+    )
+    pass_rate_llm = (
+        sum(1 for r in llm_cases if r.overall_score >= 0.7) / n_llm if n_llm else 0.0
+    )
 
     # Overall scores
     avg_faithfulness = sum(r.faithfulness for r in results) / total
@@ -429,6 +451,10 @@ def summarize_judge_results(results: list[CaseJudgeResult]) -> dict[str, Any]:
     return {
         "total_cases": total,
         "reasoning_cases": reasoning_total,
+        "heuristic_cases": n_heuristic,
+        "llm_cases": n_llm,
+        "avg_overall_score_llm": avg_overall_score_llm,
+        "pass_rate_llm": pass_rate_llm,
         "avg_faithfulness": avg_faithfulness,
         "avg_answer_relevancy": avg_answer_relevancy,
         "avg_reasoning_quality": avg_reasoning_quality,

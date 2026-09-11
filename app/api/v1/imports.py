@@ -201,7 +201,9 @@ async def create_import(
             "file": file.filename or "upload",
             "source_format": source_format,
             "requested_by": requested_by,
-            "created": summary.created,
+            # NOTE: never use `created` here — it collides with LogRecord's
+            # reserved attribute and raises KeyError when the record emits.
+            "created_count": summary.created,
             "skipped_duplicates": summary.skipped_duplicates,
         },
     )

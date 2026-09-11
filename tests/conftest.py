@@ -1,6 +1,7 @@
 """Pytest configuration and shared fixtures."""
 import asyncio
 import os
+import warnings
 
 # Mock required environment variables BEFORE importing app modules
 os.environ.setdefault("DATABASE_URL", "postgresql+asyncpg://postgres:password@localhost:55432/ragdb_test")
@@ -99,6 +100,35 @@ class MockRedis:
 _mock_redis = MockRedis()
 
 
+_DB_AVAILABLE: bool | None = None
+_DB_ERROR: str = ""
+
+
+async def require_db_available() -> None:
+    """Skip the calling test when Postgres is unreachable.
+
+    For tests that manage their own engine (loop-local engines in the hub
+    security / import suites) instead of using the ``db`` fixture. Probes
+    live when the session fixture never ran (e.g. ``--confcutdir``
+    isolation), otherwise reuses its recorded result.
+    """
+    global _DB_AVAILABLE, _DB_ERROR
+    if _DB_AVAILABLE is None:
+        try:
+            from sqlalchemy import text
+
+            probe = create_async_engine(TEST_DATABASE_URL, poolclass=NullPool)
+            async with probe.begin() as conn:
+                await conn.execute(text("SELECT 1"))
+            await probe.dispose()
+            _DB_AVAILABLE = True
+        except Exception as e:
+            _DB_AVAILABLE = False
+            _DB_ERROR = str(e)
+    if not _DB_AVAILABLE:
+        pytest.skip(f"Database not available: {_DB_ERROR}")
+
+
 @pytest.fixture(autouse=True)
 def mock_redis_for_rate_limiter(monkeypatch):
     """Mock Redis client to bypass rate limiting in tests."""
@@ -133,24 +163,43 @@ def event_loop():
 
 @pytest_asyncio.fixture(scope="session", autouse=True)
 async def setup_db():
+    """Provision test tables once per session — WITHOUT skipping the suite.
+
+    Historically this fixture called ``pytest.skip()`` when Postgres was
+    unreachable, which silently skipped the ENTIRE suite (648 tests, exit 0):
+    `make test` looked green while running nothing. Now the failure is
+    recorded and only tests that actually need the database (via the ``db``
+    / ``client`` fixtures below) skip; pure-unit tests run regardless.
+    """
+    global _DB_AVAILABLE, _DB_ERROR
     try:
         async with test_engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
+        _DB_AVAILABLE = True
         yield
     except Exception as e:
-        print(f"Error connecting to test database. Please ensure postgres is running at {TEST_DATABASE_URL}: {e}")
-
-        pytest.skip(f"Database not available: {e}")
+        _DB_AVAILABLE = False
+        _DB_ERROR = str(e)
+        warnings.warn(
+            f"Postgres unavailable at {TEST_DATABASE_URL} ({e}); "
+            f"DB-backed tests will skip, unit tests still run. "
+            f"Start it with: docker compose up -d postgres",
+            stacklevel=2,
+        )
+        yield
     finally:
-        try:
-            async with test_engine.begin() as conn:
-                await conn.run_sync(Base.metadata.drop_all)
-        except Exception:
-            pass
+        if _DB_AVAILABLE:
+            try:
+                async with test_engine.begin() as conn:
+                    await conn.run_sync(Base.metadata.drop_all)
+            except Exception:
+                pass
 
 
 @pytest_asyncio.fixture
 async def db():
+    if not _DB_AVAILABLE:
+        pytest.skip(f"Database not available: {_DB_ERROR}")
     async with TestSession() as session:
         yield session
         await session.rollback()

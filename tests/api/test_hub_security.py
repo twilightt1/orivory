@@ -28,6 +28,15 @@ from app.utils.dependencies import get_current_verified_user
 pytestmark = pytest.mark.api
 
 
+@pytest.fixture(autouse=True)
+async def _require_test_database():
+    """These suites manage their own loop-local engines (not the shared `db`
+    fixture), so they probe Postgres directly and skip when it is down."""
+    from tests.conftest import require_db_available
+
+    await require_db_available()
+
+
 def _agent_row(user_id: uuid.UUID, name: str) -> AgentClient:
     # uuid suffix keeps token hashes unique across test runs (unique index)
     token = f"oa_{name}_{uuid.uuid4().hex}"
@@ -196,6 +205,15 @@ async def test_import_dedup_counts_over_http():
     await engine.dispose()
 
     client = await _auth_client(user_id)
+    # /imports authenticates via `_optional_user` (dual human/agent auth), not
+    # `get_current_verified_user` — without this the calls below 401.
+    from app.api.v1 import imports as imports_module
+
+    async def _imports_user_override():
+        return User(id=user_id, email=f"{user_id}@example.com", hashed_password="x",
+                    is_verified=True, is_active=True)
+
+    app.dependency_overrides[imports_module._optional_user] = _imports_user_override
     async with client as c:
         resp1 = await c.post(
             "/api/v1/imports",
@@ -211,6 +229,7 @@ async def test_import_dedup_counts_over_http():
         )
         assert resp2.status_code == 201
         assert resp2.json()["skipped_duplicates"] == 1
+    app.dependency_overrides.pop(imports_module._optional_user, None)
     await _close(client)
 
 
