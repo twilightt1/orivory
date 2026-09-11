@@ -1,0 +1,493 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Orivory — Full Architecture</title>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: 'JetBrains Mono', monospace; background: #020617; min-height: 100vh; padding: 2rem; color: white; }
+    .container { max-width: 1200px; margin: 0 auto; }
+    .header { margin-bottom: 2rem; }
+    .header-row { display: flex; align-items: center; gap: 1rem; margin-bottom: 0.5rem; }
+    .pulse-dot { width: 12px; height: 12px; background: #22d3ee; border-radius: 50%; animation: pulse 2s infinite; }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+    h1 { font-size: 1.5rem; font-weight: 700; letter-spacing: -0.025em; }
+    h2 { font-size: 1.05rem; font-weight: 700; margin: 2.5rem 0 0.4rem 0.2rem; }
+    .subtitle { color: #94a3b8; font-size: 0.875rem; margin-left: 1.75rem; }
+    .section-sub { color: #64748b; font-size: 0.78rem; margin: 0 0 1rem 0.2rem; }
+    .diagram-container { background: rgba(15, 23, 42, 0.5); border-radius: 1rem; border: 1px solid #1e293b; padding: 1.5rem; overflow-x: auto; }
+    svg { width: 100%; min-width: 900px; display: block; }
+    .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 1rem; margin-top: 2rem; }
+    .card { background: rgba(15, 23, 42, 0.5); border-radius: 0.75rem; border: 1px solid #1e293b; padding: 1.25rem; }
+    .card-header { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.75rem; }
+    .card-dot { width: 8px; height: 8px; border-radius: 50%; }
+    .card-dot.cyan { background: #22d3ee; } .card-dot.emerald { background: #34d399; }
+    .card-dot.violet { background: #a78bfa; } .card-dot.amber { background: #fbbf24; }
+    .card-dot.rose { background: #fb7185; } .card-dot.orange { background: #fb923c; }
+    .card h3 { font-size: 0.875rem; font-weight: 600; }
+    .card ul { list-style: none; color: #94a3b8; font-size: 0.75rem; }
+    .card li { margin-bottom: 0.375rem; }
+    .footer { text-align: center; margin-top: 1.5rem; color: #475569; font-size: 0.75rem; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <div class="header-row"><div class="pulse-dot"></div><h1>Orivory — Full Architecture</h1></div>
+      <p class="subtitle">Open Memory Hub · FastAPI + LangGraph + Next.js · Postgres + ChromaDB · 5 views</p>
+    </div>
+
+    <!-- ============ D1 SYSTEM OVERVIEW ============ -->
+    <h2>1 · System overview</h2>
+    <p class="section-sub">Who talks to what. Two deploy modes share the same app code via backend seams.</p>
+    <div class="diagram-container">
+      <svg viewBox="0 0 1000 560">
+        <defs>
+          <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0, 10 3.5, 0 7" fill="#64748b"/></marker>
+          <marker id="arrowrose" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0, 10 3.5, 0 7" fill="#fb7185"/></marker>
+          <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse"><path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1e293b" stroke-width="0.5"/></pattern>
+        </defs>
+        <rect width="100%" height="100%" fill="url(#grid)"/>
+        <!-- callers -->
+        <rect x="20" y="60" width="150" height="60" rx="6" fill="rgba(30,41,59,.5)" stroke="#94a3b8" stroke-width="1.5"/>
+        <text x="95" y="85" fill="white" font-size="11" font-weight="600" text-anchor="middle">AI agents</text>
+        <text x="95" y="101" fill="#94a3b8" font-size="9" text-anchor="middle">Claude / Cursor / scripts</text>
+        <rect x="20" y="140" width="150" height="60" rx="6" fill="rgba(30,41,59,.5)" stroke="#94a3b8" stroke-width="1.5"/>
+        <text x="95" y="165" fill="white" font-size="11" font-weight="600" text-anchor="middle">Humans</text>
+        <text x="95" y="181" fill="#94a3b8" font-size="9" text-anchor="middle">Browser :3000</text>
+        <!-- edge -->
+        <rect x="200" y="60" width="170" height="60" rx="6" fill="rgba(8,51,68,.4)" stroke="#22d3ee" stroke-width="1.5"/>
+        <text x="285" y="85" fill="white" font-size="11" font-weight="600" text-anchor="middle">Next.js frontend</text>
+        <text x="285" y="101" fill="#94a3b8" font-size="9" text-anchor="middle">App Router · :3000</text>
+        <rect x="200" y="140" width="170" height="60" rx="6" fill="rgba(6,78,59,.4)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="285" y="162" fill="white" font-size="11" font-weight="600" text-anchor="middle">MCP Hub · /mcp</text>
+        <text x="285" y="178" fill="#94a3b8" font-size="9" text-anchor="middle">streamable-http · 7 tools</text>
+        <!-- api -->
+        <rect x="400" y="60" width="200" height="140" rx="8" fill="rgba(6,78,59,.4)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="500" y="85" fill="white" font-size="12" font-weight="600" text-anchor="middle">FastAPI · :8000</text>
+        <text x="500" y="104" fill="#94a3b8" font-size="8" text-anchor="middle">20 routers · 147 routes</text>
+        <text x="500" y="119" fill="#94a3b8" font-size="8" text-anchor="middle">auth · memories · chat(SSE)</text>
+        <text x="500" y="134" fill="#94a3b8" font-size="8" text-anchor="middle">sources · imports · insights</text>
+        <text x="500" y="149" fill="#94a3b8" font-size="8" text-anchor="middle">workspaces · agents · erasure</text>
+        <text x="500" y="164" fill="#94a3b8" font-size="8" text-anchor="middle">entities · admin · analytics…</text>
+        <text x="500" y="182" fill="#34d399" font-size="8" text-anchor="middle">quota + rate-limit guards</text>
+        <!-- services -->
+        <rect x="630" y="60" width="160" height="140" rx="8" fill="rgba(6,78,59,.4)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="710" y="85" fill="white" font-size="12" font-weight="600" text-anchor="middle">Services</text>
+        <text x="710" y="104" fill="#94a3b8" font-size="8" text-anchor="middle">30+ domain services</text>
+        <text x="710" y="119" fill="#94a3b8" font-size="8" text-anchor="middle">erasure + receipts</text>
+        <text x="710" y="134" fill="#94a3b8" font-size="8" text-anchor="middle">import dedup · ledger</text>
+        <text x="710" y="149" fill="#94a3b8" font-size="8" text-anchor="middle">quota · digest · referral</text>
+        <text x="710" y="164" fill="#94a3b8" font-size="8" text-anchor="middle">RAG agents → diagram 2</text>
+        <text x="710" y="182" fill="#34d399" font-size="8" text-anchor="middle">↳ diagram 4 lifecycle</text>
+        <!-- data -->
+        <rect x="820" y="30" width="160" height="60" rx="6" fill="rgba(76,29,149,.4)" stroke="#a78bfa" stroke-width="1.5"/>
+        <text x="900" y="54" fill="white" font-size="11" font-weight="600" text-anchor="middle">Postgres</text>
+        <text x="900" y="70" fill="#94a3b8" font-size="9" text-anchor="middle">27 tables · source of truth</text>
+        <rect x="820" y="100" width="160" height="60" rx="6" fill="rgba(76,29,149,.4)" stroke="#a78bfa" stroke-width="1.5"/>
+        <text x="900" y="124" fill="white" font-size="11" font-weight="600" text-anchor="middle">ChromaDB</text>
+        <text x="900" y="140" fill="#94a3b8" font-size="9" text-anchor="middle">vectors · derived index</text>
+        <rect x="820" y="170" width="160" height="60" rx="6" fill="rgba(251,146,60,.3)" stroke="#fb923c" stroke-width="1.5"/>
+        <text x="900" y="194" fill="white" font-size="11" font-weight="600" text-anchor="middle">Redis + Celery</text>
+        <text x="900" y="210" fill="#94a3b8" font-size="9" text-anchor="middle">queues · cache · rate-limit</text>
+        <rect x="820" y="240" width="160" height="52" rx="6" fill="rgba(76,29,149,.4)" stroke="#a78bfa" stroke-width="1.5"/>
+        <text x="900" y="261" fill="white" font-size="11" font-weight="600" text-anchor="middle">MinIO / FS</text>
+        <text x="900" y="277" fill="#94a3b8" font-size="9" text-anchor="middle">uploads · exports</text>
+        <!-- arrows -->
+        <line x1="170" y1="90" x2="198" y2="90" stroke="#22d3ee" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <line x1="170" y1="170" x2="198" y2="170" stroke="#34d399" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <text x="120" y="130" fill="#94a3b8" font-size="8">MCP Bearer oa_…</text>
+        <line x1="370" y1="90" x2="398" y2="90" stroke="#22d3ee" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <line x1="370" y1="170" x2="398" y2="150" stroke="#34d399" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <line x1="600" y1="130" x2="628" y2="130" stroke="#34d399" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <line x1="790" y1="100" x2="818" y2="70" stroke="#a78bfa" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <line x1="790" y1="130" x2="818" y2="130" stroke="#a78bfa" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <line x1="790" y1="160" x2="818" y2="195" stroke="#fb923c" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <line x1="790" y1="185" x2="818" y2="262" stroke="#a78bfa" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <!-- modes -->
+        <rect x="20" y="330" width="470" height="180" rx="12" fill="rgba(251,191,36,.05)" stroke="#fbbf24" stroke-width="1" stroke-dasharray="8,4"/>
+        <text x="32" y="350" fill="#fbbf24" font-size="10" font-weight="600">LITE MODE · 1 container</text>
+        <text x="32" y="370" fill="#94a3b8" font-size="9">API + MCP · SQLite (create_all) · Chroma local</text>
+        <text x="32" y="388" fill="#94a3b8" font-size="9">in-memory Redis shim · FS storage · Celery eager</text>
+        <text x="32" y="406" fill="#94a3b8" font-size="9">ephemeral JWT secret · single user · agents via /mcp</text>
+        <text x="32" y="430" fill="#22d3ee" font-size="8">docker run ghcr.io/…/orivory:lite · make quickstart</text>
+        <text x="32" y="448" fill="#94a3b8" font-size="8">seams: database.py · redis_client.py · storage.py</text>
+        <text x="32" y="470" fill="#fb7185" font-size="8">restart wipes agent tokens + connector creds (by design)</text>
+        <text x="32" y="492" fill="#94a3b8" font-size="8">tests/lite/: real app code on temp SQLite, no docker</text>
+        <rect x="510" y="330" width="470" height="180" rx="12" fill="rgba(251,191,36,.05)" stroke="#fbbf24" stroke-width="1" stroke-dasharray="8,4"/>
+        <text x="522" y="350" fill="#fbbf24" font-size="10" font-weight="600">FULL STACK · docker compose</text>
+        <text x="522" y="370" fill="#94a3b8" font-size="9">app + workers + beat · Next.js · Flower · migrate gate</text>
+        <text x="522" y="388" fill="#94a3b8" font-size="9">Postgres (alembic, 12 revs) · Redis · Chroma · MinIO</text>
+        <text x="522" y="406" fill="#94a3b8" font-size="9">multi-user · workspaces · admin · analytics</text>
+        <text x="522" y="430" fill="#22d3ee" font-size="8">prod override: !override [] · non-root · healthchecks</text>
+        <text x="522" y="448" fill="#94a3b8" font-size="8">eval harness + CI integration job target this mode</text>
+        <text x="522" y="470" fill="#fb7185" font-size="8">referral tables + JSON cols need rev a9b8c7d6e5f4</text>
+        <text x="522" y="492" fill="#94a3b8" font-size="8">security_check.py validates merged compose behavior</text>
+      </svg>
+    </div>
+
+    <!-- ============ D2 RAG ============ -->
+    <h2>2 · RAG pipeline (LangGraph chat path)</h2>
+    <p class="section-sub">app/agents/graph.py · 19 nodes · corrective RAG + hallucination gate + bounded retries</p>
+    <div class="diagram-container">
+      <svg viewBox="0 0 1000 620">
+        <defs>
+          <marker id="ah2" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0, 10 3.5, 0 7" fill="#64748b"/></marker>
+          <pattern id="grid2" width="40" height="40" patternUnits="userSpaceOnUse"><path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1e293b" stroke-width="0.5"/></pattern>
+        </defs>
+        <rect width="100%" height="100%" fill="url(#grid2)"/>
+        <!-- entry -->
+        <rect x="20" y="40" width="130" height="52" rx="6" fill="rgba(8,51,68,.4)" stroke="#22d3ee" stroke-width="1.5"/>
+        <text x="85" y="62" fill="white" font-size="11" font-weight="600" text-anchor="middle">POST /chat</text>
+        <text x="85" y="78" fill="#94a3b8" font-size="9" text-anchor="middle">SSE stream</text>
+        <rect x="170" y="40" width="130" height="52" rx="6" fill="rgba(6,78,59,.4)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="235" y="62" fill="white" font-size="11" font-weight="600" text-anchor="middle">router</text>
+        <text x="235" y="78" fill="#94a3b8" font-size="9" text-anchor="middle">rag | summarize…</text>
+        <!-- context fan-in -->
+        <rect x="330" y="10" width="150" height="48" rx="6" fill="rgba(6,78,59,.4)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="405" y="29" fill="white" font-size="10" font-weight="600" text-anchor="middle">memory load</text>
+        <text x="405" y="44" fill="#94a3b8" font-size="8" text-anchor="middle">conversation scope</text>
+        <rect x="330" y="66" width="150" height="48" rx="6" fill="rgba(6,78,59,.4)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="405" y="85" fill="white" font-size="10" font-weight="600" text-anchor="middle">personal_context</text>
+        <text x="405" y="100" fill="#94a3b8" font-size="8" text-anchor="middle">pinned + recent + rewrite</text>
+        <rect x="330" y="122" width="150" height="48" rx="6" fill="rgba(6,78,59,.4)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="405" y="141" fill="white" font-size="10" font-weight="600" text-anchor="middle">graph_context</text>
+        <text x="405" y="156" fill="#94a3b8" font-size="8" text-anchor="middle">entities / relations</text>
+        <rect x="500" y="40" width="130" height="52" rx="6" fill="rgba(6,78,59,.4)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="565" y="62" fill="white" font-size="11" font-weight="600" text-anchor="middle">hyde</text>
+        <text x="565" y="78" fill="#94a3b8" font-size="9" text-anchor="middle">hypothetical docs</text>
+        <!-- retrieval core -->
+        <rect x="650" y="10" width="330" height="150" rx="12" fill="transparent" stroke="#a78bfa" stroke-width="1" stroke-dasharray="8,4"/>
+        <text x="662" y="28" fill="#a78bfa" font-size="8">hybrid retrieval · app/retrieval/</text>
+        <rect x="665" y="38" width="140" height="48" rx="6" fill="rgba(76,29,149,.4)" stroke="#a78bfa" stroke-width="1.5"/>
+        <text x="735" y="57" fill="white" font-size="10" font-weight="600" text-anchor="middle">vector (Chroma)</text>
+        <text x="735" y="72" fill="#94a3b8" font-size="8" text-anchor="middle">user_id where-filter</text>
+        <rect x="825" y="38" width="140" height="48" rx="6" fill="rgba(76,29,149,.4)" stroke="#a78bfa" stroke-width="1.5"/>
+        <text x="895" y="57" fill="white" font-size="10" font-weight="600" text-anchor="middle">BM25</text>
+        <text x="895" y="72" fill="#94a3b8" font-size="8" text-anchor="middle">gen-counter protocol</text>
+        <rect x="665" y="96" width="140" height="48" rx="6" fill="rgba(76,29,149,.4)" stroke="#a78bfa" stroke-width="1.5"/>
+        <text x="735" y="115" fill="white" font-size="10" font-weight="600" text-anchor="middle">RRF fusion</text>
+        <text x="735" y="130" fill="#94a3b8" font-size="8" text-anchor="middle">k=60</text>
+        <rect x="825" y="96" width="140" height="48" rx="6" fill="rgba(76,29,149,.4)" stroke="#a78bfa" stroke-width="1.5"/>
+        <text x="895" y="115" fill="white" font-size="10" font-weight="600" text-anchor="middle">Jina rerank</text>
+        <text x="895" y="130" fill="#94a3b8" font-size="8" text-anchor="middle">fail-open → vector</text>
+        <!-- scoring+merge -->
+        <rect x="330" y="200" width="150" height="52" rx="6" fill="rgba(6,78,59,.4)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="405" y="221" fill="white" font-size="10" font-weight="600" text-anchor="middle">salience/decay</text>
+        <text x="405" y="236" fill="#94a3b8" font-size="8" text-anchor="middle">floor 0.1 · nudge ±15%</text>
+        <rect x="500" y="200" width="130" height="52" rx="6" fill="rgba(6,78,59,.4)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="565" y="221" fill="white" font-size="10" font-weight="600" text-anchor="middle">merge_context</text>
+        <text x="565" y="236" fill="#94a3b8" font-size="8" text-anchor="middle">≤10 chunks · 24k chars</text>
+        <rect x="650" y="200" width="130" height="52" rx="6" fill="rgba(6,78,59,.4)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="715" y="221" fill="white" font-size="10" font-weight="600" text-anchor="middle">grade_docs</text>
+        <text x="715" y="236" fill="#94a3b8" font-size="8" text-anchor="middle">evaluator agent</text>
+        <rect x="800" y="200" width="180" height="52" rx="6" fill="rgba(6,78,59,.4)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="890" y="221" fill="white" font-size="10" font-weight="600" text-anchor="middle">crag (+web fallback)</text>
+        <text x="890" y="236" fill="#94a3b8" font-size="8" text-anchor="middle">Tavily · trunc 4k · re-budget</text>
+        <!-- multihop side -->
+        <rect x="20" y="200" width="130" height="52" rx="6" fill="rgba(6,78,59,.4)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="85" y="221" fill="white" font-size="10" font-weight="600" text-anchor="middle">multihop</text>
+        <text x="85" y="236" fill="#94a3b8" font-size="8" text-anchor="middle">hops cap · terminates</text>
+        <rect x="170" y="200" width="130" height="52" rx="6" fill="rgba(6,78,59,.4)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="235" y="221" fill="white" font-size="10" font-weight="600" text-anchor="middle">save_note/save</text>
+        <text x="235" y="236" fill="#94a3b8" font-size="8" text-anchor="middle">write-back path</text>
+        <!-- answer + gate -->
+        <rect x="330" y="300" width="150" height="56" rx="6" fill="rgba(6,78,59,.4)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="405" y="322" fill="white" font-size="11" font-weight="600" text-anchor="middle">answer</text>
+        <text x="405" y="338" fill="#94a3b8" font-size="8" text-anchor="middle">[Source N] citations enforced</text>
+        <rect x="500" y="300" width="150" height="56" rx="6" fill="rgba(136,19,55,.4)" stroke="#fb7185" stroke-width="1.5"/>
+        <text x="575" y="322" fill="white" font-size="11" font-weight="600" text-anchor="middle">grade_gen</text>
+        <text x="575" y="338" fill="#94a3b8" font-size="8" text-anchor="middle">hallucination check</text>
+        <rect x="670" y="300" width="310" height="56" rx="6" fill="rgba(30,41,59,.5)" stroke="#94a3b8" stroke-width="1.5"/>
+        <text x="825" y="322" fill="white" font-size="10" font-weight="600" text-anchor="middle">retry nodes (bounded, max 3)</text>
+        <text x="825" y="338" fill="#94a3b8" font-size="8" text-anchor="middle">retry_retrieval · retry_answer · retry_unanswered</text>
+        <!-- llm seam -->
+        <rect x="20" y="400" width="960" height="100" rx="12" fill="transparent" stroke="#fb923c" stroke-width="1" stroke-dasharray="8,4"/>
+        <text x="32" y="420" fill="#fb923c" font-size="9" font-weight="600">SHARED SEAMS (every agent funnels through these)</text>
+        <text x="32" y="442" fill="#94a3b8" font-size="9">llm_client.get_llm_client() → ResilientAsyncOpenAI · 60s timeout · structured-output fallback · loop-aware rebuild</text>
+        <text x="32" y="460" fill="#94a3b8" font-size="9">llm_parsing.parse_llm_json_object() → fence-tolerant JSON (multihop/discovery/insight still use bare json.loads — open item)</text>
+        <text x="32" y="478" fill="#94a3b8" font-size="9">embedder: local 384 · Jina 1024 · OpenAI 1536 → dim guard stamped in collection metadata (fail loud on flip)</text>
+        <text x="32" y="492" fill="#fb7185" font-size="8">cost ledger records answer-agent only · memories are untrusted prompt content (injection surface, open)</text>
+        <!-- arrows -->
+        <line x1="150" y1="66" x2="168" y2="66" stroke="#64748b" stroke-width="1.5" marker-end="url(#ah2)"/>
+        <line x1="300" y1="66" x2="328" y2="40" stroke="#64748b" stroke-width="1.5" marker-end="url(#ah2)"/>
+        <line x1="480" y1="60" x2="498" y2="60" stroke="#64748b" stroke-width="1.5" marker-end="url(#ah2)"/>
+        <line x1="630" y1="66" x2="648" y2="66" stroke="#64748b" stroke-width="1.5" marker-end="url(#ah2)"/>
+        <line x1="405" y1="170" x2="405" y2="198" stroke="#64748b" stroke-width="1.5" marker-end="url(#ah2)"/>
+        <line x1="480" y1="226" x2="498" y2="226" stroke="#64748b" stroke-width="1.5" marker-end="url(#ah2)"/>
+        <line x1="630" y1="226" x2="648" y2="226" stroke="#64748b" stroke-width="1.5" marker-end="url(#ah2)"/>
+        <line x1="780" y1="226" x2="798" y2="226" stroke="#64748b" stroke-width="1.5" marker-end="url(#ah2)"/>
+        <line x1="480" y1="300" x2="440" y2="300" stroke="#64748b" stroke-width="1.5" marker-end="url(#ah2)"/>
+        <text x="460" y="294" fill="#94a3b8" font-size="8">grade</text>
+        <line x1="650" y1="328" x2="668" y2="328" stroke="#64748b" stroke-width="1.5" marker-end="url(#ah2)"/>
+        <line x1="150" y1="226" x2="328" y2="226" stroke="#64748b" stroke-width="1.5" stroke-dasharray="5,5"/>
+        <text x="230" y="220" fill="#94a3b8" font-size="8">conditional branch</text>
+        <!-- budget note -->
+        <rect x="20" y="520" width="960" height="60" rx="6" fill="rgba(6,78,59,.25)" stroke="#34d399" stroke-width="1"/>
+        <text x="500" y="542" fill="#34d399" font-size="9" font-weight="600" text-anchor="middle">BUDGET INVARIANT (fixed this round)</text>
+        <text x="500" y="560" fill="#94a3b8" font-size="8" text-anchor="middle">merge_context enforces caps → CRAG web merge re-applies merge_context_chunks → answer prompt always bounded</text>
+      </svg>
+    </div>
+
+    <!-- ============ D3 SECURITY ============ -->
+    <h2>3 · Auth, MCP scoping &amp; erasure</h2>
+    <p class="section-sub">JWT rotation · agent tokens · ledger · verifiable forget</p>
+    <div class="diagram-container">
+      <svg viewBox="0 0 1000 560">
+        <defs>
+          <marker id="ah3" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0, 10 3.5, 0 7" fill="#64748b"/></marker>
+          <marker id="ar3" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0, 10 3.5, 0 7" fill="#fb7185"/></marker>
+          <pattern id="grid3" width="40" height="40" patternUnits="userSpaceOnUse"><path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1e293b" stroke-width="0.5"/></pattern>
+        </defs>
+        <rect width="100%" height="100%" fill="url(#grid3)"/>
+        <!-- human auth -->
+        <rect x="20" y="30" width="300" height="220" rx="12" fill="transparent" stroke="#fb7185" stroke-width="1" stroke-dasharray="4,4"/>
+        <text x="32" y="50" fill="#fb7185" font-size="9" font-weight="600">HUMAN AUTH · /api/v1/auth</text>
+        <rect x="35" y="60" width="270" height="44" rx="6" fill="rgba(136,19,55,.4)" stroke="#fb7185" stroke-width="1.5"/>
+        <text x="170" y="78" fill="white" font-size="10" font-weight="600" text-anchor="middle">register → OTP → onboard</text>
+        <text x="170" y="93" fill="#94a3b8" font-size="8" text-anchor="middle">bcrypt (72B guard) · 6-digit OTP ×5</text>
+        <rect x="35" y="112" width="270" height="44" rx="6" fill="rgba(136,19,55,.4)" stroke="#fb7185" stroke-width="1.5"/>
+        <text x="170" y="130" fill="white" font-size="10" font-weight="600" text-anchor="middle">login (IP rate-limit 10/m)</text>
+        <text x="170" y="145" fill="#94a3b8" font-size="8" text-anchor="middle">access JWT + httpOnly refresh</text>
+        <rect x="35" y="164" width="270" height="44" rx="6" fill="rgba(136,19,55,.4)" stroke="#fb7185" stroke-width="1.5"/>
+        <text x="170" y="182" fill="white" font-size="10" font-weight="600" text-anchor="middle">refresh → rotate</text>
+        <text x="170" y="197" fill="#94a3b8" font-size="8" text-anchor="middle">SHA-256 in Redis · invalidate-all on reset</text>
+        <rect x="35" y="216" width="270" height="24" rx="6" fill="rgba(136,19,55,.25)" stroke="#fb7185" stroke-width="1"/>
+        <text x="170" y="232" fill="#94a3b8" font-size="8" text-anchor="middle">forgot/reset · Google OAuth · prod validators</text>
+        <!-- agent -->
+        <rect x="350" y="30" width="300" height="220" rx="12" fill="transparent" stroke="#fb7185" stroke-width="1" stroke-dasharray="4,4"/>
+        <text x="362" y="50" fill="#fb7185" font-size="9" font-weight="600">AGENT AUTH · MCP identity</text>
+        <rect x="365" y="60" width="270" height="44" rx="6" fill="rgba(136,19,55,.4)" stroke="#fb7185" stroke-width="1.5"/>
+        <text x="500" y="78" fill="white" font-size="10" font-weight="600" text-anchor="middle">POST /agents → oa_… (once)</text>
+        <text x="500" y="93" fill="#94a3b8" font-size="8" text-anchor="middle">only SHA-256 stored · no expiry*</text>
+        <rect x="365" y="112" width="270" height="44" rx="6" fill="rgba(136,19,55,.4)" stroke="#fb7185" stroke-width="1.5"/>
+        <text x="500" y="130" fill="white" font-size="10" font-weight="600" text-anchor="middle">resolve_principal(token)</text>
+        <text x="500" y="145" fill="#94a3b8" font-size="8" text-anchor="middle">scopes {read, write} · active check</text>
+        <rect x="365" y="164" width="270" height="44" rx="6" fill="rgba(6,78,59,.4)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="500" y="182" fill="white" font-size="10" font-weight="600" text-anchor="middle">7 tools · scope-checked</text>
+        <text x="500" y="197" fill="#94a3b8" font-size="8" text-anchor="middle">limits clamped · user_id filter</text>
+        <rect x="365" y="216" width="270" height="24" rx="6" fill="rgba(136,19,55,.25)" stroke="#fb7185" stroke-width="1"/>
+        <text x="500" y="232" fill="#94a3b8" font-size="8" text-anchor="middle">*no rotation — open item</text>
+        <!-- ledger -->
+        <rect x="680" y="30" width="300" height="100" rx="8" fill="rgba(6,78,59,.4)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="830" y="54" fill="white" font-size="11" font-weight="600" text-anchor="middle">Access ledger</text>
+        <text x="830" y="72" fill="#94a3b8" font-size="8" text-anchor="middle">memory_access_logs · append-only</text>
+        <text x="830" y="87" fill="#94a3b8" font-size="8" text-anchor="middle">which AI saw what, when</text>
+        <text x="830" y="102" fill="#94a3b8" font-size="8" text-anchor="middle">survives memory deletion (by design)</text>
+        <text x="830" y="117" fill="#94a3b8" font-size="8" text-anchor="middle">prune: batched DELETE &lt; cutoff</text>
+        <!-- erasure -->
+        <rect x="680" y="140" width="300" height="110" rx="8" fill="rgba(6,78,59,.4)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="830" y="162" fill="white" font-size="11" font-weight="600" text-anchor="middle">Erasure + receipt</text>
+        <text x="830" y="180" fill="#94a3b8" font-size="8" text-anchor="middle">ownership BFS → ORM cascade</text>
+        <text x="830" y="195" fill="#94a3b8" font-size="8" text-anchor="middle">→ chroma delete → residual re-query</text>
+        <text x="830" y="210" fill="#94a3b8" font-size="8" text-anchor="middle">→ ErasureReceipt (status + detail)</text>
+        <text x="830" y="228" fill="#94a3b8" font-size="8" text-anchor="middle">no existence leak on foreign ids</text>
+        <!-- deps ladder -->
+        <rect x="20" y="290" width="960" height="110" rx="8" fill="rgba(136,19,55,.18)" stroke="#fb7185" stroke-width="1"/>
+        <text x="500" y="312" fill="#fb7185" font-size="9" font-weight="600" text-anchor="middle">DEPENDENCY LADDER (147 routes audited · 31 admin all require_admin)</text>
+        <text x="500" y="332" fill="#94a3b8" font-size="9" text-anchor="middle">get_current_user (decode + blacklist + active) → get_current_verified_user (+email) → get_current_active_user (+onboarding) → require_admin</text>
+        <text x="500" y="350" fill="#94a3b8" font-size="9" text-anchor="middle">no-auth surface = auth-flow endpoints only · chat.py auth lives in _get_conversation dep · enforce_llm_quota on LLM-spend routes</text>
+        <text x="500" y="368" fill="#94a3b8" font-size="9" text-anchor="middle">weak spots: login limit is IP-only · get_current_user allows unverified · agent tokens never expire (open)</text>
+        <text x="500" y="386" fill="#34d399" font-size="8" text-anchor="middle">FIXED: insights refresh now prefilters LLM-echoed IDs by ownership (was cross-tenant write)</text>
+        <!-- ssrf + misc -->
+        <rect x="20" y="420" width="470" height="110" rx="8" fill="rgba(6,78,59,.35)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="255" y="442" fill="white" font-size="11" font-weight="600" text-anchor="middle">SSRF guard (RSS · web clipper)</text>
+        <text x="255" y="460" fill="#94a3b8" font-size="8" text-anchor="middle">scheme allowlist · private/loopback/CGNAT block</text>
+        <text x="255" y="475" fill="#94a3b8" font-size="8" text-anchor="middle">post-redirect IP re-check · 5MB cap · DNS timeout</text>
+        <text x="255" y="490" fill="#94a3b8" font-size="8" text-anchor="middle">Drive/Gmail/Notion hit vendor APIs only (no SSRF)</text>
+        <text x="255" y="508" fill="#fb7185" font-size="8" text-anchor="middle">CRAG web content is untrusted 3rd-party text (open)</text>
+        <rect x="510" y="420" width="470" height="110" rx="8" fill="rgba(6,78,59,.35)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="745" y="442" fill="white" font-size="11" font-weight="600" text-anchor="middle">Secrets &amp; validation</text>
+        <text x="745" y="460" fill="#94a3b8" font-size="8" text-anchor="middle">connector creds Fernet-encrypted (fail-loud decrypt)</text>
+        <text x="745" y="475" fill="#94a3b8" font-size="8" text-anchor="middle">prod validators: JWT ≥32 · CORS explicit · MinIO · keys</text>
+        <text x="745" y="490" fill="#94a3b8" font-size="8" text-anchor="middle">refresh cookie: httpOnly · SameSite=strict · scoped path</text>
+        <text x="745" y="508" fill="#fb7185" font-size="8" text-anchor="middle">lite restart wipes derived encryption key (open)</text>
+        <!-- arrows -->
+        <line x1="635" y1="140" x2="678" y2="100" stroke="#34d399" stroke-width="1.5" marker-end="url(#ah3)"/>
+        <text x="640" y="110" fill="#94a3b8" font-size="8">every tool call</text>
+        <line x1="635" y1="190" x2="678" y2="195" stroke="#fb7185" stroke-width="1.5" stroke-dasharray="5,5" marker-end="url(#ar3)"/>
+        <text x="636" y="184" fill="#fb7185" font-size="8">forget_memory</text>
+      </svg>
+    </div>
+
+    <!-- ============ D4 DATA LIFECYCLE ============ -->
+    <h2>4 · Data lifecycle: ingest → index → recall → forget</h2>
+    <p class="section-sub">Postgres is source of truth · Chroma is a rebuildable derived index</p>
+    <div class="diagram-container">
+      <svg viewBox="0 0 1000 560">
+        <defs>
+          <marker id="ah4" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0, 10 3.5, 0 7" fill="#64748b"/></marker>
+          <pattern id="grid4" width="40" height="40" patternUnits="userSpaceOnUse"><path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1e293b" stroke-width="0.5"/></pattern>
+        </defs>
+        <rect width="100%" height="100%" fill="url(#grid4)"/>
+        <!-- ingest -->
+        <rect x="20" y="40" width="180" height="150" rx="8" fill="rgba(6,78,59,.4)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="110" y="62" fill="white" font-size="11" font-weight="600" text-anchor="middle">Ingestion</text>
+        <text x="110" y="80" fill="#94a3b8" font-size="8" text-anchor="middle">gmail · drive · notion</text>
+        <text x="110" y="94" fill="#94a3b8" font-size="8" text-anchor="middle">rss · web clipper · upload</text>
+        <text x="110" y="108" fill="#94a3b8" font-size="8" text-anchor="middle">manual · chatgpt/claude/</text>
+        <text x="110" y="122" fill="#94a3b8" font-size="8" text-anchor="middle">openclaw imports</text>
+        <text x="110" y="140" fill="#94a3b8" font-size="8" text-anchor="middle">backoff+jitter · 10k cap/item</text>
+        <text x="110" y="154" fill="#94a3b8" font-size="8" text-anchor="middle">per-item isolation (no batch kill)</text>
+        <text x="110" y="172" fill="#34d399" font-size="8" text-anchor="middle">dispatcher dedup (src_id, ref)</text>
+        <!-- chunk/index -->
+        <rect x="230" y="40" width="180" height="150" rx="8" fill="rgba(6,78,59,.4)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="320" y="62" fill="white" font-size="11" font-weight="600" text-anchor="middle">Chunk + write_back</text>
+        <text x="320" y="80" fill="#94a3b8" font-size="8" text-anchor="middle">heading-aware parents</text>
+        <text x="320" y="94" fill="#94a3b8" font-size="8" text-anchor="middle">embed → upsert-by-id</text>
+        <text x="320" y="108" fill="#94a3b8" font-size="8" text-anchor="middle">graph extract enqueue</text>
+        <text x="320" y="126" fill="#34d399" font-size="8" text-anchor="middle">dim guard stamps backend+dim</text>
+        <text x="320" y="140" fill="#fb7185" font-size="8" text-anchor="middle">chunker drops pre-heading (open)</text>
+        <text x="320" y="154" fill="#94a3b8" font-size="8" text-anchor="middle">reindex task replays PG→Chroma</text>
+        <text x="320" y="172" fill="#94a3b8" font-size="8" text-anchor="middle">PG is truth · Chroma rebuildable</text>
+        <!-- stores -->
+        <rect x="440" y="40" width="180" height="70" rx="6" fill="rgba(76,29,149,.4)" stroke="#a78bfa" stroke-width="1.5"/>
+        <text x="530" y="64" fill="white" font-size="11" font-weight="600" text-anchor="middle">memories (+tags JSON)</text>
+        <text x="530" y="80" fill="#94a3b8" font-size="8" text-anchor="middle">salience · pinned · is_shared</text>
+        <text x="530" y="95" fill="#94a3b8" font-size="8" text-anchor="middle">partial unique (user,type,ref)</text>
+        <rect x="440" y="120" width="180" height="70" rx="6" fill="rgba(76,29,149,.4)" stroke="#a78bfa" stroke-width="1.5"/>
+        <text x="530" y="144" fill="white" font-size="11" font-weight="600" text-anchor="middle">entities · relations</text>
+        <text x="530" y="160" fill="#94a3b8" font-size="8" text-anchor="middle">graph extraction (Celery)</text>
+        <text x="530" y="175" fill="#94a3b8" font-size="8" text-anchor="middle">dedup + clustering</text>
+        <!-- recall -->
+        <rect x="650" y="40" width="160" height="150" rx="8" fill="rgba(76,29,149,.4)" stroke="#a78bfa" stroke-width="1.5"/>
+        <text x="730" y="62" fill="white" font-size="11" font-weight="600" text-anchor="middle">Recall</text>
+        <text x="730" y="80" fill="#94a3b8" font-size="8" text-anchor="middle">rewrite → HyDE → hybrid</text>
+        <text x="730" y="94" fill="#94a3b8" font-size="8" text-anchor="middle">→ rerank → salience</text>
+        <text x="730" y="108" fill="#94a3b8" font-size="8" text-anchor="middle">→ budget merge → answer</text>
+        <text x="730" y="126" fill="#94a3b8" font-size="8" text-anchor="middle">salience bump on use</text>
+        <text x="730" y="140" fill="#94a3b8" font-size="8" text-anchor="middle">decay task fades stale</text>
+        <text x="730" y="154" fill="#94a3b8" font-size="8" text-anchor="middle">personal + graph context</text>
+        <text x="730" y="172" fill="#94a3b8" font-size="8" text-anchor="middle">↳ diagram 2 for detail</text>
+        <!-- forget -->
+        <rect x="830" y="40" width="150" height="150" rx="8" fill="rgba(136,19,55,.4)" stroke="#fb7185" stroke-width="1.5"/>
+        <text x="905" y="62" fill="white" font-size="11" font-weight="600" text-anchor="middle">Forget</text>
+        <text x="905" y="80" fill="#94a3b8" font-size="8" text-anchor="middle">REST / MCP forget</text>
+        <text x="905" y="94" fill="#94a3b8" font-size="8" text-anchor="middle">rows → vectors</text>
+        <text x="905" y="108" fill="#94a3b8" font-size="8" text-anchor="middle">→ residual check</text>
+        <text x="905" y="122" fill="#94a3b8" font-size="8" text-anchor="middle">→ receipt</text>
+        <text x="905" y="140" fill="#94a3b8" font-size="8" text-anchor="middle">ledger row survives</text>
+        <text x="905" y="154" fill="#94a3b8" font-size="8" text-anchor="middle">↳ diagram 3</text>
+        <!-- celery -->
+        <rect x="20" y="240" width="960" height="130" rx="12" fill="transparent" stroke="#fb923c" stroke-width="1" stroke-dasharray="8,4"/>
+        <text x="32" y="260" fill="#fb923c" font-size="9" font-weight="600">CELERY · tasks/ (acks_late · shared sync engine · time limits)</text>
+        <text x="32" y="282" fill="#94a3b8" font-size="9">ingestion_tasks (sync, retry×3) · graph_tasks (loop-aware client since fix) · reindex (paged, only-missing)</text>
+        <text x="32" y="300" fill="#94a3b8" font-size="9">salience decay (pinned exempt) · quota resets (idempotent) · ledger prune (retention window) · email (OTP in broker — open)</text>
+        <text x="32" y="318" fill="#94a3b8" font-size="9">lite mode: CELERY_TASK_ALWAYS_EAGER — same code path, no broker</text>
+        <text x="32" y="340" fill="#fb7185" font-size="8">OPEN: graph fallback results marked processed forever · permanently-failed builds return SUCCESS · unbounded ledger DELETE</text>
+        <text x="32" y="358" fill="#94a3b8" font-size="8">sync/async DB split solved by tasks/db.py (shared sync engine + pool) — lite eager path reuses async session</text>
+        <!-- migrations -->
+        <rect x="20" y="390" width="960" height="130" rx="12" fill="transparent" stroke="#a78bfa" stroke-width="1" stroke-dasharray="8,4"/>
+        <text x="32" y="410" fill="#a78bfa" font-size="9" font-weight="600">MIGRATIONS · alembic (12 revs, single head a9b8c7d6e5f4) · guarded by tests/migrations/</text>
+        <text x="32" y="432" fill="#94a3b8" font-size="9">001 → … → c7d8 (dedup index) → a9b8 (ARRAY→JSONB via to_jsonb + referral tables + partial unique + legacy cleanup)</text>
+        <text x="32" y="450" fill="#94a3b8" font-size="9">fidelity tests introspect the REAL chain vs Base.metadata: every table created, every column kind matches (ARRAY/JSON drift = red)</text>
+        <text x="32" y="468" fill="#94a3b8" font-size="9">conftest gap that hid the drift: suites provision via create_all, never the chain — integration job runs migrate first</text>
+        <text x="32" y="490" fill="#34d399" font-size="8" text-anchor="start">upgrade → downgrade → re-upgrade verified green on real Postgres 16</text>
+        <text x="32" y="508" fill="#94a3b8" font-size="8">lite bootstrap_sqlite() skips alembic entirely (fresh create_all incl. referral tables since models/__init__ fix)</text>
+        <!-- arrows -->
+        <line x1="200" y1="115" x2="228" y2="115" stroke="#34d399" stroke-width="1.5" marker-end="url(#ah4)"/>
+        <line x1="410" y1="90" x2="438" y2="80" stroke="#a78bfa" stroke-width="1.5" marker-end="url(#ah4)"/>
+        <line x1="410" y1="140" x2="438" y2="155" stroke="#a78bfa" stroke-width="1.5" marker-end="url(#ah4)"/>
+        <line x1="620" y1="115" x2="648" y2="115" stroke="#a78bfa" stroke-width="1.5" marker-end="url(#ah4)"/>
+        <line x1="810" y1="115" x2="828" y2="115" stroke="#fb7185" stroke-width="1.5" stroke-dasharray="5,5" marker-end="url(#ah4)"/>
+        <text x="812" y="108" fill="#fb7185" font-size="8">forget</text>
+      </svg>
+    </div>
+
+    <!-- ============ D5 DELIVERY ============ -->
+    <h2>5 · Delivery: CI, tests &amp; eval honesty</h2>
+    <p class="section-sub">What runs where — and what the suite actually proves</p>
+    <div class="diagram-container">
+      <svg viewBox="0 0 1000 480">
+        <defs>
+          <marker id="ah5" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0, 10 3.5, 0 7" fill="#64748b"/></marker>
+          <pattern id="grid5" width="40" height="40" patternUnits="userSpaceOnUse"><path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1e293b" stroke-width="0.5"/></pattern>
+        </defs>
+        <rect width="100%" height="100%" fill="url(#grid5)"/>
+        <rect x="20" y="30" width="300" height="200" rx="8" fill="rgba(120,53,15,.3)" stroke="#fbbf24" stroke-width="1.5"/>
+        <text x="170" y="54" fill="white" font-size="11" font-weight="600" text-anchor="middle">CI · test job (infra-free)</text>
+        <text x="170" y="73" fill="#94a3b8" font-size="8" text-anchor="middle">ruff full-repo · hand-picked files</text>
+        <text x="170" y="90" fill="#94a3b8" font-size="8" text-anchor="middle">api(5) · services(3) · rag(4)</text>
+        <text x="170" y="105" fill="#94a3b8" font-size="8" text-anchor="middle">eval(3) · config · hub/models</text>
+        <text x="170" y="120" fill="#34d399" font-size="8" text-anchor="middle">+ migrations · middleware · scripts</text>
+        <text x="170" y="135" fill="#34d399" font-size="8" text-anchor="middle">+ agents · retrieval · benchmarks</text>
+        <text x="170" y="150" fill="#94a3b8" font-size="8" text-anchor="middle">eval smoke (offline) · compose ×2</text>
+        <text x="170" y="168" fill="#94a3b8" font-size="8" text-anchor="middle">docker-publish (full + lite images)</text>
+        <text x="170" y="186" fill="#fbbf24" font-size="8" text-anchor="middle">--confcutdir isolates root PG fixture</text>
+        <text x="170" y="204" fill="#94a3b8" font-size="8" text-anchor="middle">~131 → ~180 fns (still partial — open)</text>
+        <rect x="340" y="30" width="300" height="200" rx="8" fill="rgba(120,53,15,.3)" stroke="#fbbf24" stroke-width="1.5"/>
+        <text x="490" y="54" fill="white" font-size="11" font-weight="600" text-anchor="middle">CI · integration + smoke</text>
+        <text x="490" y="73" fill="#94a3b8" font-size="8" text-anchor="middle">compose up → migrate → pytest</text>
+        <text x="490" y="90" fill="#94a3b8" font-size="8" text-anchor="middle">tests/integration (live PG/redis/…)</text>
+        <text x="490" y="105" fill="#94a3b8" font-size="8" text-anchor="middle">smoke (docker services, push-gated)</text>
+        <text x="490" y="120" fill="#94a3b8" font-size="8" text-anchor="middle">frontend: typecheck + build + e2e</text>
+        <text x="490" y="138" fill="#fb7185" font-size="8" text-anchor="middle">integration tests are mock-heavy:</text>
+        <text x="490" y="153" fill="#fb7185" font-size="8" text-anchor="middle">never persist Memory via real models</text>
+        <text x="490" y="168" fill="#fb7185" font-size="8" text-anchor="middle">→ ARRAY/JSON drift slipped through</text>
+        <text x="490" y="186" fill="#94a3b8" font-size="8" text-anchor="middle">auth/admin suites never run in CI (open)</text>
+        <text x="490" y="204" fill="#94a3b8" font-size="8" text-anchor="middle">e2e is render-smoke only (open)</text>
+        <rect x="660" y="30" width="320" height="200" rx="8" fill="rgba(6,78,59,.4)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="820" y="54" fill="white" font-size="11" font-weight="600" text-anchor="middle">Local: make test (fixed)</text>
+        <text x="820" y="73" fill="#94a3b8" font-size="8" text-anchor="middle">BEFORE: 648 skipped, exit 0 (no-op)</text>
+        <text x="820" y="90" fill="#34d399" font-size="8" text-anchor="middle">NOW: 634 pass · 46 honest skips</text>
+        <text x="820" y="105" fill="#94a3b8" font-size="8" text-anchor="middle">lazy per-test skip + loud warning</text>
+        <text x="820" y="120" fill="#94a3b8" font-size="8" text-anchor="middle">with PG: 663+ pass, 0 fail</text>
+        <text x="820" y="138" fill="#94a3b8" font-size="8" text-anchor="middle">require_db_available() for</text>
+        <text x="820" y="153" fill="#94a3b8" font-size="8" text-anchor="middle">own-engine suites (imports/hub)</text>
+        <text x="820" y="168" fill="#94a3b8" font-size="8" text-anchor="middle">make lint / lint-full / check</text>
+        <text x="820" y="186" fill="#94a3b8" font-size="8" text-anchor="middle">demo-smoke (SSE assertions)</text>
+        <text x="820" y="204" fill="#94a3b8" font-size="8" text-anchor="middle">security_check.py = exec gate</text>
+        <!-- eval -->
+        <rect x="20" y="260" width="960" height="150" rx="12" fill="transparent" stroke="#22d3ee" stroke-width="1" stroke-dasharray="8,4"/>
+        <text x="32" y="280" fill="#22d3ee" font-size="9" font-weight="600">EVAL HONESTY · eval/benchmarks (LongMemEval-S primary · MemoryAgentBench secondary)</text>
+        <text x="32" y="302" fill="#94a3b8" font-size="9">dataset operator-downloaded (gitignored) · sha256 travels with scores · missing dataset = hard error</text>
+        <text x="32" y="320" fill="#94a3b8" font-size="9">judge prompt pinned+versioned · exact-token match (documents its own substring trap fix) · failures excluded from mean, reported</text>
+        <text x="32" y="338" fill="#94a3b8" font-size="9">seeded sampling · resume tool · negative results committed · n=100 Wilson CIs in commit messages</text>
+        <text x="32" y="360" fill="#34d399" font-size="8" text-anchor="start">FIXED: eval/llm_judge.py offline path had label-derived constants blending into aggregates → judged_by provenance + LLM-only splits</text>
+        <text x="32" y="378" fill="#94a3b8" font-size="8">reporting.py aggregates · metrics.py (has_citation/is_fallback heuristics) · run_eval offline/live · run_benchmark phases</text>
+        <text x="32" y="396" fill="#94a3b8" font-size="8">frontend: Security/Import dashboards are the quality bar (loading+error states, one-time token warning, honest receipts)</text>
+        <!-- arrows -->
+        <line x1="320" y1="130" x2="338" y2="130" stroke="#64748b" stroke-width="1.5" marker-end="url(#ah5)"/>
+        <line x1="640" y1="130" x2="658" y2="130" stroke="#64748b" stroke-width="1.5" marker-end="url(#ah5)"/>
+      </svg>
+    </div>
+
+    <div class="cards">
+      <div class="card">
+        <div class="card-header"><div class="card-dot emerald"></div><h3>Strongest parts</h3></div>
+        <ul>
+          <li>• Erasure receipts with adversarial verification</li>
+          <li>• MCP scoping + append-only ledger on every tool</li>
+          <li>• Benchmark honesty culture (pinned judges, NEs kept)</li>
+          <li>• Graceful-degradation discipline across LLM calls</li>
+          <li>• Migration fidelity guard (new, self-testing)</li>
+        </ul>
+      </div>
+      <div class="card">
+        <div class="card-header"><div class="card-dot rose"></div><h3>Fixed this round</h3></div>
+        <ul>
+          <li>• ARRAY/JSON schema drift + missing referral tables</li>
+          <li>• Prod ports exposed · insights cross-tenant write</li>
+          <li>• CRAG budget bypass · Celery loop poisoning</li>
+          <li>• Embedding dim guard · silent test no-op</li>
+          <li>• 4 dead frontend features + 2 infinite loops</li>
+        </ul>
+      </div>
+      <div class="card">
+        <div class="card-header"><div class="card-dot amber"></div><h3>Deliberately deferred</h3></div>
+        <ul>
+          <li>• In-process stores → Redis/DB (hints/experiments)</li>
+          <li>• Cost ledger coverage + SQLite safety</li>
+          <li>• Prompt-injection hardening for stored memories</li>
+          <li>• Agent token rotation/expiry · chunker preamble</li>
+          <li>• Full CI coverage (auth/admin suites, real e2e)</li>
+        </ul>
+      </div>
+    </div>
+
+    <p class="footer">Orivory · reviewed + fixed Sep 2026 · full ruff + tsc clean · 634 pass / 0 fail (no PG)</p>
+  </div>
+</body>
+</html>

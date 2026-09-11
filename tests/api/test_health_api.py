@@ -12,7 +12,7 @@ async def test_health_returns_ok():
         response = await client.get("/health")
 
     assert response.status_code == 200
-    assert response.json() == {"status": "ok", "version": "1.0.0"}
+    assert response.json() == {"status": "ok", "version": "1.1.0"}
 
 
 @pytest.mark.asyncio
@@ -43,7 +43,7 @@ async def test_ready_returns_503_when_dependencies_are_degraded(monkeypatch):
     async def degraded_payload():
         return {
             "status": "degraded",
-            "version": "1.0.0",
+            "version": "1.1.0",
             "checks": {
                 "postgres": {"status": "ok", "latency_ms": 1.0},
                 "redis": {"status": "ok", "latency_ms": 1.0},

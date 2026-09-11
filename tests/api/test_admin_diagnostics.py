@@ -12,7 +12,7 @@ pytestmark = pytest.mark.api
 def _diagnostics_payload():
     return {
         "status": "ok",
-        "version": "1.0.0",
+        "version": "1.1.0",
         "environment": "test",
         "checks": {
             "postgres": {"status": "ok", "latency_ms": 1.0},

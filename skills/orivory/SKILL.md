@@ -1,7 +1,7 @@
 ---
 name: orivory-memory
 description: Persistent memory for OpenClaw agents via a self-hosted Orivory MCP server. Use when the user asks to remember, forget, or recall past decisions and history.
-version: 0.1.0
+version: 1.1.0
 homepage: https://github.com/twilightt1/orivory
 emoji: "🧠"
 metadata:

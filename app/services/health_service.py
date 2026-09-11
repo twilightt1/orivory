@@ -155,6 +155,6 @@ async def check_readiness() -> CheckPayload:
     status = "ok" if all(check["status"] == "ok" for check in checks.values()) else "degraded"
     return {
         "status": status,
-        "version": "1.0.0",
+        "version": "1.1.0",
         "checks": checks,
     }

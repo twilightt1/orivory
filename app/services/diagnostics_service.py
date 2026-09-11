@@ -14,7 +14,7 @@ DOCUMENT_TERMINAL_FAILURE_STATUSES = ("failed", "error")
 DOCUMENT_IN_FLIGHT_STATUSES = ("pending", "processing")
 RECENT_DOCUMENT_LIMIT = 5
 STUCK_AFTER_MINUTES = 15
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 
 
 async def _check_celery() -> None:

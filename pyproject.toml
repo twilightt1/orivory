@@ -1,6 +1,6 @@
 [project]
 name = "orivory"
-version = "0.1.0"
+version = "1.1.0"
 description = "Personal memory layer: ingest, connect, and recall knowledge with retrieval-augmented agents"
 readme = "README.md"
 requires-python = ">=3.13"
@@ -70,6 +70,7 @@ ignore = [
 # sys.path bootstrap must run before imports
 "eval/run_eval.py" = ["E402"]
 "eval/run_benchmark.py" = ["E402"]
+"eval/run_judge_only.py" = ["E402"]
 "scripts/security_check.py" = ["E402"]
 "tests/agents/test_cost_helpers.py" = ["E402"]
 

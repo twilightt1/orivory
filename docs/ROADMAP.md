@@ -1,10 +1,26 @@
 # Orivory Roadmap
 
-> Status: 2026-09-04. History lives in git; this file tracks what shipped and
+> Status: 2026-09-10. History lives in git; this file tracks what shipped and
 > what's open. Design rationale for the hub direction:
 > [ideas/open-memory-hub.md](ideas/open-memory-hub.md) + [research/](research/).
+> Positioning for the open-source launch:
+> [ideas/open-source-positioning.md](ideas/open-source-positioning.md).
 
 ## Shipped
+
+### Benchmark era (2026-09-05 → 2026-09-09, PR #11–#20)
+- OpenClaw auto-capture, one-command installer, compression.
+- Tuning ladder with Wilson CIs: 0.490 official n=100 → 0.570 Jina rerank;
+  two NEGATIVE results recorded honestly (session chunking, map-reduce).
+- Judge hardening (exact-token match, judged pilot).
+
+### Review + remediation batch (2026-09-10)
+- Schema reconciliation migration (`a9b8c7d6e5f4`) — full-stack Postgres
+  deployable again; `tests/migrations/` guards the drift class.
+- Prod compose lockdown (`!override`), behavior-validating security gate.
+- Cross-tenant, CRAG-budget, Celery-loop, embedding-dim fixes.
+- Test honesty: 634 pass / 0 fail without infra; CI extended.
+- Frontend loop/dead-feature fixes; FeatureHints token fix.
 
 ### Foundation (P0–P4, 2026-06)
 - Connector-synced memories embed; reindex/backfill task + admin endpoint.
@@ -33,14 +49,18 @@
 ## Open follow-ups (ranked)
 
 1. **UI**: access-ledger page, upload/import page, erasure-receipts view.
-2. **Behavioral REST security tests** (cross-user 404, 201 shape, ledger
-   scoping over HTTP) — wiring tests exist; HTTP-level tests are the top gap
-   from the final reviews.
+   (Security dashboard + imports page exist; ledger/receipts views TBD.)
+2. **Behavioral REST security tests** — partially closed 2026-09-10
+   (cross-tenant refresh guard + endpoint tests, auth-dep override fixes);
+   full HTTP-level matrix still open.
 3. **LLM judge for benchmarks** (official LongMemEval prompt, version pinned)
-   → first real public score after ≥3 judged runs.
+   → first real public score after ≥3 judged runs. Judge robustness fixed
+   (exact-token match, INFO-level logging crash, provenance tags).
 4. **Live wiring for benchmark ingest/query** against a running stack.
-5. **Ledger retention policy** (unbounded growth under chatty agents) +
-   unique index on `(user_id, source_type, source_ref)` for import races.
+5. **Ledger retention policy** — `ledger_tasks.py` prune exists; unique index
+   on `(user_id, source_type, source_ref)` shipped in `c7d8e9f0a1b2`.
+   Remaining: retention config surface + referral-code unique index (shipped
+   in `a9b8c7d6e5f4` as partial `uq_referral_codes_user_active`).
 6. **OpenClaw session-log import** (their memory is local Markdown — same
    generic-JSON path, needs a converter).
 7. **Rewind/Limitless adapter** — blocked on a verified export format

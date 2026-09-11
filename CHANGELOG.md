@@ -4,6 +4,44 @@ All notable changes to Orivory are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/) and the
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.1.0] — 2026-09-11 — benchmark era + full-repo remediation
+
+### Added — benchmark era (PR #11–#20, 2026-09-05 → 2026-09-09)
+- **OpenClaw auto-capture** (#11) — agent-token imports + capture daemon
+  (`scripts/openclaw_capture.py`) + skill docs.
+- **Compression + progressive disclosure** (#12) + one-command installer
+  (`install.sh`, the `npx claude-mem install` equivalent).
+- **Benchmark tuning ladder, all with Wilson 95% CIs** (#13–#19):
+  session-level chunking (NEGATIVE, recorded honestly) → system-vs-baseline
+  n=20 → semantic-dominant ranking (0.700 vs 0.600) → chunk overlap fusion
+  (0.650) → official n=100 run (0.490 [0.394, 0.587]) → Jina semantic
+  rerank (0.570 vs 0.490, CIs separate).
+- **Map-reduce answering experiment** (#20) — NEGATIVE result (0.486 clean
+  vs 0.570 single-pass), recorded honestly; resume/complete scripts kept
+  for long runs.
+- **Judge hardening** — exact-token match, env-aware gateway/model, real
+  judged pilot fixture.
+
+### Fixed — full-repo review + remediation batch (2026-09-10)
+- **Full-stack Postgres was broken on first write**: models used JSON list
+  columns while migrations created `varchar[]`; referral tables had no
+  migration at all. New migration `a9b8c7d6e5f4` converts ARRAY→JSONB and
+  creates the referral tables; `tests/migrations/` guards the drift class.
+- **Prod compose exposed internal services**: `ports: []`/`volumes: []`
+  are Compose merge no-ops — switched to `!override []`; `security_check.py`
+  now validates merged `compose config` behavior instead of grepping YAML.
+- **Cross-tenant insight mutation** via LLM-echoed IDs — ownership
+  prefilter added. **CRAG web fallback** re-applies the context budget.
+  **Celery graph tasks** no longer poison the shared LLM client across
+  `asyncio.run` boundaries. **Embedding backend switches** fail loud via
+  collection dim guard.
+- **Test suite honesty**: `make test` was a silent no-op (648 skips, exit 0)
+  without Postgres — now 634 pass / 46 honest per-test skips; 7 DB-free
+  suites added to CI; a dozen never-green tests fixed (wrong auth-dep
+  overrides, missing API keys, structlog-kwarg logging crash).
+- **Frontend**: two infinite refetch/render loops fixed, dead Discovery
+  journey + documents endpoints removed, FeatureHints token-key fix.
+
 ## [Unreleased] — Open Memory Hub MVP (2026-09-02 → 2026-09-04)
 
 The strategic pivot from "AI second brain app" to an **open memory hub for

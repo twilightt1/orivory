@@ -42,7 +42,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Orivory API",
-    version="1.0.0",
+    version="1.1.0",
     description="Personal AI Second Brain — multi-source RAG, time-aware retrieval, knowledge graph, agentic actions.",
     docs_url="/docs" if settings.ENVIRONMENT != "production" else None,
     redoc_url=None,
@@ -74,7 +74,7 @@ if settings.MCP_HUB_ENABLED:
 
 @app.get("/health", tags=["health"])
 async def health() -> JSONResponse:
-    return JSONResponse({"status": "ok", "version": "1.0.0"})
+    return JSONResponse({"status": "ok", "version": "1.1.0"})
 
 
 @app.get("/ready", tags=["health"])
