@@ -238,6 +238,8 @@ class RecallTrace(BaseModel):
     llm_fallback:       bool
     llm_reasoning:      str | None = None
     half_life_days:     float = 30.0
+    rewrite_skipped:    bool = False
+    stage_ms:           dict[str, float] = Field(default_factory=dict)
 
 
 class RecallResponse(BaseModel):

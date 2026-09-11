@@ -33,6 +33,8 @@ from app.models.entity import MemoryEntity
 from app.models.memory import Memory
 from app.retrieval.embedder import embed_query
 from app.retrieval.memory.context import fetch_personal_context
+from app.retrieval.memory.correction import needs_rewrite as _needs_rewrite
+from app.retrieval.memory.correction import state_of as _state_of
 from app.retrieval.memory.query_rewriter import rewrite_query
 from app.retrieval.memory.scoring import entity_boost, time_decay_score
 from app.retrieval.memory.vector_store import search_memories
@@ -85,6 +87,7 @@ class MemoryRetriever:
     ) -> RecallResponse:
         """Run the full recall pipeline and return a ``RecallResponse``."""
         t0 = time.perf_counter()
+        stage_ms: dict[str, float] = {}
 
         # 1) Personal context
         context: list[Memory] = []
@@ -94,8 +97,16 @@ class MemoryRetriever:
             except Exception as e:
                 log.warning("fetch_personal_context failed", extra={"error": str(e)})
 
-        # 2) LLM rewrite + entity extraction
-        rewrite_result = await rewrite_query(query, context=context)
+        # 2) LLM rewrite + entity extraction (fast-path: skip LLM when no pronouns)
+        t_rewrite = time.perf_counter()
+        if include_personal_context or _needs_rewrite(query):
+            rewrite_result = await rewrite_query(query, context=context)
+            rewrite_skipped = False
+        else:
+            rewrite_result = {"rewritten_query": query, "entities": [],
+                              "reasoning": "fast-path: no pronouns", "_fallback_used": False}
+            rewrite_skipped = True
+        stage_ms["rewrite_ms"] = (time.perf_counter() - t_rewrite) * 1000.0
         rewritten = rewrite_result["rewritten_query"]
         entities = rewrite_result["entities"]
         llm_fallback = bool(rewrite_result.get("_fallback_used"))
@@ -105,6 +116,7 @@ class MemoryRetriever:
         query_entity_names: set[str] = {e["name"].lower() for e in entities}
 
         # 3) Embed (use rewritten if LLM succeeded, else original)
+        t_embed = time.perf_counter()
         try:
             embedding = await embed_query(rewritten if not llm_fallback else query)
         except Exception as e:
@@ -113,9 +125,12 @@ class MemoryRetriever:
                 query, rewritten, entities, llm_fallback, llm_reasoning,
                 context if include_personal_context else None,
                 t0, reason=f"embedding_failed:{e}",
+                rewrite_skipped=rewrite_skipped, stage_ms=stage_ms,
             )
+        stage_ms["embed_ms"] = (time.perf_counter() - t_embed) * 1000.0
 
         # 4) Vector search (top_k * rerank_factor for headroom)
+        t_search = time.perf_counter()
         try:
             candidates = await search_memories(
                 embedding,
@@ -125,6 +140,7 @@ class MemoryRetriever:
         except Exception as e:
             log.error("search_memories failed", extra={"error": str(e)})
             candidates = []
+        stage_ms["search_ms"] = (time.perf_counter() - t_search) * 1000.0
 
         num_candidates = len(candidates)
 
@@ -152,11 +168,24 @@ class MemoryRetriever:
                 )
 
         # 5) Hydrate from Postgres (with entity_links)
+        t_hydrate = time.perf_counter()
         if candidates:
             memory_ids = [UUID(c["memory_id"]) for c in candidates]
             hydrated = await self._hydrate(memory_ids)
         else:
             hydrated = {}
+        stage_ms["hydrate_ms"] = (time.perf_counter() - t_hydrate) * 1000.0
+
+        # 5b) Hide superseded + derived-dirty candidates (never in Chroma metadata)
+        visible = []
+        for cand in candidates:
+            mem = hydrated.get(cand["memory_id"])
+            if mem is None:
+                continue
+            if _state_of(mem) == "superseded" or (getattr(mem, "extra_metadata", {}) or {}).get("cm_derived_dirty"):
+                continue
+            visible.append(cand)
+        candidates = visible
 
         # 6) Score: entity_boost + time_decay
         scored: list[tuple[Memory, float, list[str]]] = []
@@ -251,6 +280,8 @@ class MemoryRetriever:
             llm_fallback=llm_fallback,
             llm_reasoning=llm_reasoning,
             half_life_days=self.half_life_days,
+            rewrite_skipped=rewrite_skipped,
+            stage_ms=stage_ms,
         )
         return RecallResponse(
             results=results,
@@ -283,6 +314,8 @@ class MemoryRetriever:
         context: list[Memory] | None,
         t0: float,
         reason: str,
+        rewrite_skipped: bool = False,
+        stage_ms: dict[str, float] | None = None,
     ) -> RecallResponse:
         log.info("Returning empty recall", extra={"reason": reason})
         latency_ms = (time.perf_counter() - t0) * 1000.0
@@ -296,6 +329,8 @@ class MemoryRetriever:
             llm_fallback=llm_fallback,
             llm_reasoning=llm_reasoning,
             half_life_days=self.half_life_days,
+            rewrite_skipped=rewrite_skipped,
+            stage_ms=stage_ms or {},
         )
         return RecallResponse(
             results=[],
