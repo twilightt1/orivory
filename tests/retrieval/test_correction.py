@@ -35,3 +35,75 @@ def test_derived_dependents():
     old = _mem({"cm_derived_from": ["A", "B"]})
     assert C.find_derived_dependent_ids([old], {"B"}) == [str(old.id)]
     assert C.find_derived_dependent_ids([old], {"Z"}) == []
+
+
+class _FakeResult:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def scalars(self):
+        return self
+
+    def all(self):
+        return self._rows
+
+    def first(self):
+        return self._rows[0] if self._rows else None
+
+
+class _FakeDB:
+    def __init__(self, rows=None):
+        self.rows = rows or []
+        self.added = []
+        self.deleted = []
+        self.committed = 0
+
+    async def get(self, model, obj_id):
+        for row in self.rows:
+            if getattr(row, "id", None) == obj_id:
+                return row
+        return None
+
+    async def execute(self, _stmt):
+        return _FakeResult(self.rows)
+
+    def add(self, obj):
+        self.added.append(obj)
+
+    async def delete(self, obj):
+        self.deleted.append(obj)
+
+    async def commit(self):
+        self.committed += 1
+
+    async def refresh(self, _obj):
+        return None
+
+
+async def test_resolve_supersede_chain_single_commit():
+    from app.retrieval.memory.correction import resolve_correction
+    uid = uuid.uuid4()
+    old = _mem({"cm_subject": "proj-x", "cm_attribute": "db", "cm_scope": "prod"})
+    old.user_id = uid
+    db = _FakeDB(rows=[old])
+    out = await resolve_correction(db, user_id=uid, title="DB", content="Postgres",
+        subject="Proj-X", attribute="db", scope="prod")
+    assert out["status"] == "superseded"
+    assert db.committed == 1
+    new = out["memory"]
+    assert new.extra_metadata["cm_supersedes"] == str(old.id)
+    assert old.extra_metadata["cm_superseded_by"] == str(new.id)
+    assert out["superseded"] == [str(old.id)]
+
+
+async def test_resolve_ambiguous_scope_keeps_both():
+    from app.retrieval.memory.correction import resolve_correction
+    uid = uuid.uuid4()
+    old = _mem({"cm_subject": "proj-x", "cm_attribute": "db", "cm_scope": "prod"})
+    old.user_id = uid
+    db = _FakeDB(rows=[old])
+    out = await resolve_correction(db, user_id=uid, title="DB", content="SQLite",
+        subject="proj-x", attribute="db", scope="")
+    assert out["status"] == "needs-check"
+    assert old.extra_metadata.get("cm_superseded_by") is None
+    assert out["memory"].extra_metadata["cm_needs_check"] is True
