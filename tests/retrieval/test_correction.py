@@ -107,3 +107,17 @@ async def test_resolve_ambiguous_scope_keeps_both():
     assert out["status"] == "needs-check"
     assert old.extra_metadata.get("cm_superseded_by") is None
     assert out["memory"].extra_metadata["cm_needs_check"] is True
+
+
+async def test_collect_derived_ids():
+    from app.retrieval.memory.correction import collect_derived_ids
+    uid = uuid.uuid4()
+    target = _mem({})
+    target.user_id = uid
+    view = _mem({"cm_derived_from": [str(target.id)]})
+    view.user_id = uid
+    other = _mem({})
+    other.user_id = uid
+    db = _FakeDB(rows=[target, view, other])
+    out = await collect_derived_ids(db, uid, [target.id])
+    assert out == [view.id]
