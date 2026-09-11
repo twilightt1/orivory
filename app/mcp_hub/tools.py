@@ -18,7 +18,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import literal, select, tuple_
 
 from app.database import AsyncSessionLocal
 from app.mcp_hub.identity import (
@@ -219,14 +219,32 @@ async def timeline(memory_id: str, window: int = 4) -> dict[str, Any]:
             (
                 await db.execute(
                     select(Memory)
-                    .where(Memory.user_id == principal.user_id)
+                    .where(
+                        Memory.user_id == principal.user_id,
+                        tuple_(Memory.captured_at, Memory.id) < tuple_(literal(anchor.captured_at), literal(anchor.id)),
+                    )
                     .order_by(Memory.captured_at.desc(), Memory.id.desc())
+                    .limit(capped)
                 )
             )
             .scalars()
             .all()
         )
-        after_rows = list(reversed(before_rows))
+        after_rows = (
+            (
+                await db.execute(
+                    select(Memory)
+                    .where(
+                        Memory.user_id == principal.user_id,
+                        tuple_(Memory.captured_at, Memory.id) > tuple_(literal(anchor.captured_at), literal(anchor.id)),
+                    )
+                    .order_by(Memory.captured_at.asc(), Memory.id.asc())
+                    .limit(capped)
+                )
+            )
+            .scalars()
+            .all()
+        )
 
         neighbours = [
             m
