@@ -1,5 +1,19 @@
 # RAG Evaluation Framework
 
+## Start here (canonical entry points)
+
+| Muốn gì | Chạy gì |
+|---|---|
+| Offline eval, deterministic, CI-safe | `python eval/run_eval.py --mode offline` |
+| Benchmark LongMemEval-S / MemoryAgentBench | `python eval/run_benchmark.py --benchmark longmemeval_s --dataset <json> --output-dir <dir> --phase plan` → `ingest` → `query` → `score` |
+| Resume run dài bị ngắt (rate limit) | `python eval/resume_system_run.py` (system) · `eval/complete_mapreduce_run.py` (map-reduce, FROZEN — run completed, do not extend) |
+
+Legacy one-shots (paths cứng, không CLI args — chạy đúng như ghi, đừng
+copy pattern): `run_judge_only.py` (extreme dataset), `run_real_sample.py`,
+`run_system_benchmark.py`, `mindlayer_offline_eval.py`,
+`pilot_judged_fixture.py`, `run_full_eval.py`. Đừng thêm script mới —
+mở rộng 4 entrypoint trên.
+
 This directory contains evaluation tooling for the Orivory RAG demo.
 
 - **Offline mode** is deterministic and CI-safe. It uses `sample_docs/` directly
@@ -157,3 +171,19 @@ When a real query fails or produces weak citations, add it to the dataset with:
 - key phrases that should appear
 - whether it should fallback
 - the category impacted
+---
+
+## Frozen baseline (v1.1.0, do not tune — regression-gate only)
+
+Config `orivory_stack`, seed `20260906`, judge `longmemeval-official-v1`:
+
+| Run | File | Score |
+|---|---|---|
+| Single-pass + Jina rerank, n=100 | `benchmarks/results/longmemeval_s_system_n100.json` | **0.570**, Wilson 95% CI [0.472, 0.663] |
+| No-rerank baseline, n=100 | (PR #18) | 0.490, CI [0.394, 0.587] |
+| Map-reduce answering, n=70 clean | `benchmarks/results/longmemeval_s_system_n100_mapreduce.json` | 0.486 — NEGATIVE, single-pass stays default |
+
+Rule: any retrieval-code change must re-run the n=100 single-pass config
+and stay within the frozen CI before merge. Tuning the score further is
+explicitly out of scope until ≥5 active installs (see
+`docs/ideas/open-source-positioning.md` §5).

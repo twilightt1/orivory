@@ -115,6 +115,14 @@ class Settings(BaseSettings):
     RETRIEVAL_SEMANTIC_RERANK: bool = False
     JINA_RERANKER_MODEL: str = "jina-reranker-v2-base-multilingual"
     JINA_RERANKER_TOP_N: int = 5
+    # ── Embedding backend support matrix (frozen v1.1.0) ──
+    #   jina  (USE_JINA_EMBEDDINGS=true + JINA_API_KEY): SUPPORTED default
+    #           for full-stack. Matches the frozen benchmark baseline.
+    #   local (USE_LOCAL_EMBEDDINGS=true): SUPPORTED for lite/self-contained
+    #           mode only (384-dim, no API key). Do not mix with Jina/OpenAI
+    #           in one store — the dim guard will refuse.
+    #   openai (fallback when neither above applies): LEGACY, unbenchmarked,
+    #           kept so old deployments boot. Not supported for recall quality.
     # Use jina for embeddings instead of OpenAI
     USE_JINA_EMBEDDINGS: bool = True
     # Local ONNX MiniLM embeddings (chromadb-bundled, 384-dim, no API key).
@@ -131,6 +139,7 @@ class Settings(BaseSettings):
     CRAG_PARTIAL_THRESHOLD: float = 0.4  # Score >= this = PARTIAL
     CRAG_FALLBACK_THRESHOLD: float = 0.5  # % of docs needed to avoid web fallback
     CRAG_MAX_WEB_RESULTS: int = 10  # Max web search results to include
+    CRAG_MAX_WEB_CHARS: int = 4000  # Per-doc cap on raw web page text kept in context
     TAVILY_API_KEY: str = ""  # Tavily API key for web search fallback
 
     # ── HyDE (Hypothetical Document Embeddings) ────────────────────────────────

@@ -34,7 +34,11 @@ Three ideas make it different from a chat-with-docs app:
    receipt**.
 3. **Provable, not marketed.** The eval harness ships with the repo
    (LongMemEval-S + MemoryAgentBench adapters) so quality claims can be
-   checked, not just claimed. No scores ship until a real run happens.
+   checked, not just claimed — including two **negative** results we
+   published anyway. Current best: **0.570** LongMemEval-S (n=100, single
+   pass + semantic rerank) vs 0.490 baseline; results with Wilson 95% CIs
+   in [`eval/benchmarks/results/`](eval/benchmarks/results/), history in
+   [CHANGELOG](CHANGELOG.md).
 
 Your data stays on your infrastructure. MIT-licensed, self-hosted, plain
 Postgres + ChromaDB under the hood.
@@ -51,13 +55,13 @@ Postgres + ChromaDB under the hood.
 | | |
 | **🗑️ Erasure receipts** | Right-to-be-forgotten with verification: cascade deletion across rows, links and vectors, re-checked and receipted |
 | **📥 Import paths** | One-shot upload of ChatGPT / Claude / PAM / generic-JSON exports with dedup |
-| **📊 Benchmarks** | LongMemEval-S + MemoryAgentBench harness (protocol-honest, no fabricated scores) |
+| **📊 Benchmarks** | LongMemEval-S + MemoryAgentBench harness, 0.570 (n=100) with CIs — [results](eval/benchmarks/results/), [how to run](eval/README.md) |
 | **👥 Workspaces** | Shared knowledge bases with workspace-level access control |
 | **📊 Analytics** | Usage tracking, DAU metrics, cost monitoring |
 
 ## Quick start
 
-### Lite mode — one container, zero external services (recommended)
+### Lite mode — one container, zero external services (personal/demo use)
 
 The whole memory hub — API + MCP server + SQLite + in-process Chroma — in a
 single container. No Postgres, no Redis, no MinIO, no workers.
@@ -80,6 +84,8 @@ Or from a clone: `make quickstart`. Then:
 
 Lite mode is single-user by design (personal brain). Data persists in the
 `orivory-data` volume; the JWT secret is ephemeral per container.
+It is the fastest way to try Orivory — not a production tier: anything
+multi-user, multi-instance, or load-bearing belongs on the full stack below.
 
 ### Full stack — Postgres + Redis + ChromaDB + MinIO + workers + UI
 
@@ -164,6 +170,7 @@ orivory/
 | [docs/how-it-works.html](docs/how-it-works.html) | The one-page explainer — how the hub works, honestly compared | 
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System architecture — hub spine, agents, retrieval, data model |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | Shipped milestones and open follow-ups |
+| [docs/ideas/open-source-positioning.md](docs/ideas/open-source-positioning.md) | Positioning: one-line definition, competitor matrix, hub-first narrative |
 | [docs/research/](docs/research/) | Market / user / platform / papers research behind the pivot |
 | [docs/EVALUATION_GUIDE.md](docs/EVALUATION_GUIDE.md) | RAG evaluation + benchmarks |
 | [docs/LITE_MODE.md](docs/LITE_MODE.md) | One-container lite mode |

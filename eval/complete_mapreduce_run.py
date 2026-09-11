@@ -53,10 +53,85 @@ from eval.benchmarks.longmemeval_s import load_instances  # noqa: E402
 from eval.run_system_benchmark import (  # noqa: E402
     DATASET,
     MODEL,
-    answer_from_stack,
     ingest_instance,
     judge_one,
+    stack_recall,
 )
+
+# FROZEN COPY of the map-reduce answering variant removed from
+# run_system_benchmark.py (PR #20 NEGATIVE: 0.486 clean vs 0.570 single-pass).
+# Kept here — and only here — so the recorded result stays reproducible.
+# Do not extend, do not re-enable on the live path.
+_MR_MAP_PROMPT = (
+    "You are answering a question about a user's conversation history using "
+    "ONE memory excerpt. Answer ONLY from that excerpt, in at most two "
+    "sentences. If the excerpt does not help answer the question, reply "
+    "exactly: I have no information about that."
+)
+
+_MR_FUSE_PROMPT = (
+    "You are answering a question about a user's conversation history. "
+    "Several partial findings were extracted from different memories; some "
+    "may be irrelevant or say nothing was found. Synthesize them into ONE "
+    "final answer (at most three sentences). Prefer concrete facts "
+    "(dates, names, numbers) and reconcile conflicts by taking the most "
+    "specific statement. If none of the findings answer the question, "
+    "reply exactly: I have no information about that."
+)
+
+
+async def _answer_map_reduce(client, user_id, instance, top_k: int) -> tuple[str, int]:
+    """Frozen two-phase answer: per-excerpt judgment, then fuse."""
+    recalled = await stack_recall(user_id, instance.question, top_k)
+    if not recalled:
+        return "I have no information about that.", 0
+
+    partials: list[str] = []
+
+    async def _map_one(idx: int, r: dict) -> None:
+        try:
+            completion = await client.chat.completions.create(
+                model=MODEL,
+                messages=[
+                    {"role": "system", "content": _MR_MAP_PROMPT},
+                    {
+                        "role": "user",
+                        "content": (
+                            f"MEMORY ({r['captured_at'] or 'undated'}):\n"
+                            f"{r['content']}\n\nQUESTION: {instance.question}"
+                        ),
+                    },
+                ],
+                temperature=0.0,
+                max_tokens=120,
+            )
+            text = (completion.choices[0].message.content or "").strip()
+            if text and text != "I have no information about that.":
+                partials.append(f"[{idx + 1}] {text}")
+        except Exception:
+            pass  # a failed excerpt is simply absent from the reduce step
+
+    await asyncio.gather(*(_map_one(i, r) for i, r in enumerate(recalled)))
+
+    if not partials:
+        return "I have no information about that.", len(recalled)
+
+    findings = "\n".join(partials)
+    completion = await client.chat.completions.create(
+        model=MODEL,
+        messages=[
+            {"role": "system", "content": _MR_FUSE_PROMPT},
+            {
+                "role": "user",
+                "content": (
+                    f"PARTIAL FINDINGS:\n{findings}\n\nQUESTION: {instance.question}"
+                ),
+            },
+        ],
+        temperature=0.0,
+        max_tokens=300,
+    )
+    return (completion.choices[0].message.content or "").strip(), len(recalled)
 
 PARTIAL = Path(os.environ.get("MR_PARTIAL", "/tmp/mr-partial.json"))
 
@@ -112,8 +187,8 @@ async def main_async(args) -> int:
                 user_id, inst, _RESULTS_DIR / "system_run",
                 session_level=True, chunk_chars=4000,
             )
-            response, recalled = await answer_from_stack(
-                user_id, inst, args.top_k, fuse=False, map_reduce=True
+            response, recalled = await _answer_map_reduce(
+                client, user_id, inst, args.top_k
             )
             correct = await judge_one(client, inst, response)
             error = None

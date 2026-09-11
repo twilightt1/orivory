@@ -25,6 +25,12 @@ brain). Point Claude Desktop / Cursor / OpenClaw at
 
 ## What lite mode trades away
 
+> **Not a production tier.** Lite is the demo/personal tier: one container
+> means one blast radius (OOM anywhere loses everything in flight), eager
+> tasks have no retry queue, the cost ledger is single-process SQLite, and
+> in-memory rate limits reset on restart. Anything multi-user,
+> multi-instance, or load-bearing belongs on the full stack.
+
 - **Single-user, single-instance** — SQLite + in-memory caches don't do
   horizontal scale. For teams or heavy agents, use the full compose stack.
 - **JWT secret is ephemeral** — auto-generated per container; users re-login

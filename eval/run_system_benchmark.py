@@ -283,34 +283,15 @@ async def stack_recall(user_id, query: str, top_k: int,
         return fused[: top_k * 2]
 
 
-MAP_PROMPT = (
-    "You are answering a question about a user's conversation history using "
-    "ONE memory excerpt. Answer ONLY from that excerpt, in at most two "
-    "sentences. If the excerpt does not help answer the question, reply "
-    "exactly: I have no information about that."
-)
-
-FUSE_PROMPT = (
-    "You are answering a question about a user's conversation history. "
-    "Several partial findings were extracted from different memories; some "
-    "may be irrelevant or say nothing was found. Synthesize them into ONE "
-    "final answer (at most three sentences). Prefer concrete facts "
-    "(dates, names, numbers) and reconcile conflicts by taking the most "
-    "specific statement. If none of the findings answer the question, "
-    "reply exactly: I have no information about that."
-)
-
-
 async def answer_from_stack(
-    user_id, instance, top_k: int, fuse: bool = False, map_reduce: bool = False
+    user_id, instance, top_k: int, fuse: bool = False
 ) -> tuple[str, int]:
-    """Answer the question from what the stack recalls.
+    """Answer the question from what the stack recalls (single pass).
 
-    map_reduce=True uses a two-phase answer instead of one concatenated
-    pass: (map) each recalled excerpt is judged independently — short,
-    focused context per call; (reduce) the non-empty partial answers are
-    fused into the final answer. Wins on multi-hop/preference questions
-    where a 15-excerpt wall of text buries the signal (measured in PR #17).
+    NOTE: a two-phase map-reduce variant was tried (PR #20) and LOST to
+    single-pass (0.486 vs 0.570 clean) — it lives on only as a frozen copy
+    inside eval/complete_mapreduce_run.py for reproducibility of the
+    recorded negative result. Do not re-add it here.
     """
     from openai import AsyncOpenAI
 
@@ -323,67 +304,18 @@ async def answer_from_stack(
         timeout=240.0,
     )
 
-    if not map_reduce:
-        excerpts = "\n\n".join(
-            f"[{i + 1}] ({r['captured_at'] or 'undated'}) {r['content']}"
-            for i, r in enumerate(recalled)
-        )
-        completion = await client.chat.completions.create(
-            model=MODEL,
-            messages=[
-                {"role": "system", "content": ANSWER_SYSTEM},
-                {
-                    "role": "user",
-                    "content": (
-                        f"MEMORIES:\n{excerpts}\n\nQUESTION: {instance.question}"
-                    ),
-                },
-            ],
-            temperature=0.0,
-            max_tokens=300,
-        )
-        return (completion.choices[0].message.content or "").strip(), len(recalled)
-
-    # map: one focused call per excerpt
-    partials: list[str] = []
-    async def _map_one(idx: int, r: dict) -> None:
-        try:
-            completion = await client.chat.completions.create(
-                model=MODEL,
-                messages=[
-                    {"role": "system", "content": MAP_PROMPT},
-                    {
-                        "role": "user",
-                        "content": (
-                            f"MEMORY ({r['captured_at'] or 'undated'}):\n"
-                            f"{r['content']}\n\nQUESTION: {instance.question}"
-                        ),
-                    },
-                ],
-                temperature=0.0,
-                max_tokens=120,
-            )
-            text = (completion.choices[0].message.content or "").strip()
-            if text and text != "I have no information about that.":
-                partials.append(f"[{idx + 1}] {text}")
-        except Exception:
-            pass  # a failed excerpt is simply absent from the reduce step
-
-    await asyncio.gather(*(_map_one(i, r) for i, r in enumerate(recalled)))
-
-    if not partials:
-        return "I have no information about that.", len(recalled)
-
-    # reduce: fuse the partial findings
-    findings = "\n".join(partials)
+    excerpts = "\n\n".join(
+        f"[{i + 1}] ({r['captured_at'] or 'undated'}) {r['content']}"
+        for i, r in enumerate(recalled)
+    )
     completion = await client.chat.completions.create(
         model=MODEL,
         messages=[
-            {"role": "system", "content": FUSE_PROMPT},
+            {"role": "system", "content": ANSWER_SYSTEM},
             {
                 "role": "user",
                 "content": (
-                    f"PARTIAL FINDINGS:\n{findings}\n\nQUESTION: {instance.question}"
+                    f"MEMORIES:\n{excerpts}\n\nQUESTION: {instance.question}"
                 ),
             },
         ],
@@ -406,7 +338,7 @@ async def judge_one(client, instance, response: str) -> bool:
 
 async def run_instance(client, user_id, instance, top_k, run_dir: Path,
                       session_level: bool = True, chunk_chars: int = 0,
-                      fuse: bool = False, map_reduce: bool = False) -> dict:
+                      fuse: bool = False) -> dict:
     t0 = time.time()
     try:
         ingested = await ingest_instance(
@@ -414,7 +346,7 @@ async def run_instance(client, user_id, instance, top_k, run_dir: Path,
             chunk_chars=chunk_chars,
         )
         response, recalled = await answer_from_stack(
-            user_id, instance, top_k, fuse=fuse, map_reduce=map_reduce
+            user_id, instance, top_k, fuse=fuse
         )
         correct = await judge_one(client, instance, response)
         error = None
@@ -491,7 +423,7 @@ async def main_async(args) -> int:
             await run_instance(
                 client, benchmark_user_id, inst, args.top_k, run_dir,
                 session_level=args.session, chunk_chars=args.chunk_chars,
-                fuse=args.fuse, map_reduce=args.map_reduce,
+                fuse=args.fuse,
             )
         )
     total = round(time.time() - t0, 1)
@@ -534,7 +466,7 @@ async def main_async(args) -> int:
         "benchmark": "longmemeval_s",
         "run_kind": "orivory_stack",
         "chunking": "session_level" if args.session else "per_turn",
-        "answer_mode": "map_reduce" if args.map_reduce else "single_pass",
+        "answer_mode": "single_pass",
         "note": (
             "REAL dataset, REAL Orivory stack (SQLite + local Chroma + Jina "
             "embeddings + MemoryRetriever salience/rerank), REAL judge. Same "
@@ -566,7 +498,7 @@ async def main_async(args) -> int:
         "per_question": records,
     }
     chunking = "session_level" if args.session else "per_turn"
-    suffix = "_mapreduce" if args.map_reduce else ""
+    suffix = ""
     if args.n >= 100:
         out = ROOT / f"eval/benchmarks/results/longmemeval_s_system_n100{suffix}.json"
     else:
@@ -594,10 +526,6 @@ def main() -> int:
     parser.add_argument("--session", action="store_true",
                         help="session-level memories (v2 strategy) — "
                              "one memory per haystack session")
-    parser.add_argument("--map-reduce", action="store_true",
-                        help="two-phase answering (per-excerpt judgment "
-                             "then fuse) — targets multi-hop/preference "
-                             "slices")
     parser.add_argument("--fuse", action="store_true",
                         help="two-pass recall fusion (raw + rewritten "
                              "query, union by id) — 0.650 on the seed "
