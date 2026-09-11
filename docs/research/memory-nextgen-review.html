@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Orivory Memory Next-Gen — Report review (Tech Lead + PM)</title>
+<style>
+:root{--bg:#0b0e14;--card:#141a26;--line:#232c42;--txt:#e8ecf4;--mut:#9aa6bf;--acc:#5cc8ff;--ok:#4ade80;--warn:#fbbf24;--bad:#f87171}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--txt);font:15px/1.65 -apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+.wrap{max-width:960px;margin:0 auto;padding:32px 20px 80px}
+.hero{border:1px solid var(--line);border-radius:16px;padding:28px;background:linear-gradient(180deg,#131a2b,#0e1422)}
+.hero h1{margin:.2em 0;font-size:26px}.hero p{color:var(--mut);margin:.4em 0}
+.badge{display:inline-block;font-size:12px;border:1px solid var(--line);border-radius:999px;padding:2px 10px;margin-right:6px;color:var(--mut)}
+.badge.hot{color:#0b0e14;background:var(--acc);border-color:var(--acc);font-weight:700}
+h2{margin-top:40px;font-size:20px;border-bottom:1px solid var(--line);padding-bottom:8px}
+h3{margin-top:24px;font-size:16px;color:var(--acc)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px 18px;margin:12px 0}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}@media(max-width:700px){.grid{grid-template-columns:1fr}}
+table{width:100%;border-collapse:collapse;margin:10px 0;font-size:14px}
+th,td{border:1px solid var(--line);padding:8px 10px;text-align:left;vertical-align:top}
+th{background:#1a2236}td.mut{color:var(--mut)}
+code{background:#0e1526;border:1px solid var(--line);border-radius:6px;padding:1px 6px;font-size:13px}
+pre{background:#0e1526;border:1px solid var(--line);border-radius:12px;padding:14px;overflow:auto;font-size:13px;line-height:1.6}
+.ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--bad)}
+ul{margin:8px 0}li{margin:4px 0}
+.decide{border:1px dashed var(--acc);border-radius:12px;padding:16px 18px;margin:12px 0;background:#101a2e}
+.small{font-size:13px;color:var(--mut)}
+.toc a{color:var(--acc);text-decoration:none}.toc li{margin:2px 0}
+</style>
+</head>
+<body><div class="wrap">
+
+<div class="hero">
+<span class="badge hot">REVIEW</span>
+<span class="badge">Tech Lead + PM</span>
+<span class="badge">Lite-only · self-host · single-machine</span>
+<h1>Orivory Memory Next-Gen — hướng đột phá</h1>
+<p><b>Một câu:</b> memory sửa được, giải thích được, thu hồi được — sống trong mọi agent qua MCP, chạy trên máy người cài.</p>
+<p class="small">Nguồn bằng chứng: <code>docs/research/memory-papers.md</code> (9 paper, số liệu = tác giả báo cáo, chưa tái lập).
+Đối thủ đã đối chiếu: Supermemory (cloud API + plugin) và Claude-Mem <code>thedotmack/claude-mem</code> (hook → SQLite FTS5 → worker tóm tắt).
+Trạng thái: report review — chưa code, chưa commit.</p>
+</div>
+
+<h2>Mục lục</h2>
+<ul class="toc">
+<li><a href="#s1">1. Memory gen hiện tại của cộng đồng</a></li>
+<li><a href="#s2">2. Pain point có bằng chứng</a></li>
+<li><a href="#s3">3. Định nghĩa lại memory next-gen</a></li>
+<li><a href="#s4">4. Kiến trúc (Tech Lead)</a></li>
+<li><a href="#s5">5. Contract agent-first qua MCP</a></li>
+<li><a href="#s6">6. Tech stack &amp; latency: không đổi stack V1</a></li>
+<li><a href="#s7">7. Trade-off (6 cặp)</a></li>
+<li><a href="#s8">8. Goal &amp; phục vụ ai</a></li>
+<li><a href="#s9">9. Đánh giá: đo gì, bằng gì</a></li>
+<li><a href="#s10">10. Scope V1 · roadmap · risk · quyết định cần chốt</a></li>
+</ul>
+
+<h2 id="s1">1. Memory gen hiện tại của cộng đồng là gì?</h2>
+<div class="card">
+<b>Công thức chung:</b> ghi bằng append → LLM trích fact/summary → nhúng vector (+ optional graph) →
+query top-k similarity + rerank → nhét vào prompt của model stateless.
+Chỉ khác chỗ lưu và chỗ tìm:
+<div class="grid">
+<div><b>Supermemory</b><br><span class="small">Cloud API + user profile + hybrid search + connector + plugin/MCP phủ rộng. Mạnh phân phối.</span></div>
+<div><b>Claude-Mem</b><br><span class="small">Hook ghi observation → worker tóm tắt → SQLite FTS5 (+ optional Chroma) → <code>search → timeline → get_observations</code>.</span></div>
+<div><b>Mem0 / A-MEM / HippoRAG 2 / SimpleMem</b><br><span class="small">Biến thể retrieval: quyết định ghi ADD/UPDATE/DELETE, note enrichment, triple+passage+PPR, chuẩn hóa unit + consolidation.</span></div>
+<div><b>Orivory hiện tại</b><br><span class="small">Postgres + Chroma hybrid + rerank, salience/decay, KG, scoped token + ledger + erasure receipt, MCP snippet→get, Lite 1-container.</span></div>
+</div>
+<p><b>Điểm chung yếu:</b> ghi-append là chính; sửa / xóa lan / giải thích / thu hồi là phụ.</p>
+</div>
+
+<h2 id="s2">2. Pain point (đã có bằng chứng paper)</h2>
+<table>
+<tr><th>#</th><th>Pain</th><th>Bằng chứng</th></tr>
+<tr><td>1</td><td>Trộn evidence với suy diễn trong cùng một text</td><td class="mut">Hindsight [P7] gọi là lỗi hệ thống</td></tr>
+<tr><td>2</td><td>Sửa fact không lan tới câu trả lời; “mới nhất thắng” sai (import muộn, khác scope/chủ thể, mới là dự định)</td><td class="mut">LongMemEval knowledge-update/temporal [P4]; FactConsolidation multi-hop rất khó [P5]</td></tr>
+<tr><td>3</td><td>Summary/profile cũ tiếp tục bị phát lại sau khi nguồn đổi</td><td class="mut">Hindsight tái tạo observation khi fact nền đổi [P7]</td></tr>
+<tr><td>4</td><td>Nén rồi vứt nguồn → hỏng nhiệm vụ cần chi tiết</td><td class="mut">MAB [P5]; “lossless” của SimpleMem vẫn gating loại window [P6]</td></tr>
+<tr><td>5</td><td>Báo “rẻ” bằng mỗi read latency, giấu write cost</td><td class="mut">Mem0 giảm read vs full-context [P3] ≠ tổng chi phí; MAB đo dựng memory đắt [P5]</td></tr>
+<tr><td>6</td><td>Extraction là nút cổ chai, không phải optimizer</td><td class="mut">EvolveMem ablation: bỏ extraction guard hại hơn bỏ self-evolution [P9]</td></tr>
+<tr><td>7</td><td>Không biết khi nào nên im lặng + không chứng minh được quyền/xóa</td><td class="mut">Abstention [P4]; Mem0 loại adversarial [P3]; governance thiếu protocol chung</td></tr>
+</table>
+
+<h2 id="s3">3. Định nghĩa lại memory next-gen</h2>
+<div class="card">
+<b>Next-gen = hệ nhớ sửa được, giải thích được, thu hồi được — với chi phí đo cả vòng đời.</b>
+Không phải “nhớ nhiều hơn”, “graph to hơn”, “tự tiến hóa”. 5 tính chất tối thiểu:
+<ol>
+<li><b>Evidence-first:</b> raw + source ID là gốc bất biến; summary/profile là view dẫn xuất, luôn truy về nguồn.</li>
+<li><b>Correction hạng nhất:</b> sửa lưu cùng subject/attribute/scope, hiệu lực từ khi nào, biết từ khi nào, nguồn nào thay nguồn nào. Mơ hồ → giữ cả hai + hỏi.</li>
+<li><b>Derived invalidation:</b> view track nguồn dùng; nguồn đổi/xóa → đánh dirty, chặn phục vụ bản stale.</li>
+<li><b>Retrieval có biên:</b> raw fallback luôn có; graph/LLM-rerank chỉ bật khi lỗi chứng minh cần + cap token/time.</li>
+<li><b>Governance đo được:</b> provenance, scope, xóa cả dẫn xuất, receipt xác minh, stale rate, false-supersession, write+read cost.</li>
+</ol>
+<p class="small">Giới hạn诚实: chỉ bảo đảm các lần truy hồi sau <i>qua Orivory</i>; agent ngoài đã đọc/copy thì không thu hồi được — phải nói rõ trong skill.</p>
+</div>
+
+<h2 id="s4">4. Kiến trúc (Tech Lead tổng hợp)</h2>
+<h3>Tên: Evidence-first Correctable Memory — approach A (metadata-only)</h3>
+<div class="card">Không thêm bảng/DB/service ở V1. Mọi trạng thái mới nằm trong <code>Memory.extra_metadata</code>,
+reuse <code>Memory</code>, <code>Relation</code>, <code>write_back.index_new_memory</code> (single owner indexing),
+<code>MemoryRetriever</code>, <code>erasure_service</code>, MCP snippet→get đã có.</div>
+<pre>[Agent/Connector]
+  → Retain      (append-only Memory + chuẩn hóa subject/attribute/scope/valid_from)
+  → Resolve     (trùng subject/attr/scope → link supersede; mơ hồ → giữ cả hai)
+  → Index       (Chroma + graph best-effort, qua owner write_back hiện có)
+  → Recall      (lọc validity + hybrid + rerank có biên; raw fallback; không biết → rỗng + trace)
+  → Derive      (summary/profile có derived_from + derived_dirty)
+  → Correct / Invalidate / Erase (supersede · chặn stale · xóa cascade + receipt)
+Tất cả trong scope + ledger.</pre>
+<table>
+<tr><th>Tầng</th><th>Mapping code hiện có</th><th>Thêm ở V1</th></tr>
+<tr><td>Evidence</td><td class="mut"><code>models/memory.py:57-79</code> content/source_ref/captured_at; LLM không được ghi đè</td><td>Giữ raw theo retention; không thêm gì</td></tr>
+<tr><td>Fact</td><td class="mut">Cùng bảng <code>Memory</code>; <code>captured_at</code> = biết khi nào</td><td>Metadata: <code>assertion</code> (fact|plan|inference), <code>subject/attribute/scope</code>, <code>valid_from/valid_to</code>, <code>supersedes/superseded_by</code></td></tr>
+<tr><td>Derived</td><td class="mut"><code>parent_id</code> chỉ 1 parent → không đủ</td><td>Metadata: <code>derived_from:[ids]</code>, <code>derived_dirty:bool</code></td></tr>
+<tr><td>Recall</td><td class="mut"><code>retrieval/memory/retriever.py:80-260</code> giữ pipeline</td><td>2 filter: ẩn superseded (trừ <code>include_history=true</code>), chặn dirty; rerank/graph có cap</td></tr>
+<tr><td>Correct/Erase</td><td class="mut"><code>erasure_service.py</code> receipt + cascade đã có</td><td>1 hàm resolve đường ghi (ADD/UPDATE/NOOP có evidence, cấm hard-delete); xóa mở rộng tới dẫn xuất</td></tr>
+<tr><td>MCP</td><td class="mut"><code>mcp_hub/tools.py:138-180</code> index→get; <code>timeline</code>; <code>forget_memory</code></td><td><code>correct_memory</code> mới + <code>include_history</code> + provenance ở <code>get</code></td></tr>
+</table>
+<p class="small">Approach B (bảng Fact/Derivation riêng): đúng chuẩn hơn, query nhanh hơn — nhưng là migration + service + cascade + test mới cho giả thuyết chưa chứng minh. Chỉ lấy khi A đo thấy JSON thành nút cổ chai.</p>
+
+<h2 id="s5">5. Contract agent-first qua MCP (PM)</h2>
+<div class="card"><b>MCP là mặt tiền duy nhất V1.</b> Agent không gọi được = chưa tồn tại. Giữ 6 tool hiện có, thêm đúng <b>1 động từ mới: correct</b>.</div>
+<table>
+<tr><th>Agent làm</th><th>Tool</th><th>Kết quả</th></tr>
+<tr><td>Tìm</td><td><code>search_memory</code></td><td class="mut">Index snippet như cũ + <code>state: current/superseded</code>; mặc định ẩn bản cũ</td></tr>
+<tr><td>Xem</td><td><code>get_memory</code></td><td class="mut">Chi tiết + provenance: <code>supersedes/superseded_by/evidence_ids/valid_from/scope</code></td></tr>
+<tr><td>Kể chuyện thay đổi</td><td><code>timeline</code></td><td class="mut">Reuse nguyên (cần fix load-all → query bound)</td></tr>
+<tr><td><b>Sửa (mới)</b></td><td><code>correct_memory</code></td><td class="mut">Tạo bản mới + link supersede, không overwrite; mơ hồ → giữ cả hai + hỏi</td></tr>
+<tr><td>Nhớ mới</td><td><code>add_memory</code></td><td class="mut">Giữ, đi qua resolve trùng</td></tr>
+<tr><td>Quên</td><td><code>forget_memory</code></td><td class="mut">Giữ, mở rộng tới view dirty + receipt</td></tr>
+</table>
+<h3>Luồng 30 giây (happy path)</h3>
+<div class="card">1. Claude <code>add_memory("DB prod","PostgreSQL")</code> →
+2. Sang Cursor nói “demo SQLite” → <code>correct_memory</code> scope demo, bản prod giữ nguyên →
+3. Agent khác <code>search_memory("DB prod")</code> chỉ thấy PostgreSQL + badge hiệu lực →
+4. “Sao nhớ vậy?” → <code>get_memory</code> show chain + evidence →
+5. “Quên demo đi” → <code>forget_memory</code> + receipt, view bẩn bị dọn.</div>
+<h3>UX: phức tạp giấu ở server</h3>
+<div class="card">User chỉ nói chuyện: <b>nhớ / sai rồi / sao nhớ vậy / quên đi</b>. Không học half-life, top-k, graph, valid-from.
+Badge duy nhất: <code>đang hiệu lực / đã sửa / chờ kiểm tra</code> + drill-down nguồn. Không biết → nói không có bằng chứng, không bịa.</div>
+
+<h2 id="s6">6. Tech stack &amp; latency: <span class="ok">không đổi stack V1</span></h2>
+<div class="card">Triển khai V1 = <b>Lite-only</b>: 1 container (SQLite + Chroma in-process + task eager + file upload),
+theo <code>config.py:8-12</code>, <code>Dockerfile.lite</code>, <code>install.sh</code>. Cài đặt mục tiêu:
+<code>curl install.sh → MCP URL + token → cắm Claude/Cursor → nói chuyện</code>. Không compose, không env matrix.</div>
+<table>
+<tr><th>Nút latency (đã đọc code)</th><th>Sửa V1 (0 đổi stack)</th></tr>
+<tr><td>LLM rewrite <b>mỗi</b> recall (<code>retriever.py:98</code>) — ms lớn nhất</td><td class="mut"><b>Fast path:</b> query rõ → skip rewrite, embed trực tiếp; LLM chỉ khi đại từ/mơ hồ</td></tr>
+<tr><td>Chroma qua HTTP + retry 3 (<code>vector_store.py:48</code>)</td><td class="mut">Lite in-process đã hết hop này; full-stack multi-user để bản khác</td></tr>
+<tr><td><code>timeline</code> load toàn bộ memories rồi lọc Python (<code>tools.py:212-223</code>) — O(n)</td><td class="mut">2 query <code>captured_at &lt;/&gt;</code> + limit window; 1 patch SQL, không migration</td></tr>
+</table>
+<p class="small">Đo: tách <code>latency_ms</code> theo stage trong <code>RecallTrace</code> (rewrite/embed/search/hydrate) + budget test p50/p95 dataset nhỏ.
+Đổi stack (Postgres/pgvector/Redis/service mới/LLM local bắt buộc) chỉ khi trace chỉ đúng thủ phạm + eval chứng minh. Điều kiện đã liệt kê ở report chat.</p>
+
+<h2 id="s7">7. Trade-off — 6 cặp phải chọn</h2>
+<table>
+<tr><th>Cặp</th><th>Chọn V1</th></tr>
+<tr><td>Tự động vs kiểm soát</td><td class="mut">Auto ở capture, chặt ở resolve (mơ hồ giữ cả hai + hỏi)</td></tr>
+<tr><td>Sửa nhanh vs sửa đúng</td><td class="mut">Đúng trước: chặn stale ngay, rebuild async qua owner cũ</td></tr>
+<tr><td>Context ngắn vs mất thông tin</td><td class="mut">Snippet ngắn + raw fallback 1 click; cấm nén rồi vứt nguồn</td></tr>
+<tr><td>Read rẻ vs write đắt</td><td class="mut">Chấp nhận write đắt để query đúng; báo cost cả vòng đời, cấm khoe mỗi read latency</td></tr>
+<tr><td>Dễ dùng vs giải thích được</td><td class="mut">1 badge + drill-down; ẩn internals, không tin mù</td></tr>
+<tr><td>Giữ lịch sử vs xóa thật</td><td class="mut">Correction giữ chain; erasure xóa cả dẫn xuất + receipt — 2 flow riêng</td></tr>
+</table>
+
+<h2 id="s8">8. Goal &amp; phục vụ ai</h2>
+<div class="grid">
+<div class="card"><b>Người chính V1: solo dev, 1 máy, 2+ agent</b> (Claude + Cursor trên cùng repo). Đau nhất: sửa cùng 1 fact N lần, mỗi agent một bản. Lát cắt fact cấu hình dự án sinh ra cho đúng người này.</div>
+<div class="card"><b>Người sau:</b> team nhỏ share memory không leak scope (workspace + scoped token + ledger đã có). <b>Không phục vụ V1:</b> enterprise SSO/SLA, end-user phổ thông, multimodal.</div>
+</div>
+<div class="card"><b>Goal đo được:</b> sửa 1 lần → mọi agent sau trả đúng bản hiệu lực; stale ↓, false-supersession ≈ 0, cost vòng đời công khai, xóa thu hồi được. Không phải recall@k cao hơn Supermemory mọi giá.</div>
+
+<h2 id="s9">9. Đánh giá: đo gì, bằng gì (reuse harness)</h2>
+<table>
+<tr><th>Câu hỏi</th><th>Bộ đo</th><th>Baseline</th><th>Log bắt buộc</th></tr>
+<tr><td>Sửa có lan tới đáp án?</td><td class="mut">LongMemEval knowledge-update + FactConsolidation-SH/MH</td><td class="mut">Append-only / supersession / supersession+invalidation</td><td class="mut">Đúng-hiện-tại, đúng-lịch-sử, stale rate, false-supersession</td></tr>
+<tr><td>Chuẩn hóa có giúp?</td><td class="mut">LongMemEval-S temporal + extraction</td><td class="mut">Raw hybrid / +normalized summary</td><td class="mut">Evidence recall, QA judge, write+query token</td></tr>
+<tr><td>Nén có mất tổng hợp?</td><td class="mut">MAB retrieval + TTL + LRU</td><td class="mut">Facts-only / +source fallback</td><td class="mut">Metric riêng từng task, coverage, context tokens</td></tr>
+<tr><td>An toàn?</td><td class="mut">Case nội bộ: scope chéo, import muộn, dự định-vs-sự thật, xóa nguồn, revoke trước rebuild</td><td class="mut">Trước/sau từng bước</td><td class="mut">Leak scope = 0, residual sau xóa = 0, receipt verify</td></tr>
+</table>
+<p class="small">Quy tắc: pin dataset hash/split/IDs, reader/judge/budget; giữ question khỏi write phase; reset giữa instance, không reset giữa chunk cùng sequence; báo per-category + failures; không gọi smoke test là full S. Chi tiết: <code>docs/research/memory-papers.md §6</code>.</p>
+
+<h2 id="s10">10. Scope V1 · roadmap · risk · quyết định</h2>
+<div class="grid">
+<div class="card"><b class="ok">IN V1</b><ul>
+<li>1 fact type: cấu hình dự án theo thời gian</li>
+<li><code>correct_memory</code> + provenance ở <code>get</code> + state ở <code>search</code> + <code>include_history</code></li>
+<li>Fast-path skip-rewrite + fix <code>timeline</code> + trace theo stage</li>
+<li>Lite-only 1 container; demo Claude + Cursor chung MCP</li>
+</ul></div>
+<div class="card"><b class="bad">OUT V1 (cấm)</b><ul>
+<li>Bảng/DB/graph engine/PPR/microservice/fine-tune mới</li>
+<li>4-network Hindsight, consolidation đệ quy, self-optimizer</li>
+<li>Dashboard/settings/graph-viz mới; team sharing; SSO/SLA</li>
+</ul></div>
+</div>
+<div class="card"><b>Roadmap:</b> eval subset + 9 case nội bộ → đạt metric mới merge → spec lát cắt → implement →
+không công bố thắng ai. Mở rộng (graph bounded, consolidation, team) chỉ khi ablation chứng minh lỗi mục tiêu giảm không hồi quy accuracy/stale/cost/quyền.</div>
+<div class="card"><b class="warn">Risk lớn nhất:</b> resolve sai scope/thời gian còn tệ hơn không sửa.
+Mitigation: default giữ cả hai khi thiếu evidence; correction ≠ erasure; chặn stale đồng bộ, rebuild bất đồng bộ.</div>
+<div class="decide">
+<b>Cần anh chốt (reply 1 dòng cho mỗi cái):</b>
+<ol>
+<li>Approach A metadata-only + lát cắt fact cấu hình dự án — <b>Yes/No?</b></li>
+<li>Thêm đúng 1 tool <code>correct_memory</code> (không thêm tool graph/profile) — <b>Yes/No?</b></li>
+<li>V1 Lite-only self-host, bỏ full-stack khỏi scope next-gen — <b>Yes/No?</b></li>
+<li>Viết spec file lát cắt đầu sau khi chốt 1–3 — <b>Yes/No?</b></li>
+</ol>
+<p class="small">File này: <code>docs/research/memory-nextgen-review.html</code> — mở trực tiếp trên trình duyệt, không cần server.</p>
+</div>
+
+</div></body></html>

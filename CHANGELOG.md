@@ -4,6 +4,34 @@ All notable changes to Orivory are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/) and the
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased] — Correctable Memory V1 (2026-09-12)
+
+### Added
+- **Evidence-first correctable memory** — `cm_*` metadata on `Memory`
+  (subject/attribute/scope, valid_from, supersede chain, evidence IDs,
+  derived_from/dirty), single atomic `resolve_correction` write path,
+  recall hides superseded/dirty with `include_history` opt-in
+  (spec: `docs/superpowers/specs/2026-09-12-correctable-memory-v1.md`).
+- **`correct_memory` MCP tool** (7th tool) — sửa fact có evidence,
+  tạo bản mới + link chain, không overwrite; mơ hồ → `needs-check`.
+  `get_memory` trả provenance, `search_memory` trả `state` mỗi hit.
+- **Latency V1** — fast-path skip LLM rewrite khi query rõ, bounded
+  `timeline` queries (row-value `tuple_`), `RecallTrace` có `stage_ms`
+  + `rewrite_skipped`. Không đổi stack.
+- **Local-first env** — `.env.example`: `USE_LOCAL_EMBEDDINGS=true`
+  (ONNX MiniLM, no key/no cost), `RETRIEVAL_SEMANTIC_RERANK=false`
+  (opt-in khi eval chứng minh cần).
+
+### Removed
+- **`frontend/`** — Next.js app khỏi tree + compose + CI (Lite không
+  ship nó; agent là UI).
+- **LangGraph agents** — 16 agent files khỏi `app/agents/` (giữ
+  `llm_client` + `llm_parsing` + `state` + `routing` seams); test mồ
+  côi đi theo (−7.8K dòng).
+- **Celery khỏi path V1** — worker/beat/flower/redis/minio khỏi
+  compose (còn app/migrate/postgres/chromadb); eager gọi trực tiếp,
+  `.delay` còn lại bọc try/except best-effort.
+
 ## [1.1.0] — 2026-09-11 — benchmark era + full-repo remediation
 
 ### Added — benchmark era (PR #11–#20, 2026-09-05 → 2026-09-09)

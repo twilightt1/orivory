@@ -1,12 +1,19 @@
 # Orivory Roadmap
 
-> Status: 2026-09-10. History lives in git; this file tracks what shipped and
+> Status: 2026-09-12. History lives in git; this file tracks what shipped and
 > what's open. Design rationale for the hub direction:
 > [ideas/open-memory-hub.md](ideas/open-memory-hub.md) + [research/](research/).
 > Positioning for the open-source launch:
 > [ideas/open-source-positioning.md](ideas/open-source-positioning.md).
 
 ## Shipped
+
+### Correctable Memory V1 (2026-09-12, unreleased)
+- Evidence-first memory: `cm_*` metadata, atomic `resolve_correction`,
+  `correct_memory` MCP tool (7th), provenance ở `get`, `state` ở `search`.
+- Latency: fast-path skip-rewrite, bounded timeline, stage trace. Không đổi stack.
+- Tối giản: −frontend, −16 LangGraph agents (−7.8K dòng), −Celery khỏi path V1.
+- Spec + plan: `docs/superpowers/specs/2026-09-12-correctable-memory-v1.md`.
 
 ### Benchmark era (2026-09-05 → 2026-09-09, PR #11–#20)
 - OpenClaw auto-capture, one-command installer, compression.

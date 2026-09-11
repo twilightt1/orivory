@@ -47,10 +47,9 @@ Postgres + ChromaDB under the hood.
 
 | Area | What you get |
 |---|---|
-| **🧠 Memory store** | Salience/decay loop (memories reinforce on use, fade when stale), time-aware recall, hybrid vector + keyword search with reranking |
+| **🧠 Memory store** | Evidence-first correctable memory: sửa 1 lần mọi agent nhớ đúng (supersede có scope/thời gian hiệu lực), stale view tự chặn, time-aware recall, hybrid vector + keyword search |
 | **🕸️ Knowledge graph** | Automatic entity extraction, relation mapping, cluster detection |
-| **🤖 Multi-agent RAG** | 15+ LangGraph agents with corrective RAG, hallucination checking, and always-on citations |
-| **🔌 MCP hub** | Any MCP-capable agent (Claude Desktop, Cursor, OpenClaw…) connects with a scoped per-agent token — see [skills/orivory](skills/orivory/SKILL.md) |
+| **🔌 MCP hub** | 7 tools — `search/get/timeline/list_recent/add/correct/delete/forget`: any MCP-capable agent (Claude Desktop, Cursor, OpenClaw…) connects with a scoped per-agent token — see [skills/orivory](skills/orivory/SKILL.md) |
 | **📜 Access ledger** | Append-only audit log: which agent read or wrote which memory, when |
 | | |
 | **🗑️ Erasure receipts** | Right-to-be-forgotten with verification: cascade deletion across rows, links and vectors, re-checked and receipted |
@@ -149,13 +148,12 @@ plain Postgres + JSON everywhere, export or query your data directly.
 orivory/
 ├── app/                    # FastAPI backend
 │   ├── api/v1/             # REST (memories, agents, erasure, imports, …)
-│   ├── agents/             # LangGraph multi-agent RAG system
+│   ├── agents/             # LLM client + parsing seams (LangGraph agents removed)
 │   ├── mcp_hub/            # MCP server: identity, scoped tools, ledger
 │   ├── ingestion/          # connectors + import format adapters
 │   ├── models/             # SQLAlchemy models
 │   ├── retrieval/          # hybrid retrieval + memory vector store
 │   └── services/           # domain services
-├── frontend/               # Next.js app (chat, memories, discovery, …)
 ├── skills/orivory/         # OpenClaw/ClawHub skill package
 ├── eval/                   # RAG eval framework + benchmarks/
 ├── docs/                   # architecture, API reference, guides, research
