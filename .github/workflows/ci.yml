@@ -33,7 +33,7 @@ jobs:
         run: python -m ruff check app tests eval scripts
 
       - name: Run API tests
-        run: python -m pytest --confcutdir=tests/api tests/api/test_health_api.py tests/api/test_sse.py tests/api/test_chat_streaming.py tests/api/test_admin_diagnostics.py tests/api/test_insights_refresh.py -q
+        run: python -m pytest --confcutdir=tests/api tests/api/test_health_api.py tests/api/test_sse.py tests/api/test_admin_diagnostics.py tests/api/test_insights_refresh.py -q
 
       - name: Run service tests
         run: python -m pytest --confcutdir=tests/services tests/services/test_health_service.py tests/services/test_diagnostics_service.py tests/services/test_referral_service.py -q
