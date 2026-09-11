@@ -202,6 +202,12 @@ class Settings(BaseSettings):
                 self.CHROMA_MODE = "local"
             if self.STORAGE_BACKEND == "minio" and not self.MINIO_ACCESS_KEY:
                 self.STORAGE_BACKEND = "fs"
+            # Zero-key lite must still remember: no embedding API key means
+            # the bundled local model (384-dim, no download beyond ONNX).
+            # ponytail: keyed backends win whenever a key exists; the dim
+            # guard refuses mixing backends in one store.
+            if not self.USE_LOCAL_EMBEDDINGS and not self.JINA_API_KEY and not self.OPENAI_API_KEY:
+                self.USE_LOCAL_EMBEDDINGS = True
         return self
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
