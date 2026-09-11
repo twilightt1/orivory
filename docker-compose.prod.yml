@@ -8,20 +8,6 @@ services:
     volumes: !override []
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4
 
-  frontend:
-    build:
-      context: ./frontend
-      target: runner
-      # NEXT_PUBLIC_* vars are inlined into the client bundle at BUILD time —
-      # runtime `environment:` alone is silently ignored by Next.js.
-      args:
-        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
-    environment:
-      - NODE_ENV=production
-      - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://localhost:8000}
-    volumes: !override []
-    command: npm run start
-
   celery_worker:
     environment:
       ENVIRONMENT: production

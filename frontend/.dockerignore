@@ -1,9 +1,0 @@
-node_modules
-.next
-.git
-.DS_Store
-tsconfig.tsbuildinfo
-test-landing.js
-playwright-report
-test-results
-*.md

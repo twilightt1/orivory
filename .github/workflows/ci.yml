@@ -90,36 +90,6 @@ jobs:
       - name: Validate production Docker Compose config
         run: docker compose -f docker-compose.yml -f docker-compose.prod.yml config --quiet
 
-  frontend:
-    name: Frontend typecheck and build
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-
-      - name: Set up pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 9
-
-      - name: Install dependencies
-        working-directory: frontend
-        run: pnpm install --frozen-lockfile
-
-      - name: Typecheck
-        working-directory: frontend
-        run: pnpm exec tsc --noEmit
-
-      - name: Build
-        working-directory: frontend
-        run: pnpm run build
-
   lint-full:
     name: Full-repo ruff
     runs-on: ubuntu-latest

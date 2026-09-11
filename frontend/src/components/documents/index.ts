@@ -1,1 +1,0 @@
-export { DocumentUploader } from "./DocumentUploader";
