@@ -136,8 +136,9 @@ class TestChromaDBHealth:
             response = requests.get("http://localhost:8001/api/v2/heartbeat", timeout=5)
             assert response.status_code == 200
             data = response.json()
-            assert "success" in data
-        except (requests.ConnectionError, requests.TimeoutError):
+            # Real Chroma v2 API: {"nanosecond heartbeat": N} — no "success" key.
+            assert "nanosecond heartbeat" in data
+        except requests.exceptions.RequestException:
             pytest.skip("ChromaDB not available")
 
     def test_chroma_version(self, docker_services):
@@ -149,8 +150,9 @@ class TestChromaDBHealth:
             response = requests.get("http://localhost:8001/api/v2/version", timeout=5)
             assert response.status_code == 200
             data = response.json()
-            assert "version" in data
-        except (requests.ConnectionError, requests.TimeoutError):
+            # Real Chroma v2 API returns a bare string like "1.0.0".
+            assert isinstance(data, str) and len(data) > 0
+        except requests.exceptions.RequestException:
             pytest.skip("ChromaDB not available")
 
 
@@ -166,7 +168,7 @@ class TestMinIOHealth:
         try:
             response = requests.get("http://localhost:9000/minio/health/live", timeout=5)
             assert response.status_code == 200
-        except (requests.ConnectionError, requests.TimeoutError):
+        except requests.exceptions.RequestException:
             pytest.skip("MinIO not available")
 
     def test_minio_api(self, docker_services):
@@ -181,8 +183,10 @@ class TestMinIOHealth:
                 auth=HTTPBasicAuth("minioadmin", "minioadmin"),
                 timeout=5,
             )
-            assert response.status_code in [200, 403]
-        except (requests.ConnectionError, requests.TimeoutError):
+            # :9000 serves the S3 API, not the console route — any HTTP
+            # status (incl. 400) proves the server is up and reachable.
+            assert response.status_code in [200, 400, 403]
+        except requests.exceptions.RequestException:
             pytest.skip("MinIO not available")
 
 
