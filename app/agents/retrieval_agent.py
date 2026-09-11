@@ -8,6 +8,7 @@ import time
 from app.agents.state import AgentState
 from app.config import settings
 from app.database import AsyncSessionLocal
+from app.observability.fallbacks import count_fallback
 from app.retrieval.bm25_retriever import bm25_retriever
 from app.retrieval.hybrid_retriever import reciprocal_rank_fusion
 from app.retrieval.parent_store import get_parents_batch
@@ -45,6 +46,7 @@ async def _ensure_bm25_index(conversation_id: str) -> dict[str, bool | str]:
             "BM25 lazy rebuild failed",
             extra={"conversation_id": conversation_id, "error": str(exc)},
         )
+        count_fallback("retrieval.bm25_rebuild_failed")
         return {
             "had_index": bm25_retriever.has_index(conversation_id),
             "rebuilt": False,
@@ -167,6 +169,7 @@ async def retrieval_agent(state: AgentState) -> AgentState:
     vector_unavailable = _vector_unavailable(vector_results, flattened_vector_results)
     state["vector_unavailable"] = vector_unavailable
     if vector_unavailable:
+        count_fallback("retrieval.vector_unavailable")
         log.warning(
             "Vector search unavailable, BM25-only retrieval",
             extra={"conversation_id": cid, "query_variants": len(queries)},
@@ -242,6 +245,7 @@ async def retrieval_agent(state: AgentState) -> AgentState:
             c for c in reranked if c.get("rerank_score", 0) > min_rerank_score
         ][:TOP_N_FINAL]
     except Exception as e:
+        count_fallback("retrieval.rerank_failed")
         log.warning("Reranker failed", extra={"error": str(e)})
         top_reranked = expanded[:TOP_N_FINAL]
     timing["rerank_ms"] = _elapsed_ms(rerank_start)

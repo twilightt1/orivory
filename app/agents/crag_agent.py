@@ -24,6 +24,7 @@ import httpx
 from app.agents.llm_client import get_llm_client as _get_client
 from app.agents.llm_parsing import parse_llm_json_object
 from app.config import settings
+from app.observability.fallbacks import count_fallback
 
 if TYPE_CHECKING:
     from app.agents.state import AgentState
@@ -246,6 +247,7 @@ async def grade_single_document(
 
     except Exception as e:
         log.warning(f"CRAG grading failed for doc {doc_id}: {e}")
+        count_fallback("crag.grading_failed")
         # Default to IRRELEVANT on error (fail-safe)
         return GradedDocument(
             doc_id=doc_id,
@@ -561,11 +563,14 @@ async def execute_web_fallback(
         else:
             filtered_results.append(result)
 
-    # Step 4: Format results
+    # Step 4: Format results. Web page text is raw third-party content —
+    # cap it per-doc at ingest so a few full pages can't blow the context
+    # budget downstream (the merge below enforces the global budget too).
+    max_chars = settings.CRAG_MAX_WEB_CHARS
     web_documents = [
         {
             "id": f"web_{i}",
-            "content": r.content,
+            "content": (r.content or "")[:max_chars],
             "metadata": {
                 "source": "web",
                 "url": r.url,
@@ -720,12 +725,20 @@ async def crag_agent(state: AgentState) -> AgentState:
         # Sort by adjusted score
         weighted_docs.sort(key=lambda x: x.get("crag_score", 0), reverse=True)
 
-        # Update state
+        # Re-apply the context budget AFTER the merge: context_merge_agent ran
+        # earlier in the graph (merge_context -> grade_docs -> crag), so without
+        # this the fallback overwrites the budgeted `reranked_chunks` with up
+        # to ~5 local + CRAG_MAX_WEB_RESULTS untruncated web docs.
+        from app.agents.context_merge_agent import merge_context_chunks
+
         state["reranked_chunks"] = weighted_docs
+        budgeted, dropped = merge_context_chunks(state)
+        state["reranked_chunks"] = budgeted
         state["crag_trace"]["merged_result"] = {
-            "total_documents": len(weighted_docs),
-            "local_weighted": sum(1 for d in weighted_docs if d.get("metadata", {}).get("source") == "local"),
+            "total_documents": len(budgeted),
+            "local_weighted": sum(1 for d in budgeted if d.get("metadata", {}).get("source") == "local"),
             "web_added": len(fallback_result.merged_documents),
+            "dropped_for_budget": dropped,
         }
 
         state["agent_trace"]["crag"] = {
