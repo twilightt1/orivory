@@ -36,8 +36,12 @@ command -v docker >/dev/null 2>&1 || { warn "docker is required: https://docs.do
 
 mkdir -p "$DIR"
 
-say "pulling $IMAGE"
-docker pull -q "$IMAGE" >/dev/null
+if docker image inspect "$IMAGE" >/dev/null 2>&1; then
+  say "using local image $IMAGE"
+else
+  say "pulling $IMAGE"
+  docker pull -q "$IMAGE" >/dev/null
+fi
 
 say "starting Orivory (lite) on :$PORT — data in $DIR"
 docker rm -f orivory-lite >/dev/null 2>&1 || true
