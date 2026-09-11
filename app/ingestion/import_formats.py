@@ -380,7 +380,7 @@ def parse_openclaw(data: Any) -> list[ImportItem]:
     """OpenClaw session-log dump → one ImportItem per session.
 
     OpenClaw stores agent memory as local Markdown state (see
-    docs/research/PLATFORM_LANDSCAPE.md §4). The converter accepts the
+    private orivory-private docs/research/PLATFORM_LANDSCAPE.md §4). The converter accepts the
     JSON shape produced by the documented export flow: a list of
     ``{session_id, entries: [{role, content, timestamp?}]}`` records —
     i.e. the natural dump of the session-log store.

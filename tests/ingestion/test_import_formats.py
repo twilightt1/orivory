@@ -1,7 +1,7 @@
 """Unit tests for import format adapters.
 
 Inline fixtures mirror the VERIFIED export shapes (sources listed in
-docs/superpowers/plans/2026-09-02-import-paths.md and docs/API.md §Imports):
+private orivory-private docs/superpowers/plans/2026-09-02-import-paths.md and docs/API.md §Imports):
 ChatGPT mapping-DAG conversations.json, Claude chat_messages export.
 CI-safe: pure parsing, no DB, no Chroma.
 """

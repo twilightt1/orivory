@@ -34,25 +34,11 @@ Start here. Everything else is organized by purpose:
 | [architecture/rag_pipeline_optimization.md](architecture/rag_pipeline_optimization.md) | RAG pipeline hardening notes |
 | [../eval/benchmarks/README.md](../eval/benchmarks/README.md) | Benchmark protocol + leaderboard hygiene |
 
-## Research (why the hub direction)
+## Research & plans (private)
 
-| Doc | Contents |
-|---|---|
-| [research/USER_RESEARCH.md](research/USER_RESEARCH.md) | Segments, pains, willingness to pay (community evidence) |
-| [research/MARKET_RESEARCH.md](research/MARKET_RESEARCH.md) | Competitor map, white space, monetization, distribution |
-| [research/PLATFORM_LANDSCAPE.md](research/PLATFORM_LANDSCAPE.md) | Memory-hub prior art + gaps (OpenMemory sunset, governance hole) |
-| [research/PAPERS_AGENT_MEMORY.md](research/PAPERS_AGENT_MEMORY.md) | Agent-memory literature + benchmark selection |
-| [research/PAPERS_HCI_PRIVACY.md](research/PAPERS_HCI_PRIVACY.md) | PKM abandonment, proactive-AI guardrails, erasure literature |
-| [research/FLAGSHIP_DEMAND_EVIDENCE.md](research/FLAGSHIP_Demand_EVIDENCE.md) | Demand evidence per flagship candidate |
-| [research/ICP_AND_TIMING.md](research/ICP_AND_TIMING.md) | ICP reachability, competitive window, spec-vs-impl precedents |
-| [research/OSS_GROWTH_PLAYBOOK.md](research/OSS_GROWTH_PLAYBOOK.md) | Contributor growth playbook (evidence-ranked) |
-| [research/CLAWHUB_SKILL_FORMAT.md](research/CLAWHUB_SKILL_FORMAT.md) | OpenClaw skill format + publish flow |
-| [research/CLAUDE_MEM_ANALYSIS.md](research/CLAUDE_MEM_ANALYSIS.md) | claude-mem competitive analysis (92K★ threat + adopt-learn list) |
-| [research/DEVELOPMENT_RECOMMENDATIONS.md](research/DEVELOPMENT_RECOMMENDATIONS.md) | The original recommendation set (superseded in part by the hub pivot) |
-| [ideas/open-memory-hub.md](ideas/open-memory-hub.md) | The pivot decision one-pager (flagship, ICP, MVP scope) |
-
-## Plans
-
-Implementation plans (SDD-executed, with review evidence in git history):
-[../docs/superpowers/plans/](superpowers/plans/) — mcp-hub-spine,
-erasure-receipts, import-paths, benchmark-scaffold.
+Strategy research, positioning one-pagers, and SDD implementation plans live
+in the private companion repo:
+[orivory-private](https://github.com/twilightt1/orivory-private)
+([research/](https://github.com/twilightt1/orivory-private/tree/main/docs/research) ·
+[ideas/](https://github.com/twilightt1/orivory-private/tree/main/docs/ideas) ·
+[plans/](https://github.com/twilightt1/orivory-private/tree/main/docs/superpowers/plans)).

@@ -15,7 +15,7 @@ api_router.include_router(users.router)
 
 # Slim core (memory-for-agents): memories, agent tokens + ledger, erasure,
 # one-shot imports. Everything else is dormant on the slim branch — files
-# stay in tree, unmounted. See docs/ideas/open-source-positioning.md.
+# stay in tree, unmounted. See private orivory-private docs/ideas/open-source-positioning.md.
 api_router.include_router(memories.router)
 api_router.include_router(agents.router)
 api_router.include_router(erasure.router)

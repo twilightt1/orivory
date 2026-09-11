@@ -186,4 +186,4 @@ Config `orivory_stack`, seed `20260906`, judge `longmemeval-official-v1`:
 Rule: any retrieval-code change must re-run the n=100 single-pass config
 and stay within the frozen CI before merge. Tuning the score further is
 explicitly out of scope until ≥5 active installs (see
-`docs/ideas/open-source-positioning.md` §5).
+[open-source-positioning.md §5](https://github.com/twilightt1/orivory-private/blob/main/docs/ideas/open-source-positioning.md) (private)).

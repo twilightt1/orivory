@@ -11,7 +11,7 @@ This directory holds Orivory's **external benchmark harness** for long-term agen
 |---|---|---|
 | **LongMemEval-S** ([ICLR 2025](https://arxiv.org/abs/2410.10813), [repo](https://github.com/xiaowu0162/LongMemEval)) | **Primary** | Peer-reviewed and human-curated: 500 questions over timestamped multi-session chat histories, testing exactly what a time-aware memory hub claims — **knowledge updates, temporal reasoning, and abstention** (plus information extraction and multi-session reasoning). _S (~115k tokens / ~40 sessions per history) is long enough to stress retrieval rather than the context window, and is the variant the field actually runs (_M is ~1.5M tokens and rarely reported). Publishing here buys comparability with Zep's and Mem0's published runs. |
 | **MemoryAgentBench** ([arXiv 2507.05257](https://arxiv.org/abs/2507.05257)) | **Secondary** | The **only benchmark that scores selective forgetting** (Orivory's differentiator), via its FactConsolidation set, alongside test-time learning, accurate retrieval, and long-range understanding, all in incremental multi-turn form. Neutral academic group; no commercial system has gamed it. v0 harness covers the selective-forgetting scenario; a full dataset rebuild is a follow-up. |
-| **LoCoMo** (ACL 2024) | **Protocol-explicit only — never lead** | Usable as a secondary stress test, but not decision-grade: tiny n (10 conversations), fits modern context windows, broken adversarial category, and protocol sensitivity so high that Zep and Mem0 disagree on the same system's score by ±17 points (see `docs/research/PAPERS_AGENT_MEMORY.md` §3.1). If community pressure demands a LoCoMo number, it ships only protocol-explicit (fixed judge prompt, ≥10 runs with variance, exclusions stated) and never in the headline. |
+| **LoCoMo** (ACL 2024) | **Protocol-explicit only — never lead** | Usable as a secondary stress test, but not decision-grade: tiny n (10 conversations), fits modern context windows, broken adversarial category, and protocol sensitivity so high that Zep and Mem0 disagree on the same system's score by ±17 points (see [PAPERS_AGENT_MEMORY.md §3.1](https://github.com/twilightt1/orivory-private/blob/main/docs/research/PAPERS_AGENT_MEMORY.md) (private)). If community pressure demands a LoCoMo number, it ships only protocol-explicit (fixed judge prompt, ≥10 runs with variance, exclusions stated) and never in the headline. |
 
 ## Dataset download
 
@@ -54,7 +54,7 @@ Without a dataset the CLI exits 2 with a pointer back to this README; without a 
 
 ## Leaderboard hygiene
 
-These rules exist because the LoCoMo controversy showed vendor memory scores swinging ±10–20 points on the same benchmark purely on protocol choices (see `docs/research/PAPERS_AGENT_MEMORY.md` §3.1). Every result file produced by this harness must include:
+These rules exist because the LoCoMo controversy showed vendor memory scores swinging ±10–20 points on the same benchmark purely on protocol choices (see [PAPERS_AGENT_MEMORY.md §3.1](https://github.com/twilightt1/orivory-private/blob/main/docs/research/PAPERS_AGENT_MEMORY.md) (private)). Every result file produced by this harness must include:
 
 1. **Judge prompt version committed** — the exact judge prompt text (or its committed hash + version tag) is pinned in the repo before any judged number is recorded. Judge changes invalidate prior comparability and must be stated.
 2. **≥3 runs, mean ± variance** — any judged score is reported as the mean over at least 3 runs with variance (±). Single-run numbers never appear in results files.

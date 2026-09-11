@@ -1,10 +1,11 @@
 # Orivory Roadmap
 
 > Status: 2026-09-12. History lives in git; this file tracks what shipped and
-> what's open. Design rationale for the hub direction:
-> [ideas/open-memory-hub.md](ideas/open-memory-hub.md) + [research/](research/).
-> Positioning for the open-source launch:
-> [ideas/open-source-positioning.md](ideas/open-source-positioning.md).
+> what's open. Design rationale for the hub direction and positioning live in
+> the private companion repo
+> ([orivory-private](https://github.com/twilightt1/orivory-private):
+> [ideas/](https://github.com/twilightt1/orivory-private/tree/main/docs/ideas) ·
+> [research/](https://github.com/twilightt1/orivory-private/tree/main/docs/research)).
 
 ## Shipped
 
@@ -77,7 +78,7 @@
 10. **Parent ownership + depth-cap receipts polish** — partially done; see
     code TODOs.
 
-### From claude-mem competitive analysis (see research/CLAUDE_MEM_ANALYSIS.md)
+### From claude-mem competitive analysis (see [CLAUDE_MEM_ANALYSIS.md](https://github.com/twilightt1/orivory-private/blob/main/docs/research/CLAUDE_MEM_ANALYSIS.md) (private))
 - ✅ **Auto-capture for OpenClaw** (PR #11): agent-token imports + the
   stdlib-only `scripts/openclaw_capture.py` watcher — sessions auto-flow
   into the ingestion path without manual calls.

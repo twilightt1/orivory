@@ -2,7 +2,7 @@
 
 **Ngày chốt:** 2026-09-12 · **Trạng thái:** APPROVED scope (founder) — chờ implement
 **Tiền đề:** self-host 1 container trên máy user · agent ngoài là orchestrator · server là lớp nhớ chung
-**Bằng chứng nền:** `docs/research/memory-papers.md` (9 paper) · review: `docs/research/memory-nextgen-review.html`
+**Bằng chứng nền:** [memory-papers.md](https://github.com/twilightt1/orivory-private/blob/main/docs/research/memory-papers.md) (private, 9 paper) · review: [memory-nextgen-review.html](https://github.com/twilightt1/orivory-private/blob/main/docs/research/memory-nextgen-review.html) (private)
 
 ---
 
@@ -110,7 +110,7 @@ Giữ: Memory+metadata · retriever · write_back · erasure+receipt · mcp_hub 
 import ChatGPT/Claude JSON · harness eval.
 (Xóa vật lý theo nhát riêng, mỗi nhát chạy `pytest` đường memory/MCP — ngoài scope spec này.)
 
-## 8. Eval acceptance (reuse harness, theo `memory-papers.md §6`)
+## 8. Eval acceptance (reuse harness, theo [memory-papers.md §6](https://github.com/twilightt1/orivory-private/blob/main/docs/research/memory-papers.md) (private))
 
 - Subset LongMemEval knowledge-update + temporal + abstention · FactConsolidation-SH/MH.
 - 9 case nội bộ: đổi nơi làm việc · hồi tố hiệu lực · import muộn bản cũ · dự định-vs-sự thật ·

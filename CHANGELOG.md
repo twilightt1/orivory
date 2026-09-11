@@ -73,8 +73,8 @@ project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased] — Open Memory Hub MVP (2026-09-02 → 2026-09-04)
 
 The strategic pivot from "AI second brain app" to an **open memory hub for
-AI agents** (decision one-pager: `docs/ideas/open-memory-hub.md`; research
-corpus: `docs/research/`).
+AI agents** (decision one-pager: [open-memory-hub.md](https://github.com/twilightt1/orivory-private/blob/main/docs/ideas/open-memory-hub.md) (private); research
+corpus: [research/](https://github.com/twilightt1/orivory-private/tree/main/docs/research) (private)).
 
 ### Added
 - **MCP server** at `/mcp` — six scoped memory tools (`search_memory`,

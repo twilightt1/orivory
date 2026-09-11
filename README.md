@@ -168,8 +168,8 @@ orivory/
 | [docs/how-it-works.html](docs/how-it-works.html) | The one-page explainer — how the hub works, honestly compared | 
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System architecture — hub spine, agents, retrieval, data model |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | Shipped milestones and open follow-ups |
-| [docs/ideas/open-source-positioning.md](docs/ideas/open-source-positioning.md) | Positioning: one-line definition, competitor matrix, hub-first narrative |
-| [docs/research/](docs/research/) | Market / user / platform / papers research behind the pivot |
+| [open-source-positioning.md](https://github.com/twilightt1/orivory-private/blob/main/docs/ideas/open-source-positioning.md) (private) | Positioning: one-line definition, competitor matrix, hub-first narrative |
+| [research/](https://github.com/twilightt1/orivory-private/tree/main/docs/research) (private) | Market / user / platform / papers research behind the pivot |
 | [docs/EVALUATION_GUIDE.md](docs/EVALUATION_GUIDE.md) | RAG evaluation + benchmarks |
 | [docs/LITE_MODE.md](docs/LITE_MODE.md) | One-container lite mode |
 | [docs/DEPLOYMENT_GUIDE.md](docs/DEPLOYMENT_GUIDE.md) · [docs/OPERATIONS_RUNBOOK.md](docs/OPERATIONS_RUNBOOK.md) · [docs/BACKUP_RESTORE.md](docs/BACKUP_RESTORE.md) | Ops |

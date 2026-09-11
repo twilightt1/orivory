@@ -136,7 +136,7 @@ by characters before the LLM call; the fallback answer is an explicit
   structural: results files are written only from real runs, dataset sha256
   travels with every result, hygiene fields (judge version, full-context
   baseline, deviations) are reserved. Protocol rationale and the LoCoMo
-  never-lead rule: `docs/research/PAPERS_AGENT_MEMORY.md` §3.
+  never-lead rule: [PAPERS_AGENT_MEMORY.md §3](https://github.com/twilightt1/orivory-private/blob/main/docs/research/PAPERS_AGENT_MEMORY.md) (private).
 
 ## 7. Data & migrations
 

@@ -30,7 +30,7 @@ server connected.
   background writes, no surprise mutations.
 - **Actionable, not noise**: one question back per digest ("deeper on what?")
   is what keeps a digest from becoming homework — the failure mode that
-  killed ChatGPT Pulse (see `docs/research/PAPERS_HCI_PRIVACY.md` §2:
+  killed ChatGPT Pulse (see [PAPERS_HCI_PRIVACY.md §2](https://github.com/twilightt1/orivory-private/blob/main/docs/research/PAPERS_HCI_PRIVACY.md) (private):
   digests survive when user-configured + action-attached).
 
 ## Variations
