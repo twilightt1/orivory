@@ -77,8 +77,8 @@ export ORIVORY_TOKEN="oa_<32-hex from POST /api/v1/agents>"
 openclaw mcp doctor orivory --probe
 ```
 
-Expect the six Orivory tools to list: `search_memory`, `get_memory`,
-`list_recent`, `add_memory`, `delete_memory`, `forget_memory`. Then ask your
+Expect the seven Orivory tools to list: `search_memory`, `get_memory`,
+`list_recent`, `add_memory`, `correct_memory`, `delete_memory`, `forget_memory`. Then ask your
 agent: *"What tools do you have for memory?"*
 
 ## Core tasks
