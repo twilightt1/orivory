@@ -69,10 +69,17 @@ class CostTracker:
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
+        # threading.Lock only serializes threads in ONE process. Under
+        # multi-worker servers concurrent writers live in other processes,
+        # so wait instead of failing fast with 'database is locked'.
+        conn.execute("PRAGMA busy_timeout = 5000;")
         return conn
 
     def _init_db(self) -> None:
         with self._connect() as conn:
+            # WAL allows one writer + many readers concurrently; persists
+            # per-database, so set once here rather than per connection.
+            conn.execute("PRAGMA journal_mode = WAL;")
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS llm_costs (

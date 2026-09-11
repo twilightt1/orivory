@@ -16,6 +16,7 @@ class AgentState(TypedDict, total=False):
 
     bm25_results: list[dict[str, Any]]
     vector_results: list[dict[str, Any]]
+    vector_unavailable: bool
     fused_chunks: list[dict[str, Any]]
 
     reranked_chunks: list[dict[str, Any]]

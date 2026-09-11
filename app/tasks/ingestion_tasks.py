@@ -45,6 +45,10 @@ def _stage_error(stage: str, exc: Exception) -> IngestionStageError:
     name="tasks.process_document",
     max_retries=3,
     default_retry_delay=30,
+    retry_backoff=True,
+    retry_jitter=True,
+    time_limit=900,
+    soft_time_limit=840,
     queue="ingestion",
 )
 def process_document(self, document_id: str) -> None:

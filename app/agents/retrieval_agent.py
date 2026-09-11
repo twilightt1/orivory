@@ -13,6 +13,7 @@ from app.retrieval.hybrid_retriever import reciprocal_rank_fusion
 from app.retrieval.parent_store import get_parents_batch
 from app.retrieval.reranker import rerank
 from app.retrieval.retrieval_cache import get_cached_chunks, set_cached_chunks
+from app.retrieval.vector_retriever import VectorUnavailableError
 from app.retrieval.vector_retriever import search as vector_search
 
 log = logging.getLogger(__name__)
@@ -50,6 +51,20 @@ async def _ensure_bm25_index(conversation_id: str) -> dict[str, bool | str]:
             "has_index": bm25_retriever.has_index(conversation_id),
             "error": str(exc),
         }
+
+
+def _vector_unavailable(vector_results: list, flattened: list[dict]) -> bool:
+    """Degradation classifier: True only when vector search itself failed.
+
+    Empty results WITHOUT errors mean "genuinely no vectors" (new
+    conversation, no matches) — not an outage. Partial success means the
+    backend is reachable. Only all-failed + no-results is Chroma-down.
+    """
+    if flattened:
+        return False
+    return bool(vector_results) and all(
+        isinstance(res, VectorUnavailableError) for res in vector_results
+    )
 
 
 async def retrieval_agent(state: AgentState) -> AgentState:
@@ -145,6 +160,18 @@ async def retrieval_agent(state: AgentState) -> AgentState:
     state["vector_results"] = flattened_vector_results
     timing["vector_ms"] = _elapsed_ms(vector_start)
 
+    # Degradation contract: Chroma down -> BM25-only (Postgres) + flag it.
+    # Never silent: the flag lands in state, the trace, and a warning log
+    # (countable for fallback-rate alerting). Zero extra Chroma round
+    # trips — classification reuses the gather() results.
+    vector_unavailable = _vector_unavailable(vector_results, flattened_vector_results)
+    state["vector_unavailable"] = vector_unavailable
+    if vector_unavailable:
+        log.warning(
+            "Vector search unavailable, BM25-only retrieval",
+            extra={"conversation_id": cid, "query_variants": len(queries)},
+        )
+
     if not all_result_lists:
         state["reranked_chunks"] = []
         state["agent_trace"]["retrieval"] = {
@@ -152,6 +179,7 @@ async def retrieval_agent(state: AgentState) -> AgentState:
             "bm25_index": bm25_index,
             "bm25_result_count": len(bm25_res),
             "vector_result_count": len(flattened_vector_results),
+            "vector_unavailable": vector_unavailable,
             "result": "no_results",
             "retry_count": state.get("retry_count", 0),
             "timing_ms": timing,
@@ -225,6 +253,7 @@ async def retrieval_agent(state: AgentState) -> AgentState:
         "bm25_index": bm25_index,
         "bm25_result_count": len(bm25_res),
         "vector_result_count": len(flattened_vector_results),
+        "vector_unavailable": vector_unavailable,
         "query_variants": len(queries),
         "result_lists": len(all_result_lists),
         "fused_children": len(fused_children),

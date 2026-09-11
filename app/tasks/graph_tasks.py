@@ -14,6 +14,10 @@ log = logging.getLogger(__name__)
     name="tasks.build_memory_graph",
     max_retries=3,
     default_retry_delay=30,
+    retry_backoff=True,
+    retry_jitter=True,
+    time_limit=600,
+    soft_time_limit=540,
     queue="default",
 )
 def build_memory_graph_task(self, memory_id: str, force: bool = False) -> dict:

@@ -9,11 +9,26 @@ import chromadb
 import httpx
 
 from app.config import settings
-from app.retrieval.embedder import embed_query, embed_texts, embed_texts_sync
+from app.retrieval.embedder import (
+    astamp_collection_dim,
+    check_collection_dim,
+    embed_query,
+    embed_texts,
+    embed_texts_sync,
+    stamp_collection_dim,
+)
 
 log = logging.getLogger(__name__)
 _async_client: chromadb.AsyncHttpClient | None = None
 _sync_client: chromadb.HttpClient | None = None
+
+
+class VectorUnavailableError(Exception):
+    """ChromaDB itself is unreachable (not: empty collection, no matches).
+
+    Raised instead of returning [] so callers can distinguish "vector
+    search is down" (degrade to BM25-only + flag it) from "no vectors".
+    """
 
 
 def with_retry(retries: int = 3, base_delay: float = 1.0):
@@ -95,6 +110,7 @@ async def upsert_chunks(conversation_id: str, chunks: list[dict]) -> None:
         metadata={"hnsw:space": "cosine"},
     )
     embeddings = await embed_texts([c["content"] for c in chunks])
+    await astamp_collection_dim(collection, len(embeddings[0]))
     await collection.upsert(
         ids=[c["id"] for c in chunks],
         documents=[c["content"] for c in chunks],
@@ -113,6 +129,7 @@ def upsert_chunks_sync(conversation_id: str, chunks: list[dict]) -> None:
         metadata={"hnsw:space": "cosine"},
     )
     embeddings = embed_texts_sync([c["content"] for c in chunks])
+    stamp_collection_dim(collection, len(embeddings[0]))
     collection.upsert(
         ids=[c["id"] for c in chunks],
         documents=[c["content"] for c in chunks],
@@ -132,8 +149,8 @@ async def search(
     try:
         cli        = await _get_async_client()
         collection = await cli.get_collection(_col_name(conversation_id))
-    except Exception:
-        return []
+    except Exception as exc:
+        raise VectorUnavailableError(f"ChromaDB unreachable: {exc}") from exc
 
     count = await collection.count()
     if count == 0:
@@ -143,6 +160,8 @@ async def search(
     embed_input = hyde_text if hyde_text else query
     embedding   = await embed_query(embed_input)
 
+    # Fail loud on backend/dim switches; never stamp here (read path).
+    check_collection_dim(collection, len(embedding))
 
     results = await collection.query(
         query_embeddings=[embedding],
