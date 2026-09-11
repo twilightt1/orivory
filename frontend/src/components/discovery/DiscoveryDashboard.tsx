@@ -52,6 +52,11 @@ export function DiscoveryDashboard({ className }: DiscoveryDashboardProps) {
   const [showNewSessionModal, setShowNewSessionModal] = useState(false);
   const [graphData, setGraphData] = useState<GraphResponse | null>(null);
   const [graphLoading, setGraphLoading] = useState(false);
+  // Starting-document picker for the new-session modal. The backend requires
+  // starting_doc_id to be a real UUID — the previous literal "default" was
+  // rejected with 422 on every attempt, silently (console.error only).
+  const [startingDocId, setStartingDocId] = useState<string>("");
+  const [sessionError, setSessionError] = useState<string | null>(null);
 
   const fetchData = useCallback(async () => {
     setLoading(true);
@@ -123,6 +128,11 @@ export function DiscoveryDashboard({ className }: DiscoveryDashboardProps) {
   }
 
   async function handleStartSession(flowType: DiscoveryFlowType, startingDocId: string) {
+    if (!startingDocId) {
+      setSessionError("Pick a starting document first — journeys begin from a real memory.");
+      return;
+    }
+    setSessionError(null);
     try {
       const session = await createDiscoverySession({
         flow_type: flowType,
@@ -133,7 +143,7 @@ export function DiscoveryDashboard({ className }: DiscoveryDashboardProps) {
       setCurrentStep(step);
       setShowNewSessionModal(false);
     } catch (err) {
-      console.error("Failed to start session:", err);
+      setSessionError(err instanceof Error ? err.message : "Failed to start session.");
     }
   }
 
@@ -450,14 +460,35 @@ export function DiscoveryDashboard({ className }: DiscoveryDashboardProps) {
               className="relative bg-card rounded-2xl border border-border p-6 w-full max-w-lg shadow-2xl"
             >
               <h3 className="text-xl font-bold mb-4">Start a Discovery Journey</h3>
-              <p className="text-muted-foreground mb-6">
-                Select a flow type to begin exploring connections in your knowledge.
+              <p className="text-muted-foreground mb-4">
+                Pick a starting memory, then select a flow type to begin exploring connections in your knowledge.
               </p>
+              <label className="block text-sm font-medium mb-1" htmlFor="discovery-start-doc">
+                Starting memory
+              </label>
+              <select
+                id="discovery-start-doc"
+                value={startingDocId}
+                onChange={(e) => setStartingDocId(e.target.value)}
+                className="w-full mb-4 p-2.5 bg-card border border-border rounded-xl text-sm"
+              >
+                <option value="">Select a memory…</option>
+                {(graphData?.nodes ?? []).slice(0, 100).map((n) => (
+                  <option key={n.id} value={n.id}>
+                    {n.title || n.id}
+                  </option>
+                ))}
+              </select>
+              {sessionError && (
+                <p role="alert" className="mb-4 text-sm text-destructive">
+                  {sessionError}
+                </p>
+              )}
               <div className="space-y-3">
                 {(Object.entries(FLOW_TYPE_CONFIG) as [DiscoveryFlowType, typeof FLOW_TYPE_CONFIG[DiscoveryFlowType]][]).map(([key, config]) => (
                   <button
                     key={key}
-                    onClick={() => handleStartSession(key, "default")}
+                    onClick={() => handleStartSession(key, startingDocId)}
                     className="w-full p-4 bg-card border border-border rounded-xl text-left hover:border-primary/50 hover:bg-accent/50 transition-colors"
                   >
                     <div className="flex items-center gap-3">

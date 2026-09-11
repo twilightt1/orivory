@@ -11,7 +11,6 @@ import {
   Filter, 
   Upload, 
   Trash2, 
-  Download, 
   MoreVertical,
   File,
   Image,
@@ -90,22 +89,6 @@ export default function DocumentsPage() {
     } catch (error) {
       console.error("Failed to delete document:", error);
       alert("Failed to delete document. Please try again.");
-    }
-  };
-
-  const handleDownload = async (doc: Document) => {
-    try {
-      const { downloadDocument } = await import("@/lib/api/documents");
-      const blob = await downloadDocument(doc.id);
-      const url = URL.createObjectURL(blob);
-      const a = window.document.createElement("a");
-      a.href = url;
-      a.download = doc.filename || doc.title || "document";
-      a.click();
-      URL.revokeObjectURL(url);
-    } catch (error) {
-      console.error("Failed to download document:", error);
-      alert("Failed to download document. Please try again.");
     }
   };
 
@@ -265,14 +248,7 @@ export default function DocumentsPage() {
 
                     {/* Actions */}
                     <div className="flex items-center gap-1">
-                      <motion.button
-                        whileHover={{ scale: 1.1 }}
-                        onClick={() => handleDownload(doc)}
-                        aria-label={`Download ${doc.title || doc.filename}`}
-                        className="p-2 rounded-lg text-white/40 hover:text-white/70 hover:bg-white/[0.05] transition-colors"
-                      >
-                        <Download className="w-4 h-4" />
-                      </motion.button>
+                      
                       <motion.button
                         whileHover={{ scale: 1.1 }}
                         onClick={() => handleDelete(doc.id)}

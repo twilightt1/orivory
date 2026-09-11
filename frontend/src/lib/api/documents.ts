@@ -107,7 +107,9 @@ export async function uploadDocument({
   // Get the current conversation/session ID from localStorage or use default
   let sessionId = typeof window !== "undefined" ? localStorage.getItem("current_session_id") : null;
   
-  // If no session, create one first
+  // If no session, create one first. POST /chat/sessions returns a SINGLE
+  // SessionResponse object (not an array) — reading sessions[0] always missed
+  // and spawned a stray empty conversation per upload.
   if (!sessionId) {
     const token = localStorage.getItem("auth_token");
     const response = await fetch(`${apiClient.getBaseUrl()}/api/v1/chat/sessions`, {
@@ -118,8 +120,11 @@ export async function uploadDocument({
       },
       body: JSON.stringify({}),
     });
-    const sessions = await response.json();
-    sessionId = sessions[0]?.id;
+    if (!response.ok) {
+      throw new Error(`Failed to create chat session: ${response.status}`);
+    }
+    const session = await response.json();
+    sessionId = session?.id;
     if (sessionId) {
       localStorage.setItem("current_session_id", sessionId);
     }
@@ -187,23 +192,6 @@ export async function uploadDocument({
 
 
 /**
- * Get a single document by ID
- */
-export async function getDocument(id: string): Promise<Document> {
-  return apiClient.get<Document>(`/api/v1/documents/${id}`);
-}
-
-/**
- * Update document metadata
- */
-export async function updateDocument(
-  id: string,
-  params: { title?: string; tags?: string[]; metadata?: Record<string, any> }
-): Promise<Document> {
-  return apiClient.patch<Document>(`/api/v1/documents/${id}`, params);
-}
-
-/**
  * Delete a document
  * Uses the chat endpoint to delete documents
  */
@@ -223,70 +211,16 @@ export async function deleteDocument(id: string, conversationId?: string): Promi
     return;
   }
 
-  // Fallback: try to find the document's conversation
-  // For now, we'll try to delete using the root endpoint
-  try {
-    const response = await fetch(`${apiClient.getBaseUrl()}/api/v1/chat/documents/${id}`, {
-      method: "DELETE",
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    if (!response.ok) {
-      throw new Error(`Failed to delete document: ${response.status}`);
-    }
-  } catch (e) {
-    // If endpoint doesn't exist, just log
-    console.warn("Delete endpoint may not be available:", e);
-  }
-}
-
-/**
- * Download a document
- */
-export async function downloadDocument(id: string): Promise<Blob> {
-  const response = await fetch(`${apiClient.getBaseUrl()}/api/v1/documents/${id}/download`, {
-    headers: apiClient.getHeaders(),
+  // Fallback: the backend serves DELETE /chat/documents/{id} (root delete,
+  // no conversation needed). Failures throw — the previous version swallowed
+  // them with console.warn, leaving the UI out of sync with the server.
+  const response = await fetch(`${apiClient.getBaseUrl()}/api/v1/chat/documents/${id}`, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${token}` },
   });
-
-  if (!response.ok) {
-    throw new Error(`Failed to download document: ${response.status}`);
+  if (!response.ok && response.status !== 204) {
+    throw new Error(`Failed to delete document: ${response.status}`);
   }
-
-  return response.blob();
-}
-
-/**
- * Reprocess a document
- */
-export async function reprocessDocument(id: string): Promise<Document> {
-  return apiClient.post<Document>(`/api/v1/documents/${id}/reprocess`, {});
-}
-
-/**
- * Get document content/text
- */
-export async function getDocumentContent(id: string): Promise<string> {
-  const data = await apiClient.get<{ content: string }>(`/api/v1/documents/${id}/content`);
-  return data.content;
-}
-
-/**
- * Bulk delete documents
- */
-export async function bulkDeleteDocuments(ids: string[]): Promise<{ deleted: number }> {
-  return apiClient.post<{ deleted: number }>("/api/v1/documents/bulk-delete", { ids });
-}
-
-/**
- * Get document processing status (for SSE/polling updates)
- */
-export async function getDocumentStatus(id: string): Promise<{
-  status: Document["status"];
-  progress?: number;
-  error_message?: string;
-}> {
-  return apiClient.get<{ status: Document["status"]; progress?: number; error_message?: string }>(
-    `/api/v1/documents/${id}/status`
-  );
 }
 
 /**

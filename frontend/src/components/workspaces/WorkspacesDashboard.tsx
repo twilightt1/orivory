@@ -57,6 +57,10 @@ interface WorkspacesDashboardProps {
 export function WorkspacesDashboard({ className }: WorkspacesDashboardProps) {
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [selectedWorkspace, setSelectedWorkspace] = useState<Workspace | null>(null);
+  // The detail effect (below) is keyed on this id, NOT on the workspace
+  // object: every fetch returns a fresh object identity, so depending on the
+  // object re-fires the effect forever (unbounded refetch loop).
+  const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string | null>(null);
   const [members, setMembers] = useState<TeamMember[]>([]);
   const [invites, setInvites] = useState<WorkspaceInvite[]>([]);
   const [loading, setLoading] = useState(true);
@@ -99,10 +103,10 @@ export function WorkspacesDashboard({ className }: WorkspacesDashboardProps) {
   }, [fetchWorkspaces]);
 
   useEffect(() => {
-    if (selectedWorkspace) {
-      fetchWorkspaceDetails(selectedWorkspace.id);
+    if (selectedWorkspaceId) {
+      fetchWorkspaceDetails(selectedWorkspaceId);
     }
-  }, [selectedWorkspace, fetchWorkspaceDetails]);
+  }, [selectedWorkspaceId, fetchWorkspaceDetails]);
 
   async function handleCreateWorkspace(data: WorkspaceCreate) {
     try {
@@ -110,6 +114,7 @@ export function WorkspacesDashboard({ className }: WorkspacesDashboardProps) {
       setWorkspaces([workspace, ...workspaces]);
       setShowCreateModal(false);
       setSelectedWorkspace(workspace);
+      setSelectedWorkspaceId(workspace.id);
     } catch (err) {
       console.error("Failed to create workspace:", err);
     }
@@ -179,7 +184,7 @@ export function WorkspacesDashboard({ className }: WorkspacesDashboardProps) {
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
             <button
-              onClick={() => setSelectedWorkspace(null)}
+              onClick={() => { setSelectedWorkspace(null); setSelectedWorkspaceId(null); }}
               className="p-2 rounded-lg hover:bg-accent transition-colors"
             >
               ←
@@ -383,6 +388,7 @@ export function WorkspacesDashboard({ className }: WorkspacesDashboardProps) {
               await deleteWorkspace(selectedWorkspace.id);
               setWorkspaces(workspaces.filter(w => w.id !== selectedWorkspace.id));
               setSelectedWorkspace(null);
+              setSelectedWorkspaceId(null);
             }
           }}
         />
@@ -437,7 +443,7 @@ export function WorkspacesDashboard({ className }: WorkspacesDashboardProps) {
               description={workspace.description || `${workspace.member_count} members`}
               icon={<Users className="w-5 h-5 text-primary" />}
               className="cursor-pointer"
-              onClick={() => setSelectedWorkspace(workspace)}
+              onClick={() => { setSelectedWorkspace(workspace); setSelectedWorkspaceId(workspace.id); }}
             />
           ))}
         </BentoGrid>

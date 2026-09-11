@@ -170,7 +170,7 @@ export function FeatureHintProvider({
     try {
       const response = await fetch(`${apiBaseUrl}/api/v1/hints`, {
         headers: {
-          Authorization: `Bearer ${localStorage.getItem("access_token")}`,
+          Authorization: `Bearer ${localStorage.getItem("auth_token")}`,
         },
       });
       if (response.ok) {
@@ -192,7 +192,7 @@ export function FeatureHintProvider({
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            Authorization: `Bearer ${localStorage.getItem("access_token")}`,
+            Authorization: `Bearer ${localStorage.getItem("auth_token")}`,
           },
           body: JSON.stringify({
             hint_id: hintId,
@@ -231,7 +231,7 @@ export function FeatureHintProvider({
         await fetch(`${apiBaseUrl}/api/v1/hints/track-feature/${feature}`, {
           method: "POST",
           headers: {
-            Authorization: `Bearer ${localStorage.getItem("access_token")}`,
+            Authorization: `Bearer ${localStorage.getItem("auth_token")}`,
           },
         });
       } catch (error) {

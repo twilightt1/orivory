@@ -81,17 +81,26 @@ export function KnowledgeGraphVisualization({
     ? Array.from(new Set(graphData.nodes.flatMap(n => n.entity_ids || [])))
     : [];
 
-  // Simple force-directed layout simulation
-  const runSimulation = useCallback(() => {
-    if (!nodes.length || !dimensions.width) return;
+  // Simple force-directed layout simulation.
+  // Pure function of its inputs: the caller (graphData effect) runs it ONCE
+  // per dataset. It must NOT read component state — the previous version
+  // closed over `nodes` and called setNodes with a fresh array, which changed
+  // the callback identity and re-fired the trigger effect forever (infinite
+  // O(n^2) loop freezing the tab).
+  const runSimulation = useCallback((
+    inputNodes: LayoutNode[],
+    inputLinks: LayoutLink[],
+    viewport: { width: number; height: number },
+  ): LayoutNode[] => {
+    if (!inputNodes.length || !viewport.width) return inputNodes;
 
-    const width = dimensions.width;
-    const height = dimensions.height;
+    const width = viewport.width;
+    const height = viewport.height;
     const centerX = width / 2;
     const centerY = height / 2;
 
     // Initialize positions if needed
-    const simNodes = nodes.map(n => ({
+    const simNodes = inputNodes.map(n => ({
       ...n,
       x: n.x || centerX + (Math.random() - 0.5) * 200,
       y: n.y || centerY + (Math.random() - 0.5) * 200,
@@ -99,7 +108,7 @@ export function KnowledgeGraphVisualization({
       vy: 0,
     }));
 
-    const simLinks = links.map(l => ({ ...l }));
+    const simLinks = inputLinks.map(l => ({ ...l }));
 
     // Run simulation iterations
     const alpha = 0.1;
@@ -163,8 +172,8 @@ export function KnowledgeGraphVisualization({
       }
     }
 
-    setNodes(simNodes);
-  }, [nodes, links, dimensions]);
+    return simNodes;
+  }, []);
 
   // Initialize nodes and links from graphData
   useEffect(() => {
@@ -194,16 +203,10 @@ export function KnowledgeGraphVisualization({
         evidence: e.evidence,
       }));
 
-    setNodes(filteredNodes);
+    setNodes(runSimulation(filteredNodes, filteredLinks, dimensions));
     setLinks(filteredLinks);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [graphData, maxNodes]);
-
-  // Run simulation when nodes/links change
-  useEffect(() => {
-    if (nodes.length > 0) {
-      runSimulation();
-    }
-  }, [nodes.length, runSimulation]);
 
   // Handle resize
   useEffect(() => {
@@ -360,7 +363,7 @@ export function KnowledgeGraphVisualization({
       <div className="absolute top-4 right-4 z-10 flex flex-col gap-2">
         <div className="flex items-center gap-1 p-1 bg-black/40 backdrop-blur-sm rounded-lg border border-white/10">
           <button
-            onClick={() => runSimulation()}
+            onClick={() => setNodes(runSimulation(nodes, links, dimensions))}
             className="p-2 hover:bg-white/10 rounded transition-colors"
             title="Re-layout"
           >
