@@ -299,3 +299,35 @@ async def test_timeline_windows_capped(reader, monkeypatch):
     db.rows = rows
     out = await hub_tools.timeline(memory_id=str(anchor.id), window=4)
     assert len(out["before"]) == 4  # capped, not all 7
+
+
+# ── Task 4: correct_memory ───────────────────────────────────────────────────
+
+
+async def test_correct_memory_requires_write_scope(reader):
+    result = await hub_tools.correct_memory(content="Postgres")
+    assert result == {"error": "scope memory:write required"}
+
+
+async def test_correct_memory_supersedes_and_logs(writer, monkeypatch):
+    p, db = writer
+    old = _memory_row(uuid.uuid4(), p.user_id)
+    old.extra_metadata = {"cm_subject": "proj-x", "cm_attribute": "db", "cm_scope": "prod"}
+    db.rows = [old]
+
+    async def _noop_index(memory):
+        return None
+
+    monkeypatch.setattr(hub_tools, "index_new_memory", _noop_index)
+    out = await hub_tools.correct_memory(subject="proj-x", attribute="db",
+        scope="prod", title="DB", content="Postgres")
+    assert out["status"] == "superseded"
+    assert out["superseded"] == [str(old.id)]
+    ledger = [o for o in db.added if type(o).__name__ == "MemoryAccessLog"]
+    assert ledger and ledger[0].action == "mcp_correct"
+
+
+async def test_correct_memory_foreign_id_rejected(writer):
+    _p, _db = writer
+    out = await hub_tools.correct_memory(memory_id=str(uuid.uuid4()), content="x")
+    assert out == {"error": "memory not found"}

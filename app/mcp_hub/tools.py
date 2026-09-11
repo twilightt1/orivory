@@ -23,6 +23,7 @@ from sqlalchemy import select
 from app.database import AsyncSessionLocal
 from app.mcp_hub.identity import (
     ACTION_ADD,
+    ACTION_CORRECT,
     ACTION_DELETE,
     ACTION_FORGET,
     ACTION_GET,
@@ -32,6 +33,7 @@ from app.mcp_hub.identity import (
 )
 from app.models.memory import Memory
 from app.models.memory_access_log import MemoryAccessLog
+from app.retrieval.memory.correction import get_cm, resolve_correction, state_of
 from app.retrieval.memory.write_back import index_new_memory, safe_delete_from_chroma
 from app.services.erasure_service import erase_memories
 
@@ -430,8 +432,63 @@ async def forget_memory(memory_ids: list[str]) -> dict[str, Any]:
     }
 
 
+def _memory_provenance(memory: Memory) -> dict[str, Any]:
+    meta = get_cm(memory)
+    return {
+        "state": state_of(memory),
+        "assertion": meta.get("cm_assertion", "fact"),
+        "scope": meta.get("cm_scope", "default"),
+        "valid_from": meta.get("cm_valid_from"),
+        "supersedes": meta.get("cm_supersedes"),
+        "superseded_by": meta.get("cm_superseded_by"),
+        "evidence_ids": list(meta.get("cm_evidence_ids") or []),
+    }
+
+
+async def correct_memory(memory_id=None, subject="", attribute="", scope="default",
+        title="", content="", valid_from=None, evidence_ids=None) -> dict[str, Any]:
+    """Correct a fact with evidence: new version links back, never overwrites."""
+    principal = _current_principal()
+    if principal is None:
+        return IDENTITY_ERROR
+    if not principal.can_write():
+        return WRITE_SCOPE_ERROR
+    if not (content or "").strip():
+        return {"error": "content required"}
+    target = None
+    if memory_id:
+        try:
+            mid = UUID(memory_id)
+        except ValueError:
+            return {"error": "invalid memory id"}
+        async with _session() as db:
+            target = await db.get(Memory, mid)
+        if target is None or target.user_id != principal.user_id:
+            return {"error": "memory not found"}
+    async with _session() as db:
+        out = await resolve_correction(
+            db, user_id=principal.user_id, title=title or (target.title if target else ""),
+            content=content, subject=subject, attribute=attribute, scope=scope,
+            valid_from=valid_from, evidence_ids=list(evidence_ids or []),
+            memory_id=str(target.id) if target else None,
+            source_ref=f"agent:{principal.name}")
+        new = out["memory"]
+        db.add(_ledger_entry(principal, ACTION_CORRECT, memory_id=new.id,
+            detail={"status": out["status"], "superseded": out["superseded"],
+                    "dirtied": out["dirtied"], "memory_id": str(new.id)}))
+        await db.commit()
+    try:
+        await index_new_memory(new)
+    except Exception as exc:
+        log.warning("MCP correct_memory indexing failed for %s: %s", new.id, exc)
+    return {"status": out["status"], "id": str(new.id),
+            "superseded": out["superseded"], "dirtied": out["dirtied"],
+            **_memory_provenance(new)}
+
+
 __all__ = [
     "add_memory",
+    "correct_memory",
     "delete_memory",
     "forget_memory",
     "get_memory",

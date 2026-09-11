@@ -23,6 +23,7 @@ ACTION_SEARCH = "mcp_search"
 ACTION_GET = "mcp_get"
 ACTION_LIST = "mcp_list"
 ACTION_ADD = "mcp_add"
+ACTION_CORRECT = "mcp_correct"
 ACTION_DELETE = "mcp_delete"
 ACTION_FORGET = "mcp_forget"
 
@@ -76,6 +77,6 @@ async def resolve_principal(db: AsyncSession, token: str | None) -> AgentPrincip
 
 
 __all__ = [
-    "ACTION_ADD", "ACTION_DELETE", "ACTION_FORGET", "ACTION_GET", "ACTION_LIST", "ACTION_SEARCH",
+    "ACTION_ADD", "ACTION_CORRECT", "ACTION_DELETE", "ACTION_FORGET", "ACTION_GET", "ACTION_LIST", "ACTION_SEARCH",
     "AgentPrincipal", "extract_token", "resolve_principal",
 ]

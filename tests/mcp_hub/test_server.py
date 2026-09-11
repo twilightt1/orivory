@@ -78,3 +78,4 @@ async def test_build_mcp_server_registers_forget_tool():
     server = build_mcp_server()
     tools = await server.list_tools()
     assert any(t.name == "forget_memory" for t in tools)
+    assert any(t.name == "correct_memory" for t in tools)

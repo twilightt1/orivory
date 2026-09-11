@@ -158,6 +158,19 @@ def _build_server() -> FastMCP:
         return await _call_with_identity(hub_tools.add_memory(title=title, content=content, tags=tags), ctx)
 
     @mcp.tool()
+    async def correct_memory(
+        content: str, title: str = "", subject: str = "", attribute: str = "",
+        scope: str = "default", memory_id: str | None = None,
+        valid_from: str | None = None, evidence_ids: list[str] | None = None,
+        ctx: Context = None,
+    ) -> dict[str, Any]:
+        """Correct a stored fact with evidence (memory:write). Creates a linked new version; never overwrites."""
+        return await _call_with_identity(hub_tools.correct_memory(
+            memory_id=memory_id, subject=subject, attribute=attribute, scope=scope,
+            title=title, content=content, valid_from=valid_from,
+            evidence_ids=evidence_ids), ctx)
+
+    @mcp.tool()
     async def delete_memory(memory_id: str, ctx: Context = None) -> dict[str, Any]:
         """Delete one memory owned by the caller (memory:write)."""
         return await _call_with_identity(hub_tools.delete_memory(memory_id=memory_id), ctx)
@@ -174,7 +187,7 @@ mcp = _build_server()
 
 
 def build_mcp_server() -> FastMCP:
-    """Return the module's FastMCP instance with the six tools registered.
+    """Return the module's FastMCP instance with the seven tools registered.
 
     A single instance is shared with :func:`get_mcp_app` so the mounted app
     and the host lifespan drive the same session manager.
