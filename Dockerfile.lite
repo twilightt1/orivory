@@ -23,13 +23,17 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
+COPY requirements.txt .
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     curl \
-    && rm -rf /var/lib/apt/lists/*
-
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt aiosqlite
+    && rm -rf /var/lib/apt/lists/* \
+    && pip install --no-cache-dir -r requirements.txt aiosqlite \
+    # ponytail: gcc only builds wheels; purge it (~200MB) — runtime needs none.
+    # kubernetes (~82M) is a chromadb dep nothing imports on the local path
+    # (verified: add+query work without it). Re-check if chromadb is bumped.
+    && apt-get purge -y gcc && apt-get autoremove -y \
+    && pip uninstall -y kubernetes
 
 RUN groupadd --system app && useradd --system --gid app --home-dir /app app \
     && mkdir -p /data && chown -R app:app /data /app
