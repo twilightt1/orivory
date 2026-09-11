@@ -2,8 +2,8 @@
 # Orivory one-command installer — the `npx claude-mem install` equivalent.
 #
 # Bootstraps the lite deployment (single container: SQLite + in-process
-# Chroma) and, optionally, registers an agent client for auto-capture.
-# Stdlib curl + docker only; everything idempotent.
+# Chroma), creates the account + agent token, and proves first recall.
+# Needs curl + docker + python3 (JSON parsing only); everything idempotent.
 #
 #   curl -fsSL https://raw.githubusercontent.com/twilightt1/orivory/main/install.sh | bash
 #
@@ -57,16 +57,6 @@ curl -fsS "http://localhost:$PORT/health" >/dev/null 2>&1 \
   || { warn "service did not become healthy — check: docker logs orivory-lite"; exit 1; }
 say "healthy: http://localhost:$PORT"
 
-if [[ "$WITH_CAPTURE" == 1 ]]; then
-  say "registering agent client for auto-capture"
-  # The API requires a verified human account; lite mode seeds one on first
-  # boot with the credentials printed by the container log. We surface the
-  # interactive registration instead of guessing secrets here.
-  warn "open http://localhost:$PORT → sign up → Security page → register an agent"
-  warn "then run: python3 scripts/openclaw_capture.py --watch ~/.openclaw/workspace \\"
-  warn "    --url http://localhost:$PORT --token oa_... --interval 30"
-fi
-
 API="http://localhost:$PORT/api/v1"
 EMAIL="you@example.com"
 PASS="change-me-12345"
@@ -98,6 +88,13 @@ RECALL=$(curl -fsS -X POST "$API/memories/recall" -H "Authorization: Bearer $TOK
   -H 'Content-Type: application/json' -d '{"query":"what does Orivory remember?"}' \
   | python3 -c "import sys,json;d=json.load(sys.stdin);print(d['results'][0]['content'] if d['results'] else 'NO-RECALL')")
 say "recalled: $RECALL"
+
+if [[ "$WITH_CAPTURE" == 1 ]]; then
+  say "auto-capture wiring (needs one repo clone for the script)"
+  echo "  git clone https://github.com/twilightt1/orivory.git && \\"
+  echo "  python3 orivory/scripts/openclaw_capture.py --watch ~/.openclaw/workspace \\"
+  echo "    --url http://localhost:$PORT --token $AGENT_TOKEN --interval 30"
+fi
 
 cat <<EOF
 
