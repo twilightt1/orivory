@@ -86,11 +86,10 @@ async def test_get_document_ingestion_summary_aggregates_counts_and_recent_docs(
 @pytest.mark.asyncio
 async def test_build_diagnostics_degrades_when_dependency_fails(monkeypatch):
     async def fake_readiness(extra_checkers=None):
-        assert "celery" in extra_checkers
+        assert extra_checkers is None  # celery check removed: no broker on the slim branch
         return {
             "postgres": {"status": "ok", "latency_ms": 1.0},
             "redis": {"status": "failed", "latency_ms": 1.0, "error": "down"},
-            "celery": {"status": "ok", "latency_ms": 1.0},
         }
 
     async def fake_ingestion(_db):
@@ -103,4 +102,5 @@ async def test_build_diagnostics_degrades_when_dependency_fails(monkeypatch):
 
     assert result["status"] == "degraded"
     assert result["checks"]["redis"]["status"] == "failed"
+    assert result["checks"]["celery"]["status"] == "dormant"
     assert result["config"]["celery_queues"] == ["default", "ingestion", "email"]

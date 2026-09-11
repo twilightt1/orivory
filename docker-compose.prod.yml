@@ -1,6 +1,4 @@
 # Production overrides — use with: docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
-# Note: YAML anchors are per-file; the backend env map is inherited from
-# docker-compose.yml via compose merge — only deltas are declared here.
 services:
   app:
     environment:
@@ -8,34 +6,8 @@ services:
     volumes: !override []
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4
 
-  celery_worker:
-    environment:
-      ENVIRONMENT: production
-    volumes: !override []
-
-  celery_beat:
-    environment:
-      ENVIRONMENT: production
-    volumes: !override []
-
   postgres:
     ports: !override []
 
-  redis:
-    ports: !override []
-
   chromadb:
-    ports: !override []
-
-  minio:
-    environment:
-      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
-      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin}
-    ports: !override []
-
-  flower:
-    profiles:
-      - ops
-    environment:
-      ENVIRONMENT: production
     ports: !override []

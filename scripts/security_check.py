@@ -183,7 +183,12 @@ def check_merged_prod_config(merged_yaml: str) -> CheckResult:
 
 
 def check_flower_ops_profile() -> CheckResult:
-    block = _service_block(_read("docker-compose.prod.yml"), "flower")
+    try:
+        block = _service_block(_read("docker-compose.prod.yml"), "flower")
+    except SecurityCheckFailure:
+        # ponytail: flower deleted from compose (slim branch: no broker, no
+        # monitor UI) — absence is the desired state, not a regression.
+        return CheckResult("flower ops profile", "PASS", "Flower removed from compose (celery-free slim branch)")
     if "profiles:" in block and "- ops" in block:
         return CheckResult("flower ops profile", "PASS", "Flower is behind the ops profile in prod override")
     return CheckResult("flower ops profile", "FAIL", "Flower is not isolated behind the ops profile")

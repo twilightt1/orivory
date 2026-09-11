@@ -1,28 +1,14 @@
-# Shared runtime env for backend services (app / celery / flower).
-# These override values from env_file (.env) so containers reach services
-# over the internal Docker network. CHROMA_PORT must be 8000 — the chromadb
-# container listens on 8000 internally (8001 is only the host-side mapping).
+# Shared runtime env for backend services (postgres + chromadb behind app).
+# LITE: compose targets the slim core — postgres + chroma + app only.
+# Celery/Redis/MinIO/Flower/worker/beat were dropped (slim branch): lite
+# runs tasks eagerly in-process, storage on fs, embeddings local.
 x-backend-env: &backend-env
   DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-password}@postgres:5432/${POSTGRES_DB:-orivory}
-  REDIS_URL: redis://redis:6379/0
-  CELERY_BROKER_URL: redis://redis:6379/1
-  CELERY_RESULT_BACKEND: redis://redis:6379/2
-  MINIO_ENDPOINT: minio:9000
   CHROMA_HOST: chromadb
   CHROMA_PORT: "8000"
 
-x-backend-depends: &backend-depends
-  postgres:
-    condition: service_healthy
-  redis:
-    condition: service_healthy
-  chromadb:
-    condition: service_healthy
-  minio:
-    condition: service_healthy
-
 services:
-  # One-shot schema migration — runs before app/celery so `docker compose up`
+  # One-shot schema migration — runs before app so `docker compose up`
   # never starts a server against a database without tables (the "silent
   # empty-database" failure class). App gates on service_completed_successfully.
   migrate:
@@ -46,11 +32,7 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      redis:
-        condition: service_healthy
       chromadb:
-        condition: service_healthy
-      minio:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
@@ -64,36 +46,6 @@ services:
       timeout: 5s
       retries: 5
       start_period: 20s
-    restart: unless-stopped
-
-  celery_worker:
-    build: .
-    env_file: .env
-    environment:
-      <<: *backend-env
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      chromadb:
-        condition: service_healthy
-      minio:
-        condition: service_healthy
-      migrate:
-        condition: service_completed_successfully
-    command: celery -A app.tasks.celery_app worker -Q default,ingestion,email -c 4 -l INFO
-    restart: unless-stopped
-
-  celery_beat:
-    build: .
-    env_file: .env
-    environment:
-      <<: *backend-env
-    depends_on:
-      redis:
-        condition: service_healthy
-    command: celery -A app.tasks.celery_app beat -l INFO --scheduler celery.beat:PersistentScheduler
     restart: unless-stopped
 
   postgres:
@@ -114,21 +66,6 @@ services:
       start_period: 10s
     restart: unless-stopped
 
-  redis:
-    image: redis:7-alpine
-    volumes:
-      - redisdata:/data
-    ports:
-      - "6379:6379"
-    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 5s
-    restart: unless-stopped
-
   chromadb:
     image: chromadb/chroma:latest
     volumes:
@@ -145,40 +82,6 @@ services:
       start_period: 20s
     restart: unless-stopped
 
-  minio:
-    image: minio/minio:latest
-    command: server /data --console-address ":9001"
-    environment:
-      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
-      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin}
-    volumes:
-      - miniodata:/data
-    ports:
-      - "9000:9000"
-      - "9001:9001"
-    healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:9000/minio/health/live || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
-    restart: unless-stopped
-
-  flower:
-    build: .
-    env_file: .env
-    environment:
-      <<: *backend-env
-    depends_on:
-      redis:
-        condition: service_healthy
-    command: celery -A app.tasks.celery_app flower --port=5555
-    ports:
-      - "5555:5555"
-    restart: unless-stopped
-
 volumes:
   pgdata:
-  redisdata:
   chromadata:
-  miniodata:

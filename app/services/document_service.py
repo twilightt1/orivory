@@ -64,7 +64,12 @@ async def upload_document(db: AsyncSession, conversation: Conversation, file: Up
     from app.tasks.ingestion_tasks import process_document
 
     await invalidate_query_cache(str(conversation.id))
-    process_document.delay(str(doc.id))
+    # ponytail: broker-absent deploys (compose has no redis) must not 500 the
+    # upload — the doc row is committed "pending" above, ingestible later.
+    try:
+        process_document.delay(str(doc.id))
+    except Exception as exc:
+        log.warning("Document ingest enqueue failed for %s: %s", doc.id, exc)
 
     log.info("Document uploaded", extra={"doc_id": doc_id, "conversation_id": str(conversation.id)})
     return doc

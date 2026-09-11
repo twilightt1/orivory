@@ -57,16 +57,36 @@ class TestSafeUpsert:
 
 
 class TestSafeEnqueueGraph:
-    def test_never_raises_when_broker_down(self, monkeypatch):
-        # Force the import path to raise; helper must swallow it.
-        import app.tasks.graph_tasks as gt
-
+    def test_never_raises_when_builder_fails(self, monkeypatch):
+        # Force the eager sync path to raise; helper must swallow it.
         def boom(*a, **k):
-            raise RuntimeError("broker down")
+            raise RuntimeError("graph store down")
 
-        monkeypatch.setattr(gt.build_memory_graph_task, "delay", boom)
+        monkeypatch.setattr("app.graph.builder.build_memory_graph_sync", boom)
+        monkeypatch.setattr(write_back.settings, "CELERY_TASK_ALWAYS_EAGER", True)
         # Should not raise
         write_back.safe_enqueue_graph_build(uuid.uuid4())
+
+    def test_eager_calls_builder_sync(self, monkeypatch):
+        import app.graph.builder as gb
+
+        calls = {}
+
+        def fake_build(db, memory_id, **kwargs):
+            calls["memory_id"] = memory_id
+            return None
+
+        def boom(*a, **k):
+            raise AssertionError("broker must not be touched on the eager path")
+
+        import app.tasks.graph_tasks as gt
+
+        monkeypatch.setattr(gb, "build_memory_graph_sync", fake_build)
+        monkeypatch.setattr(gt.build_memory_graph_task, "delay", boom)
+        monkeypatch.setattr(write_back.settings, "CELERY_TASK_ALWAYS_EAGER", True)
+        mid = uuid.uuid4()
+        write_back.safe_enqueue_graph_build(mid)
+        assert calls["memory_id"] == str(mid)
 
 
 class TestIndexNewMemory:

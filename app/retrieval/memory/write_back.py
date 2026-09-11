@@ -21,6 +21,7 @@ from __future__ import annotations
 import logging
 from uuid import UUID
 
+from app.config import settings
 from app.models.memory import Memory
 
 log = logging.getLogger(__name__)
@@ -57,8 +58,21 @@ async def safe_delete_from_chroma(memory_id: UUID | str) -> None:
 
 
 def safe_enqueue_graph_build(memory_id: UUID | str) -> None:
-    """Enqueue knowledge-graph extraction for a memory. Never raises."""
+    """Enqueue knowledge-graph extraction for a memory. Never raises.
+
+    Eager (lite/CELERY_TASK_ALWAYS_EAGER): call the builder synchronously
+    in-process — no broker, no worker round-trip. Otherwise enqueue via the
+    Celery task as before.
+    """
     try:
+        from app.graph.builder import build_memory_graph_sync
+        from app.tasks.db import sync_session
+
+        if settings.CELERY_TASK_ALWAYS_EAGER:
+            with sync_session() as db:
+                build_memory_graph_sync(db, str(memory_id))
+            return
+
         from app.tasks.graph_tasks import build_memory_graph_task
 
         build_memory_graph_task.delay(str(memory_id))

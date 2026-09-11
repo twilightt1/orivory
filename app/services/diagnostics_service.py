@@ -17,18 +17,7 @@ STUCK_AFTER_MINUTES = 15
 VERSION = "1.1.0"
 
 
-async def _check_celery() -> None:
-    """Verify Celery broker/backend configuration can be reached."""
-    from app.tasks.celery_app import celery_app
-
-    def ensure_connection() -> None:
-        with celery_app.connection_for_read() as connection:
-            connection.ensure_connection(max_retries=1)
-
-    # Celery/kombu connection checks are synchronous; keep the event loop free.
-    import asyncio
-
-    await asyncio.to_thread(ensure_connection)
+_check_celery = None  # type: ignore[assignment]  # dormant on the slim branch: no broker, see build_diagnostics.
 
 
 def build_config_summary() -> dict[str, Any]:
@@ -121,8 +110,11 @@ async def get_document_ingestion_summary(db: AsyncSession) -> dict[str, Any]:
 
 
 async def build_diagnostics(db: AsyncSession) -> dict[str, Any]:
-    checks: dict[str, CheckPayload] = await run_readiness_checks({"celery": _check_celery})
+    # ponytail: no broker on the slim branch — the celery check is a dormant
+    # key so the payload shape (and the secret-safety/API tests) holds.
+    checks: dict[str, CheckPayload] = await run_readiness_checks()
     status = "ok" if all(check["status"] == "ok" for check in checks.values()) else "degraded"
+    checks.setdefault("celery", {"status": "dormant", "latency_ms": 0.0})
     return {
         "status": status,
         "version": VERSION,
