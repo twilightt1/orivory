@@ -45,7 +45,7 @@ docker run -d --name orivory-lite \
   -p "$PORT":8000 \
   -v "$DIR/data:/data" \
   --restart unless-stopped \
-  -e ORIVORY_LITE=1 \
+  -e LITE_MODE=1 \
   "$IMAGE" >/dev/null
 
 say "waiting for health"
@@ -67,20 +67,57 @@ if [[ "$WITH_CAPTURE" == 1 ]]; then
   warn "    --url http://localhost:$PORT --token oa_... --interval 30"
 fi
 
+API="http://localhost:$PORT/api/v1"
+EMAIL="you@example.com"
+PASS="change-me-12345"
+
+say "creating your account + agent token (copy-pasteable afterwards)"
+CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$API/auth/register" \
+  -H 'Content-Type: application/json' \
+  -d "{\"email\":\"$EMAIL\",\"password\":\"$PASS\"}")
+case "$CODE" in
+  201) say "account created" ;;
+  409) say "account exists, reusing it" ;;
+  *) warn "register failed (HTTP $CODE)"; exit 1 ;;
+esac
+TOKEN=$(curl -fsS -X POST "$API/auth/login" -H 'Content-Type: application/json' \
+  -d "{\"email\":\"$EMAIL\",\"password\":\"$PASS\"}" \
+  | python3 -c "import sys,json;print(json.load(sys.stdin)['access_token'])")
+curl -fsS -X POST "$API/auth/onboarding" -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' -d '{"display_name":"local user"}' >/dev/null
+AGENT_TOKEN=$(curl -fsS -X POST "$API/agents" -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"quickstart","scopes":["memory:read","memory:write"]}' \
+  | python3 -c "import sys,json;print(json.load(sys.stdin)['token'])")
+
+say "storing + recalling your first memory (zero API keys needed)"
+curl -fsS -X POST "$API/memories" -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"content":"Orivory remembers this without any API keys."}' >/dev/null
+RECALL=$(curl -fsS -X POST "$API/memories/recall" -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' -d '{"query":"what does Orivory remember?"}' \
+  | python3 -c "import sys,json;d=json.load(sys.stdin);print(d['results'][0]['content'] if d['results'] else 'NO-RECALL')")
+say "recalled: $RECALL"
+
 cat <<EOF
 
-  Orivory (lite) is running.
+  Orivory (lite) is running — account, agent token, and first recall done.
 
-    UI/API : http://localhost:$PORT
-    Health : http://localhost:$PORT/health
-    Data   : $DIR/data
-    MCP    : http://localhost:$PORT/mcp  (agent tokens from the Security page)
+    API       : http://localhost:$PORT  (JSON only, no web UI in lite)
+    Health    : http://localhost:$PORT/health
+    Data      : $DIR/data
+    MCP       : http://localhost:$PORT/mcp
+    Agent key : $AGENT_TOKEN  (shown once — save it)
 
-  Next steps:
-    1. Open http://localhost:$PORT and create your account.
-    2. (Optional) Security page → register an agent → wire auto-capture:
-       python3 scripts/openclaw_capture.py --watch ~/.openclaw/workspace \\
-           --url http://localhost:$PORT --token oa_... --interval 30
+  Your login: $EMAIL / $PASS  (change it: POST /api/v1/users/me/change-password)
+
+  Point any MCP agent at the endpoint above with the agent key:
+    {"mcp":{"servers":{"orivory":{"url":"http://localhost:$PORT/mcp",
+      "transport":"streamable-http",
+      "headers":{"Authorization":"Bearer $AGENT_TOKEN"}}}}}
+
+  Next: rerun this script any time (idempotent) or add keys for better
+  recall: docker rm -f orivory-lite, then add -e JINA_API_KEY=... and rerun.
 
   Manage: docker logs -f orivory-lite | docker restart orivory-lite |
           docker rm -f orivory-lite   (stop)
