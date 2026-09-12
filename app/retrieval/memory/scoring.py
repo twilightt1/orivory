@@ -18,6 +18,8 @@ import math
 import re
 from datetime import UTC, datetime
 
+from app.retrieval.memory.correction import _stored_key, state_of
+
 # ── lexical exact-match refinement ──────────────────────────────────────────
 
 _QUOTED_RE = re.compile(r'"([^"]+)"')
@@ -213,3 +215,44 @@ def rerank(
         half_life_days=half_life_days,
     )
     return score, entity_reasons + decay_reasons
+
+
+# ── same-slot evidence closure ────────────────────────────────────────────
+
+
+def apply_closure(scored, top_k, cap=2):
+    """Pull same-slot evidence mates from the pool tail into the top-k.
+
+    ``scored`` is ``[(memory, score, reasons)]`` sorted desc; ``top_k``
+    counts how many lead entries own the slots. Up to ``cap`` mates from
+    the rest sharing a lead slot replace the lowest top-k entries, each
+    gaining a ``'closure:slot'`` reason. Unslotted memories (empty
+    subject/attribute) never match; superseded/dirty mates are skipped.
+    Input tuples are not mutated. ``cap <= 0`` returns the slice unchanged.
+    # ponytail: O(n) scan; fine at rerank-pool sizes (≤ ~30).
+    """
+    if top_k <= 0:
+        return []
+    top = [(m, s, list(r)) for m, s, r in scored[:top_k]]
+    if cap <= 0 or len(scored) <= len(top):
+        return top
+    slots = set()
+    for m, _, _ in top:
+        key = _stored_key(m)
+        if key[0] and key[1]:
+            slots.add(key)
+    if not slots:
+        return top
+    out = list(top)
+    swaps = 0
+    for m, s, r in scored[len(top):]:
+        if swaps >= cap or swaps >= len(out):
+            break
+        key = _stored_key(m)
+        if not (key[0] and key[1]) or key not in slots:
+            continue
+        if state_of(m) != "current":
+            continue
+        out[len(out) - 1 - swaps] = (m, s, [*r, "closure:slot"])
+        swaps += 1
+    return out

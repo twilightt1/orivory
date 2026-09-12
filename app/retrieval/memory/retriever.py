@@ -10,7 +10,7 @@ Pipeline (one call to :py:meth:`MemoryRetriever.recall`):
     5. Hydrate the top candidates with full ``Memory`` rows from Postgres,
        including ``entity_links`` (so we can apply entity boost).
     6. Apply entity_boost + time_decay to each candidate.
-    7. Sort by combined score, return top_k.
+    7. Sort by combined score, pull same-slot mates, return top_k.
     8. Build the ``RecallTrace`` with timings + fallbacks used.
 
 Every step degrades gracefully. The worst case (LLM down + ChromaDB
@@ -36,7 +36,7 @@ from app.retrieval.memory.context import fetch_personal_context
 from app.retrieval.memory.correction import needs_rewrite as _needs_rewrite
 from app.retrieval.memory.correction import state_of as _state_of
 from app.retrieval.memory.query_rewriter import rewrite_query
-from app.retrieval.memory.scoring import entity_boost, lexical_bonus, route_query, time_decay_score
+from app.retrieval.memory.scoring import apply_closure, entity_boost, lexical_bonus, route_query, time_decay_score
 from app.retrieval.memory.vector_store import search_memories
 from app.schemas.Orivory import (
     MemoryResponse,
@@ -64,6 +64,7 @@ class MemoryRetriever:
         semantic_rerank: bool | None = None,
         lexical_refine: bool = True,
         route: str | None = None,
+        closure_cap: int = 2,
     ) -> None:
         self.db = db
         self.user_id = user_id
@@ -81,6 +82,8 @@ class MemoryRetriever:
         self.lexical_refine = lexical_refine
         # None → auto-route per query; or pin 'relational' | 'local' | 'general'.
         self.route = route
+        # Same-slot evidence closure: 0 disables, else max mates swapped in.
+        self.closure_cap = closure_cap
 
     # ── main entry point ─────────────────────────────────────────────────
 
@@ -275,9 +278,13 @@ class MemoryRetriever:
                 reasons += lex_reasons
             scored.append((memory, final_score, reasons))
 
-        # 7) Sort by score desc, take top_k
+        # 7) Sort by score desc, pull same-slot mates (closure), take top_k
         scored.sort(key=lambda t: t[1], reverse=True)
-        top = scored[:top_k]
+        top = (
+            apply_closure(scored, top_k, cap=self.closure_cap)
+            if self.closure_cap
+            else scored[:top_k]
+        )
 
         # 8) Build response
         results: list[MemoryWithScore] = []
