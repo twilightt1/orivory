@@ -109,6 +109,7 @@ async def test_embed_texts_batches_and_preserves_order(monkeypatch):
 
     monkeypatch.setattr(embedder.settings, "EMBED_BATCH_SIZE", 2)
     monkeypatch.setattr(embedder.settings, "USE_JINA_EMBEDDINGS", False)
+    monkeypatch.setattr(embedder.settings, "USE_LOCAL_EMBEDDINGS", False)
     monkeypatch.setattr(embedder, "_get_async_client", lambda: FakeAsyncClient())
 
     embeddings = await embedder.embed_texts(["text-1", "text-2", "text-3"])

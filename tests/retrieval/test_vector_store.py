@@ -214,8 +214,10 @@ class TestCollectionName:
 class TestGetSyncClient:
     """Tests for _get_sync_client function."""
 
-    def test_get_sync_client_returns_client(self):
+    def test_get_sync_client_returns_client(self, monkeypatch):
         """_get_sync_client should return a ChromaDB sync client."""
+        # Local mode bypasses HttpClient (real PersistentClient); pin http.
+        monkeypatch.setattr(vector_store.settings, "CHROMA_MODE", "http")
         with patch.object(vector_store, "_sync_client", None):
             with patch("chromadb.HttpClient") as mock_client_class:
                 mock_client = MagicMock()
@@ -226,8 +228,9 @@ class TestGetSyncClient:
                 assert client is mock_client
                 mock_client_class.assert_called_once()
 
-    def test_get_sync_client_caches_client(self):
+    def test_get_sync_client_caches_client(self, monkeypatch):
         """_get_sync_client should cache the client after first call."""
+        monkeypatch.setattr(vector_store.settings, "CHROMA_MODE", "http")
         with patch.object(vector_store, "_sync_client", None):
             with patch("chromadb.HttpClient") as mock_client_class:
                 mock_client = MagicMock()

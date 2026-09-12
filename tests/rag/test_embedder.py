@@ -14,6 +14,9 @@ def _dummy_provider_keys(monkeypatch):
     every test below replaces the transport (embeddings/post) with fakes."""
     monkeypatch.setattr(settings, "OPENAI_API_KEY", "test-key")
     monkeypatch.setattr(settings, "JINA_API_KEY", "test-key")
+    # Local backend takes precedence when on (e.g. stray LITE_MODE env);
+    # these tests target the keyed backends, so pin it off.
+    monkeypatch.setattr(settings, "USE_LOCAL_EMBEDDINGS", False)
 
 
 class _FakeAsyncEmbeddings:
