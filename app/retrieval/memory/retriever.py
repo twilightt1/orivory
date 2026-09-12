@@ -36,7 +36,7 @@ from app.retrieval.memory.context import fetch_personal_context
 from app.retrieval.memory.correction import needs_rewrite as _needs_rewrite
 from app.retrieval.memory.correction import state_of as _state_of
 from app.retrieval.memory.query_rewriter import rewrite_query
-from app.retrieval.memory.scoring import entity_boost, time_decay_score
+from app.retrieval.memory.scoring import entity_boost, lexical_bonus, time_decay_score
 from app.retrieval.memory.vector_store import search_memories
 from app.schemas.Orivory import (
     MemoryResponse,
@@ -62,6 +62,7 @@ class MemoryRetriever:
         rerank_factor: int = 3,
         decay_floor: float = 0.1,
         semantic_rerank: bool | None = None,
+        lexical_refine: bool = True,
     ) -> None:
         self.db = db
         self.user_id = user_id
@@ -76,6 +77,7 @@ class MemoryRetriever:
             if semantic_rerank is None
             else semantic_rerank
         )
+        self.lexical_refine = lexical_refine
 
     # ── main entry point ─────────────────────────────────────────────────
 
@@ -188,6 +190,7 @@ class MemoryRetriever:
         candidates = visible
 
         # 6) Score: entity_boost + time_decay
+        lex_query = rewritten if not llm_fallback else query
         scored: list[tuple[Memory, float, list[str]]] = []
         for cand in candidates:
             mid = cand["memory_id"]
@@ -229,6 +232,11 @@ class MemoryRetriever:
                 reasons = [f"rerank:{base_score:.2f}"]
                 if memory.pinned:
                     reasons.append("pinned")
+                if self.lexical_refine:
+                    bonus, lex_reasons = lexical_bonus(
+                        lex_query, f"{memory.title or ''} {memory.content or ''}")
+                    final_score += bonus
+                    reasons += lex_reasons
                 scored.append((memory, final_score, reasons))
                 continue
 
@@ -251,6 +259,11 @@ class MemoryRetriever:
             )
 
             reasons = boost_reasons + decay_reasons
+            if self.lexical_refine:
+                bonus, lex_reasons = lexical_bonus(
+                    lex_query, f"{memory.title or ''} {memory.content or ''}")
+                final_score += bonus
+                reasons += lex_reasons
             scored.append((memory, final_score, reasons))
 
         # 7) Sort by score desc, take top_k

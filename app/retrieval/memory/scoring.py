@@ -15,7 +15,44 @@ the user *why* a memory was selected (``match_reasons: [...]``).
 from __future__ import annotations
 
 import math
+import re
 from datetime import UTC, datetime
+
+# ── lexical exact-match refinement ──────────────────────────────────────────
+
+_QUOTED_RE = re.compile(r'"([^"]+)"')
+_TOKEN_RE = re.compile(r"[0-9A-Za-zÀ-ỹ]+(?:[/\-.][0-9A-Za-zÀ-ỹ]+)*")
+
+#: Additive score nudge for verbatim overlap (capped — never dominates semantics).
+LEXICAL_BONUS = 0.15
+
+
+def lexical_bonus(query: str, text: str) -> tuple[float, list[str]]:
+    """Reward verbatim overlap between query terms and candidate text.
+
+    Terms = quoted phrases + capitalized tokens + numbers/dates (stdlib
+    ``re`` only). Match is case-insensitive containment. Returns
+    ``(0.15, reasons)`` on any hit else ``(0.0, [])`` — one reason per
+    matched term (``"lexical:<term>"``).
+    """
+    if not query or not text:
+        return 0.0, []
+    terms: list[str] = []
+    for m in _QUOTED_RE.findall(query):
+        if m.strip():
+            terms.append(m.strip())
+    for tok in _TOKEN_RE.findall(query):
+        if any(ch.isdigit() for ch in tok):
+            terms.append(tok)  # numbers/dates
+        elif tok[0].isupper() and len(tok) > 1:
+            terms.append(tok)  # capitalized tokens
+    seen: set[str] = set()
+    terms = [t for t in terms if not (t.lower() in seen or seen.add(t.lower()))]
+    tl = text.lower()
+    matched = [t for t in terms if t.lower() in tl]
+    if not matched:
+        return 0.0, []
+    return LEXICAL_BONUS, [f"lexical:{m}" for m in matched]
 
 # ── time-decay scoring ──────────────────────────────────────────────────────
 
