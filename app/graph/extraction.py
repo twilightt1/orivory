@@ -14,6 +14,7 @@ from typing import Any
 # Shared client seam: tests patch <module>._get_client, which rebinds
 # this module attribute and is picked up by all call sites below.
 from app.agents.llm_client import get_llm_client as _get_client
+from app.agents.llm_client import get_sync_llm_client as _get_sync_client
 from app.agents.llm_parsing import (
     coerce_float,
     coerce_string_list,
@@ -295,6 +296,97 @@ def _relation_from_mapping(item: dict[str, Any], allowed_names: set[str]) -> Ext
     )
 
 
+def _entity_request(memory: Memory, model: str | None) -> dict[str, Any]:
+    text = _memory_text(memory)
+    return {
+        "model": model or settings.LLM_MODEL,
+        "messages": [{"role": "user", "content": ENTITY_EXTRACTION_PROMPT.format(**text)}],
+        "temperature": 0.0,
+        "response_format": {"type": "json_object"},
+        "extra_headers": {
+            "HTTP-Referer": settings.FRONTEND_URL,
+            "X-Title": "Orivory Graph Extraction",
+        },
+    }
+
+
+def _relation_request(
+    memory: Memory,
+    entities: list[ExtractedEntity],
+    model: str | None,
+) -> dict[str, Any]:
+    text = _memory_text(memory)
+    entity_lines = "\n".join(f"- {e.name} ({e.entity_type})" for e in entities)
+    return {
+        "model": model or settings.LLM_MODEL,
+        "messages": [{
+            "role": "user",
+            "content": RELATION_EXTRACTION_PROMPT.format(**text, entities=entity_lines),
+        }],
+        "temperature": 0.0,
+        "response_format": {"type": "json_object"},
+        "extra_headers": {
+            "HTTP-Referer": settings.FRONTEND_URL,
+            "X-Title": "Orivory Relation Extraction",
+        },
+    }
+
+
+def _entity_result(resp: Any, memory: Memory) -> EntityExtractionResult:
+    parsed = parse_llm_json_object(resp.choices[0].message.content)
+    if not parsed.ok or parsed.data is None:
+        fallback = _fallback_entities(memory)
+        return EntityExtractionResult(
+            entities=fallback,
+            fallback_used=True,
+            error=parsed.error or "invalid_entity_json",
+            raw_preview=parsed.raw_preview,
+        )
+
+    raw_entities = parsed.data.get("entities", [])
+    if not isinstance(raw_entities, list):
+        raw_entities = []
+    entities = [entity for item in raw_entities if isinstance(item, dict) for entity in [_entity_from_mapping(item)] if entity]
+    return EntityExtractionResult(
+        entities=_dedupe_entities(entities),
+        fallback_used=False,
+        raw_preview=parsed.raw_preview,
+    )
+
+
+def _relation_result(resp: Any, entities: list[ExtractedEntity]) -> RelationExtractionResult:
+    parsed = parse_llm_json_object(resp.choices[0].message.content)
+    if not parsed.ok or parsed.data is None:
+        fallback = _fallback_relations(entities)
+        return RelationExtractionResult(
+            relations=fallback,
+            fallback_used=True,
+            error=parsed.error or "invalid_relation_json",
+            raw_preview=parsed.raw_preview,
+        )
+
+    allowed_names = {entity.name.casefold() for entity in entities}
+    raw_relations = parsed.data.get("relations", [])
+    if not isinstance(raw_relations, list):
+        raw_relations = []
+    relations = [
+        relation
+        for item in raw_relations
+        if isinstance(item, dict)
+        for relation in [_relation_from_mapping(item, allowed_names)]
+        if relation
+    ]
+    # Keep a deterministic co-occurrence baseline even when the LLM returns
+    # semantic relations. Different relation types are preserved by the
+    # dedupe key, while duplicate triples keep the stronger weight.
+    relations = relations + _fallback_relations(entities)
+    return RelationExtractionResult(
+        relations=_dedupe_relations(relations),
+        fallback_used=False,
+        raw_preview=parsed.raw_preview,
+    )
+
+
 def _fallback_relations(entities: list[ExtractedEntity]) -> list[ExtractedRelation]:
     top = _dedupe_entities(entities)[:8]
     relations: list[ExtractedRelation] = []
@@ -324,35 +416,26 @@ async def extract_entities(memory: Memory, *, model: str | None = None) -> Entit
         return EntityExtractionResult(entities=[])
 
     try:
-        resp = await _get_client().chat.completions.create(
-            model=model or settings.LLM_MODEL,
-            messages=[{"role": "user", "content": ENTITY_EXTRACTION_PROMPT.format(**text)}],
-            temperature=0.0,
-            response_format={"type": "json_object"},
-            extra_headers={
-                "HTTP-Referer": settings.FRONTEND_URL,
-                "X-Title": "Orivory Graph Extraction",
-            },
-        )
-        parsed = parse_llm_json_object(resp.choices[0].message.content)
-        if not parsed.ok or parsed.data is None:
-            fallback = _fallback_entities(memory)
-            return EntityExtractionResult(
-                entities=fallback,
-                fallback_used=True,
-                error=parsed.error or "invalid_entity_json",
-                raw_preview=parsed.raw_preview,
-            )
-
-        raw_entities = parsed.data.get("entities", [])
-        if not isinstance(raw_entities, list):
-            raw_entities = []
-        entities = [entity for item in raw_entities if isinstance(item, dict) for entity in [_entity_from_mapping(item)] if entity]
+        resp = await _get_client().chat.completions.create(**_entity_request(memory, model))
+        return _entity_result(resp, memory)
+    except Exception as exc:
+        log.warning("Entity extraction fallback", extra={"error": str(exc)})
         return EntityExtractionResult(
-            entities=_dedupe_entities(entities),
-            fallback_used=False,
-            raw_preview=parsed.raw_preview,
+            entities=_fallback_entities(memory),
+            fallback_used=True,
+            error=str(exc),
         )
+
+
+def extract_entities_sync(memory: Memory, *, model: str | None = None) -> EntityExtractionResult:
+    """Extract entities without creating an event loop for sync workers."""
+    text = _memory_text(memory)
+    if not any(text.values()):
+        return EntityExtractionResult(entities=[])
+
+    try:
+        resp = _get_sync_client().chat.completions.create(**_entity_request(memory, model))
+        return _entity_result(resp, memory)
     except Exception as exc:
         log.warning("Entity extraction fallback", extra={"error": str(exc)})
         return EntityExtractionResult(
@@ -373,53 +456,32 @@ async def extract_relations(
     if len(entities) < 2:
         return RelationExtractionResult(relations=[])
 
-    text = _memory_text(memory)
-    allowed_names = {entity.name.casefold() for entity in entities}
-    entity_lines = "\n".join(f"- {e.name} ({e.entity_type})" for e in entities)
+    try:
+        resp = await _get_client().chat.completions.create(**_relation_request(memory, entities, model))
+        return _relation_result(resp, entities)
+    except Exception as exc:
+        log.warning("Relation extraction fallback", extra={"error": str(exc)})
+        return RelationExtractionResult(
+            relations=_fallback_relations(entities),
+            fallback_used=True,
+            error=str(exc),
+        )
+
+
+def extract_relations_sync(
+    memory: Memory,
+    entities: list[ExtractedEntity],
+    *,
+    model: str | None = None,
+) -> RelationExtractionResult:
+    """Extract relations without creating an event loop for sync workers."""
+    entities = _dedupe_entities(entities)
+    if len(entities) < 2:
+        return RelationExtractionResult(relations=[])
 
     try:
-        resp = await _get_client().chat.completions.create(
-            model=model or settings.LLM_MODEL,
-            messages=[{
-                "role": "user",
-                "content": RELATION_EXTRACTION_PROMPT.format(**text, entities=entity_lines),
-            }],
-            temperature=0.0,
-            response_format={"type": "json_object"},
-            extra_headers={
-                "HTTP-Referer": settings.FRONTEND_URL,
-                "X-Title": "Orivory Relation Extraction",
-            },
-        )
-        parsed = parse_llm_json_object(resp.choices[0].message.content)
-        if not parsed.ok or parsed.data is None:
-            fallback = _fallback_relations(entities)
-            return RelationExtractionResult(
-                relations=fallback,
-                fallback_used=True,
-                error=parsed.error or "invalid_relation_json",
-                raw_preview=parsed.raw_preview,
-            )
-
-        raw_relations = parsed.data.get("relations", [])
-        if not isinstance(raw_relations, list):
-            raw_relations = []
-        relations = [
-            relation
-            for item in raw_relations
-            if isinstance(item, dict)
-            for relation in [_relation_from_mapping(item, allowed_names)]
-            if relation
-        ]
-        # Keep a deterministic co-occurrence baseline even when the LLM returns
-        # semantic relations. Different relation types are preserved by the
-        # dedupe key, while duplicate triples keep the stronger weight.
-        relations = relations + _fallback_relations(entities)
-        return RelationExtractionResult(
-            relations=_dedupe_relations(relations),
-            fallback_used=False,
-            raw_preview=parsed.raw_preview,
-        )
+        resp = _get_sync_client().chat.completions.create(**_relation_request(memory, entities, model))
+        return _relation_result(resp, entities)
     except Exception as exc:
         log.warning("Relation extraction fallback", extra={"error": str(exc)})
         return RelationExtractionResult(

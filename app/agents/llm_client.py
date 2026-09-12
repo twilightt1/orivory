@@ -16,7 +16,7 @@ import logging
 from collections.abc import AsyncIterator
 from typing import Any
 
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, OpenAI
 
 from app.config import settings
 
@@ -96,6 +96,50 @@ class ResilientAsyncOpenAI:
         return getattr(self._inner, name)
 
 
+class _ResilientSyncCompletions:
+    """Synchronous counterpart of :class:`_ResilientCompletions`."""
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+
+    def create(self, **kwargs: Any) -> Any:
+        try:
+            return self._inner.create(**kwargs)
+        except Exception as exc:
+            if kwargs.get("response_format") and _is_unsupported_feature_error(exc):
+                fallback = self._strip_rf_kwargs(kwargs)
+                return self._inner.create(**fallback)
+            raise
+
+    def _strip_rf_kwargs(self, kwargs: dict[str, Any]) -> dict[str, Any]:
+        fallback = dict(kwargs)
+        fallback["response_format"] = None
+        fallback["max_tokens"] = max(
+            int(fallback.get("max_tokens") or 0), settings.LLM_MAX_TOKENS
+        )
+        return fallback
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
+class ResilientSyncOpenAI:
+    """Duck-typed synchronous OpenAI client for non-async worker paths."""
+
+    def __init__(self, inner: OpenAI) -> None:
+        self._inner = inner
+        self.chat = type("Chat", (), {"completions": _ResilientSyncCompletions(inner.chat.completions)})()
+
+    def __enter__(self) -> ResilientSyncOpenAI:
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        return None
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
 _client_loop: asyncio.AbstractEventLoop | None = None
 
 
@@ -138,6 +182,28 @@ def get_llm_client() -> AsyncOpenAI:
         )
         _client_loop = running_loop
     return _client
+
+
+_sync_client: ResilientSyncOpenAI | None = None
+
+
+def get_sync_llm_client() -> ResilientSyncOpenAI:
+    """Return one loop-independent client for synchronous worker paths."""
+    global _sync_client
+    if _sync_client is None:
+        _sync_client = ResilientSyncOpenAI(
+            OpenAI(
+                api_key=settings.OPENROUTER_API_KEY,
+                base_url=settings.OPENROUTER_BASE_URL,
+                timeout=DEFAULT_LLM_TIMEOUT_SECONDS,
+                max_retries=DEFAULT_LLM_MAX_RETRIES,
+                default_headers={
+                    "HTTP-Referer": settings.FRONTEND_URL,
+                    "X-Title": "Orivory",
+                },
+            )
+        )
+    return _sync_client
 
 
 # App-wide gate on concurrent provider calls. The RAG pipeline fans out
