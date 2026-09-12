@@ -539,6 +539,12 @@ async def main_async(args) -> int:
             if chunking == "per_turn"
             else "eval/benchmarks/results/longmemeval_s_system_session.json"
         )
+    if out.exists():
+        # Never overwrite a committed/frozen results file: new runs get a
+        # timestamped sibling (learned the hard way — an n=100 rerun once
+        # clobbered the frozen 0.570 baseline; restored via git).
+        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
+        out = out.with_name(f"{out.stem}_{stamp}{out.suffix}")
     out.write_text(json.dumps(payload, indent=2))
     print(f"\nSYSTEM mean: {mean:.3f} ({correct}/{len(scored)}, errors={len(errors)})")
     if comparison:
