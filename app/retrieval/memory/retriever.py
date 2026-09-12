@@ -10,7 +10,7 @@ Pipeline (one call to :py:meth:`MemoryRetriever.recall`):
     5. Hydrate the top candidates with full ``Memory`` rows from Postgres,
        including ``entity_links`` (so we can apply entity boost).
     6. Apply entity_boost + time_decay to each candidate.
-    7. Sort by combined score, pull same-slot mates, return top_k.
+    7. Sort by combined score, return top_k.
     8. Build the ``RecallTrace`` with timings + fallbacks used.
 
 Every step degrades gracefully. The worst case (LLM down + ChromaDB
@@ -36,7 +36,7 @@ from app.retrieval.memory.context import fetch_personal_context
 from app.retrieval.memory.correction import needs_rewrite as _needs_rewrite
 from app.retrieval.memory.correction import state_of as _state_of
 from app.retrieval.memory.query_rewriter import rewrite_query
-from app.retrieval.memory.scoring import apply_closure, entity_boost, lexical_bonus, route_query, time_decay_score
+from app.retrieval.memory.scoring import entity_boost, time_decay_score
 from app.retrieval.memory.vector_store import search_memories
 from app.schemas.Orivory import (
     MemoryResponse,
@@ -62,9 +62,6 @@ class MemoryRetriever:
         rerank_factor: int = 3,
         decay_floor: float = 0.1,
         semantic_rerank: bool | None = None,
-        lexical_refine: bool = True,
-        route: str | None = None,
-        closure_cap: int = 2,
     ) -> None:
         self.db = db
         self.user_id = user_id
@@ -79,11 +76,6 @@ class MemoryRetriever:
             if semantic_rerank is None
             else semantic_rerank
         )
-        self.lexical_refine = lexical_refine
-        # None → auto-route per query; or pin 'relational' | 'local' | 'general'.
-        self.route = route
-        # Same-slot evidence closure: 0 disables, else max mates swapped in.
-        self.closure_cap = closure_cap
 
     # ── main entry point ─────────────────────────────────────────────────
 
@@ -123,11 +115,6 @@ class MemoryRetriever:
         # Lowercased entity names for matching
         query_entity_names: set[str] = {e["name"].lower() for e in entities}
 
-        # Query-conditioned weights: relational leans on entities, local on recency.
-        resolved_route = self.route if self.route is not None else route_query(query, entities)
-        boost_per_match = self.entity_boost_per_match * (1.5 if resolved_route == "relational" else 1.0)
-        half_life = self.half_life_days / (2.0 if resolved_route == "local" else 1.0)
-
         # 3) Embed (use rewritten if LLM succeeded, else original)
         t_embed = time.perf_counter()
         try:
@@ -139,7 +126,6 @@ class MemoryRetriever:
                 context if include_personal_context else None,
                 t0, reason=f"embedding_failed:{e}",
                 rewrite_skipped=rewrite_skipped, stage_ms=stage_ms,
-                route=resolved_route,
             )
         stage_ms["embed_ms"] = (time.perf_counter() - t_embed) * 1000.0
 
@@ -202,7 +188,6 @@ class MemoryRetriever:
         candidates = visible
 
         # 6) Score: entity_boost + time_decay
-        lex_query = rewritten if not llm_fallback else query
         scored: list[tuple[Memory, float, list[str]]] = []
         for cand in candidates:
             mid = cand["memory_id"]
@@ -244,11 +229,6 @@ class MemoryRetriever:
                 reasons = [f"rerank:{base_score:.2f}"]
                 if memory.pinned:
                     reasons.append("pinned")
-                if self.lexical_refine:
-                    bonus, lex_reasons = lexical_bonus(
-                        lex_query, f"{memory.title or ''} {memory.content or ''}")
-                    final_score += bonus
-                    reasons += lex_reasons
                 scored.append((memory, final_score, reasons))
                 continue
 
@@ -257,7 +237,7 @@ class MemoryRetriever:
                 base_score,
                 mem_entity_names,
                 query_entity_names,
-                boost_per_match=boost_per_match,
+                boost_per_match=self.entity_boost_per_match,
                 max_boost=self.entity_boost_max,
             )
 
@@ -266,25 +246,16 @@ class MemoryRetriever:
                 captured_at=memory.captured_at,
                 salience=float(memory.salience or 0.5),
                 pinned=bool(memory.pinned),
-                half_life_days=half_life,
+                half_life_days=self.half_life_days,
                 decay_floor=self.decay_floor,
             )
 
             reasons = boost_reasons + decay_reasons
-            if self.lexical_refine:
-                bonus, lex_reasons = lexical_bonus(
-                    lex_query, f"{memory.title or ''} {memory.content or ''}")
-                final_score += bonus
-                reasons += lex_reasons
             scored.append((memory, final_score, reasons))
 
-        # 7) Sort by score desc, pull same-slot mates (closure), take top_k
+        # 7) Sort by score desc, take top_k
         scored.sort(key=lambda t: t[1], reverse=True)
-        top = (
-            apply_closure(scored, top_k, cap=self.closure_cap)
-            if self.closure_cap
-            else scored[:top_k]
-        )
+        top = scored[:top_k]
 
         # 8) Build response
         results: list[MemoryWithScore] = []
@@ -311,7 +282,6 @@ class MemoryRetriever:
             half_life_days=self.half_life_days,
             rewrite_skipped=rewrite_skipped,
             stage_ms=stage_ms,
-            route=resolved_route,
         )
         return RecallResponse(
             results=results,
@@ -346,7 +316,6 @@ class MemoryRetriever:
         reason: str,
         rewrite_skipped: bool = False,
         stage_ms: dict[str, float] | None = None,
-        route: str = "auto",
     ) -> RecallResponse:
         log.info("Returning empty recall", extra={"reason": reason})
         latency_ms = (time.perf_counter() - t0) * 1000.0
@@ -362,7 +331,6 @@ class MemoryRetriever:
             half_life_days=self.half_life_days,
             rewrite_skipped=rewrite_skipped,
             stage_ms=stage_ms or {},
-            route=route,
         )
         return RecallResponse(
             results=[],

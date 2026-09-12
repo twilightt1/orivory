@@ -15,74 +15,7 @@ the user *why* a memory was selected (``match_reasons: [...]``).
 from __future__ import annotations
 
 import math
-import re
 from datetime import UTC, datetime
-
-from app.retrieval.memory.correction import _stored_key, state_of
-
-# ── lexical exact-match refinement ──────────────────────────────────────────
-
-_QUOTED_RE = re.compile(r'"([^"]+)"')
-_TOKEN_RE = re.compile(r"[0-9A-Za-zÀ-ỹ]+(?:[/\-.][0-9A-Za-zÀ-ỹ]+)*")
-
-#: Additive score nudge for verbatim overlap (capped — never dominates semantics).
-LEXICAL_BONUS = 0.15
-
-
-def lexical_bonus(query: str, text: str) -> tuple[float, list[str]]:
-    """Reward verbatim overlap between query terms and candidate text.
-
-    Terms = quoted phrases + capitalized tokens + numbers/dates (stdlib
-    ``re`` only). Match is case-insensitive containment. Returns
-    ``(0.15, reasons)`` on any hit else ``(0.0, [])`` — one reason per
-    matched term (``"lexical:<term>"``).
-    """
-    if not query or not text:
-        return 0.0, []
-    terms: list[str] = []
-    for m in _QUOTED_RE.findall(query):
-        if m.strip():
-            terms.append(m.strip())
-    for tok in _TOKEN_RE.findall(query):
-        if any(ch.isdigit() for ch in tok):
-            terms.append(tok)  # numbers/dates
-        elif tok[0].isupper() and len(tok) > 1:
-            terms.append(tok)  # capitalized tokens
-    seen: set[str] = set()
-    terms = [t for t in terms if not (t.lower() in seen or seen.add(t.lower()))]
-    tl = text.lower()
-    matched = [t for t in terms if t.lower() in tl]
-    if not matched:
-        return 0.0, []
-    return LEXICAL_BONUS, [f"lexical:{m}" for m in matched]
-
-# ── query routing ─────────────────────────────────────────────────────────────
-
-#: Time/summary intent → favor recency over entity match.
-_ROUTE_TIME_RE = re.compile(
-    r"when|giai đoạn|khi nào|tóm tắt|summar|timeline|history|quá trình",
-    re.IGNORECASE,
-)
-
-
-def route_query(query: str, entities) -> str:
-    """Route a query to ``'local'`` | ``'relational'`` | ``'general'``.
-
-    ``'local'`` wins on time/summary words (recency matters most);
-    ``'relational'`` when entities are present or ≥2 distinct capitalized
-    tokens appear; otherwise ``'general'`` (no weight adjustment).
-    ``entities`` accepts the rewrite result (list of ``{name, type}``),
-    plain names, or None.
-    """
-    if query and _ROUTE_TIME_RE.search(query):
-        return "local"
-    if entities:
-        return "relational"
-    caps = {t for t in _TOKEN_RE.findall(query or "") if t[0].isupper() and len(t) > 1}
-    if len(caps) >= 2:
-        return "relational"
-    return "general"
-
 
 # ── time-decay scoring ──────────────────────────────────────────────────────
 
@@ -215,44 +148,3 @@ def rerank(
         half_life_days=half_life_days,
     )
     return score, entity_reasons + decay_reasons
-
-
-# ── same-slot evidence closure ────────────────────────────────────────────
-
-
-def apply_closure(scored, top_k, cap=2):
-    """Pull same-slot evidence mates from the pool tail into the top-k.
-
-    ``scored`` is ``[(memory, score, reasons)]`` sorted desc; ``top_k``
-    counts how many lead entries own the slots. Up to ``cap`` mates from
-    the rest sharing a lead slot replace the lowest top-k entries, each
-    gaining a ``'closure:slot'`` reason. Unslotted memories (empty
-    subject/attribute) never match; superseded/dirty mates are skipped.
-    Input tuples are not mutated. ``cap <= 0`` returns the slice unchanged.
-    # ponytail: O(n) scan; fine at rerank-pool sizes (≤ ~30).
-    """
-    if top_k <= 0:
-        return []
-    top = [(m, s, list(r)) for m, s, r in scored[:top_k]]
-    if cap <= 0 or len(scored) <= len(top):
-        return top
-    slots = set()
-    for m, _, _ in top:
-        key = _stored_key(m)
-        if key[0] and key[1]:
-            slots.add(key)
-    if not slots:
-        return top
-    out = list(top)
-    swaps = 0
-    for m, s, r in scored[len(top):]:
-        if swaps >= cap or swaps >= len(out):
-            break
-        key = _stored_key(m)
-        if not (key[0] and key[1]) or key not in slots:
-            continue
-        if state_of(m) != "current":
-            continue
-        out[len(out) - 1 - swaps] = (m, s, [*r, "closure:slot"])
-        swaps += 1
-    return out

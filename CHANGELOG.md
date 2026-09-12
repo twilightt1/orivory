@@ -18,6 +18,12 @@ project adheres to [Semantic Versioning](https://semver.org/).
 - **Latency V1** — fast-path skip LLM rewrite khi query rõ, bounded
   `timeline` queries (row-value `tuple_`), `RecallTrace` có `stage_ms`
   + `rewrite_skipped`. Không đổi stack.
+- **ZeroMem trial (REVERTED)** — lexical-refinement + route-weights +
+  same-slot-closure (0 LLM call) đo n=100 cùng protocol: 0.470
+  (CI [0.375, 0.567]) vs 0.510 baseline, multi-session 13→10.
+  Không tăng → revert cả 3, giữ code ngoài tree. Bài học: rerank tín
+  hiệu trên pool top_k×3 đã bão hòa; muốn nhích phải đổi pool
+  (retrieval), không phải sort lại pool cũ.
 - **Local-first env** — `.env.example`: `USE_LOCAL_EMBEDDINGS=true`
   (ONNX MiniLM, no key/no cost), `RETRIEVAL_SEMANTIC_RERANK=false`
   (opt-in khi eval chứng minh cần).
