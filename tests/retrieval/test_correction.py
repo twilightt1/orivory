@@ -21,6 +21,22 @@ def test_state_of_legacy_is_current():
     assert C.state_of(_mem(None)) == "current"
 
 
+def test_state_of_precedence():
+    assert C.state_of(_mem({"cm_derived_dirty": True})) == "dirty"
+    assert C.state_of(_mem({"cm_needs_check": True})) == "needs-check"
+    assert C.state_of(_mem({"cm_superseded_by": "n1"})) == "superseded"
+    # superseded outranks dirty; dirty outranks needs-check
+    assert C.state_of(_mem({"cm_superseded_by": "n1", "cm_derived_dirty": True})) == "superseded"
+    assert C.state_of(_mem({"cm_derived_dirty": True, "cm_needs_check": True})) == "dirty"
+
+
+def test_depends_on_predicate():
+    m = _mem({"cm_derived_from": ["A", "B"]})
+    assert C._depends_on(m, {"B"}) is True
+    assert C._depends_on(m, {"Z"}) is False
+    assert C._depends_on(_mem(None), {"A"}) is False
+
+
 def test_normalize_slot():
     assert C.normalize_slot("  Proj-X  DB ") == "proj-x db"
     assert C.normalize_slot(None) == ""
@@ -28,7 +44,9 @@ def test_normalize_slot():
 
 def test_needs_rewrite_pure_rule():
     assert C.needs_rewrite("db prod la gi") is False
-    assert C.needs_rewrite("no chay tren cong nao cua du an do") is True
+    # Bare "no" is negation, not a pronoun — must not trigger the LLM path.
+    assert C.needs_rewrite("no sqlite on prod db") is False
+    assert C.needs_rewrite("nó chạy ở cổng nào của dự án đó") is True
 
 
 def test_derived_dependents():

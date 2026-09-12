@@ -40,7 +40,7 @@ manual/file_upload/mcp_agent · SaaS growth (referral/experiments/analytics/quot
 2. **Sửa:** "sai rồi, production vẫn Postgres" → supersede có evidence. Mơ hồ → giữ cả hai + hỏi 1 câu.
 3. **Hỏi:** "sao nhớ vậy?" → nguồn + thời gian + scope. Không có bằng chứng → nói không có, không bịa.
 4. **Quên:** "quên X đi" → erasure receipt, dọn cả view dẫn xuất.
-- Badge duy nhất user/agent thấy: `current / superseded / needs-check`. Không lộ half-life/top-k/rerank.
+- Badge duy nhất user/agent thấy: `current / superseded / dirty / needs-check`. Không lộ half-life/top-k/rerank.
 
 ## 6. Architecture — approach A (metadata-only, không migration)
 

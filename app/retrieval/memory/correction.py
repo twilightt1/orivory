@@ -14,7 +14,6 @@ CM_SUBJECT = "cm_subject"
 CM_ATTRIBUTE = "cm_attribute"
 CM_SCOPE = "cm_scope"
 CM_VALID_FROM = "cm_valid_from"
-CM_VALID_TO = "cm_valid_to"
 CM_SUPERSEDES = "cm_supersedes"
 CM_SUPERSEDED_BY = "cm_superseded_by"
 CM_EVIDENCE_IDS = "cm_evidence_ids"
@@ -27,7 +26,7 @@ DEFAULT_SCOPE = "default"
 # ponytail: pronoun list is heuristic; add words only when eval shows a miss.
 _PRONOUNS = frozenset({
     "it", "its", "this", "that", "these", "those", "he", "him", "his",
-    "she", "her", "they", "them", "their", "no", "nó", "chúng", "đó",
+    "she", "her", "they", "them", "their", "nó", "chúng", "đó",
 })
 _WORD = re.compile(r"[a-zà-ỹ]+", re.IGNORECASE)
 
@@ -45,12 +44,34 @@ def set_cm(memory, patch: dict) -> None:
 
 
 def state_of(memory) -> str:
+    """One question for a memory's lifecycle state.
+
+    Precedence: superseded > dirty > needs-check > current. A superseded
+    memory stays "superseded" even if also dirty; dirty (stale derived
+    view) outranks needs-check because it must not be served either way.
+    """
     meta = get_cm(memory)
     if meta.get(CM_SUPERSEDED_BY):
         return "superseded"
+    if meta.get(CM_DERIVED_DIRTY):
+        return "dirty"
     if meta.get(CM_NEEDS_CHECK):
         return "needs-check"
     return "current"
+
+
+def _depends_on(memory, ids: set[str]) -> bool:
+    """True when the memory derives from any id in ``ids``.
+
+    Pure dependency only — no dirty check. Callers that must skip stale
+    views combine this with ``state_of(memory) != "dirty"``; erasure
+    deliberately does not (a stale view must still be forgotten).
+    """
+    try:
+        deps = set(get_cm(memory).get(CM_DERIVED_FROM) or [])
+    except (TypeError, AttributeError):
+        return False
+    return bool(deps & ids)
 
 
 def needs_rewrite(query: str) -> bool:
@@ -58,16 +79,8 @@ def needs_rewrite(query: str) -> bool:
 
 
 def find_derived_dependent_ids(memories, erased_ids: set[str]) -> list[str]:
-    out = []
-    for m in memories:
-        try:
-            meta = get_cm(m)
-            deps = set(meta.get(CM_DERIVED_FROM) or [])
-        except (TypeError, AttributeError):
-            continue
-        if deps & erased_ids and not meta.get(CM_DERIVED_DIRTY):
-            out.append(str(m.id))
-    return out
+    return [str(m.id) for m in memories
+            if _depends_on(m, erased_ids) and state_of(m) != "dirty"]
 
 
 async def resolve_correction(db, *, user_id, title, content, tags=None,
@@ -80,7 +93,7 @@ async def resolve_correction(db, *, user_id, title, content, tags=None,
     rows = (await db.execute(
         select(Memory).where(Memory.user_id == user_id)
     )).scalars().all()
-    cands = [m for m in rows if not get_cm(m).get(CM_SUPERSEDED_BY)]
+    cands = [m for m in rows if state_of(m) != "superseded"]
 
     def _triple(m) -> tuple[str, str, str]:
         meta = get_cm(m)
@@ -117,9 +130,9 @@ async def resolve_correction(db, *, user_id, title, content, tags=None,
                 meta[CM_NEEDS_CHECK] = True
                 status = "needs-check"
         elif not exact:
-            same_sa = [m for m in cands
+            same_subject_attr = [m for m in cands
                        if _triple(m)[:2] == (subj, attr) and _triple(m)[2] not in ("", sc or DEFAULT_SCOPE)]
-            if same_sa and not sc:
+            if same_subject_attr and not sc:
                 meta[CM_NEEDS_CHECK] = True
                 status = "needs-check"
             # different non-empty scope, or no candidates at all: independent add
@@ -139,11 +152,7 @@ async def resolve_correction(db, *, user_id, title, content, tags=None,
         for m in cands:
             if m in exact:
                 continue
-            try:
-                deps = set(get_cm(m).get(CM_DERIVED_FROM) or [])
-            except (TypeError, AttributeError):
-                continue
-            if deps & erased and not get_cm(m).get(CM_DERIVED_DIRTY):
+            if _depends_on(m, erased) and state_of(m) != "dirty":
                 set_cm(m, {CM_DERIVED_DIRTY: True})
                 dirtied.append(str(m.id))
     await db.commit()
@@ -159,7 +168,6 @@ async def collect_derived_ids(db, user_id, erased_ids: list) -> list:
             select(Memory).where(Memory.user_id == user_id)
         )).scalars().all()
         return [m.id for m in rows
-                if str(m.id) not in erased
-                and set(get_cm(m).get(CM_DERIVED_FROM) or []) & erased]
+                if str(m.id) not in erased and _depends_on(m, erased)]
     except Exception:
         return []

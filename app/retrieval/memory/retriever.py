@@ -182,7 +182,7 @@ class MemoryRetriever:
             mem = hydrated.get(cand["memory_id"])
             if mem is None:
                 continue
-            if _state_of(mem) == "superseded" or (getattr(mem, "extra_metadata", {}) or {}).get("cm_derived_dirty"):
+            if _state_of(mem) in ("superseded", "dirty"):
                 continue
             visible.append(cand)
         candidates = visible

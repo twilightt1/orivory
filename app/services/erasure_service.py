@@ -161,18 +161,18 @@ async def _erase_one(db: AsyncSession, user_id: uuid.UUID, memory_id: uuid.UUID)
     try:
         from app.retrieval.memory.correction import collect_derived_ids
 
-        for _did in await collect_derived_ids(db, user_id, affected):
-            if _did not in affected:
-                affected.append(_did)
+        for derived_id in await collect_derived_ids(db, user_id, affected):
+            if derived_id not in affected:
+                affected.append(derived_id)
     except Exception as exc:
         log.warning("Derived-dependent collection failed: %s", exc)
     await db.delete(row)  # ORM cascade: children + links go with it (DB CASCADE too)
     await db.commit()
-    for _did in affected[1:]:
-        if _did not in child_ids and _did != memory_id:
-            _extra = await db.get(Memory, _did)
-            if _extra is not None and _extra.user_id == user_id:
-                await db.delete(_extra)
+    for derived_id in affected[1:]:
+        if derived_id not in child_ids and derived_id != memory_id:
+            derived_row = await db.get(Memory, derived_id)
+            if derived_row is not None and derived_row.user_id == user_id:
+                await db.delete(derived_row)
     await db.commit()
 
     vectors_deleted = []

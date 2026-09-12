@@ -167,7 +167,7 @@ async def search_memory(query: str, limit: int = 8, include_history: bool = Fals
                 )
             ).scalars().all()
             by_id = {row.id: row for row in rows}
-            rows_in_rank = [_f for _f in (by_id.get(mid) for mid, _ in recalled) if _f is not None]
+            rows_in_rank = [mem for mem in (by_id.get(mid) for mid, _ in recalled) if mem is not None]
             if not include_history:
                 rows_in_rank = [m for m in rows_in_rank if state_of(m) != "superseded"]
             results = [_memory_index_row(m) for m in rows_in_rank]
