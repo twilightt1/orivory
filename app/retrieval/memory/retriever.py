@@ -36,7 +36,7 @@ from app.retrieval.memory.context import fetch_personal_context
 from app.retrieval.memory.correction import needs_rewrite as _needs_rewrite
 from app.retrieval.memory.correction import state_of as _state_of
 from app.retrieval.memory.query_rewriter import rewrite_query
-from app.retrieval.memory.scoring import entity_boost, lexical_bonus, time_decay_score
+from app.retrieval.memory.scoring import entity_boost, lexical_bonus, route_query, time_decay_score
 from app.retrieval.memory.vector_store import search_memories
 from app.schemas.Orivory import (
     MemoryResponse,
@@ -63,6 +63,7 @@ class MemoryRetriever:
         decay_floor: float = 0.1,
         semantic_rerank: bool | None = None,
         lexical_refine: bool = True,
+        route: str | None = None,
     ) -> None:
         self.db = db
         self.user_id = user_id
@@ -78,6 +79,8 @@ class MemoryRetriever:
             else semantic_rerank
         )
         self.lexical_refine = lexical_refine
+        # None → auto-route per query; or pin 'relational' | 'local' | 'general'.
+        self.route = route
 
     # ── main entry point ─────────────────────────────────────────────────
 
@@ -117,6 +120,11 @@ class MemoryRetriever:
         # Lowercased entity names for matching
         query_entity_names: set[str] = {e["name"].lower() for e in entities}
 
+        # Query-conditioned weights: relational leans on entities, local on recency.
+        resolved_route = self.route if self.route is not None else route_query(query, entities)
+        boost_per_match = self.entity_boost_per_match * (1.5 if resolved_route == "relational" else 1.0)
+        half_life = self.half_life_days / (2.0 if resolved_route == "local" else 1.0)
+
         # 3) Embed (use rewritten if LLM succeeded, else original)
         t_embed = time.perf_counter()
         try:
@@ -128,6 +136,7 @@ class MemoryRetriever:
                 context if include_personal_context else None,
                 t0, reason=f"embedding_failed:{e}",
                 rewrite_skipped=rewrite_skipped, stage_ms=stage_ms,
+                route=resolved_route,
             )
         stage_ms["embed_ms"] = (time.perf_counter() - t_embed) * 1000.0
 
@@ -245,7 +254,7 @@ class MemoryRetriever:
                 base_score,
                 mem_entity_names,
                 query_entity_names,
-                boost_per_match=self.entity_boost_per_match,
+                boost_per_match=boost_per_match,
                 max_boost=self.entity_boost_max,
             )
 
@@ -254,7 +263,7 @@ class MemoryRetriever:
                 captured_at=memory.captured_at,
                 salience=float(memory.salience or 0.5),
                 pinned=bool(memory.pinned),
-                half_life_days=self.half_life_days,
+                half_life_days=half_life,
                 decay_floor=self.decay_floor,
             )
 
@@ -295,6 +304,7 @@ class MemoryRetriever:
             half_life_days=self.half_life_days,
             rewrite_skipped=rewrite_skipped,
             stage_ms=stage_ms,
+            route=resolved_route,
         )
         return RecallResponse(
             results=results,
@@ -329,6 +339,7 @@ class MemoryRetriever:
         reason: str,
         rewrite_skipped: bool = False,
         stage_ms: dict[str, float] | None = None,
+        route: str = "auto",
     ) -> RecallResponse:
         log.info("Returning empty recall", extra={"reason": reason})
         latency_ms = (time.perf_counter() - t0) * 1000.0
@@ -344,6 +355,7 @@ class MemoryRetriever:
             half_life_days=self.half_life_days,
             rewrite_skipped=rewrite_skipped,
             stage_ms=stage_ms or {},
+            route=route,
         )
         return RecallResponse(
             results=[],

@@ -54,6 +54,34 @@ def lexical_bonus(query: str, text: str) -> tuple[float, list[str]]:
         return 0.0, []
     return LEXICAL_BONUS, [f"lexical:{m}" for m in matched]
 
+# ── query routing ─────────────────────────────────────────────────────────────
+
+#: Time/summary intent → favor recency over entity match.
+_ROUTE_TIME_RE = re.compile(
+    r"when|giai đoạn|khi nào|tóm tắt|summar|timeline|history|quá trình",
+    re.IGNORECASE,
+)
+
+
+def route_query(query: str, entities) -> str:
+    """Route a query to ``'local'`` | ``'relational'`` | ``'general'``.
+
+    ``'local'`` wins on time/summary words (recency matters most);
+    ``'relational'`` when entities are present or ≥2 distinct capitalized
+    tokens appear; otherwise ``'general'`` (no weight adjustment).
+    ``entities`` accepts the rewrite result (list of ``{name, type}``),
+    plain names, or None.
+    """
+    if query and _ROUTE_TIME_RE.search(query):
+        return "local"
+    if entities:
+        return "relational"
+    caps = {t for t in _TOKEN_RE.findall(query or "") if t[0].isupper() and len(t) > 1}
+    if len(caps) >= 2:
+        return "relational"
+    return "general"
+
+
 # ── time-decay scoring ──────────────────────────────────────────────────────
 
 

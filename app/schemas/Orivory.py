@@ -240,6 +240,7 @@ class RecallTrace(BaseModel):
     half_life_days:     float = 30.0
     rewrite_skipped:    bool = False
     stage_ms:           dict[str, float] = Field(default_factory=dict)
+    route:              str = "auto"
 
 
 class RecallResponse(BaseModel):
