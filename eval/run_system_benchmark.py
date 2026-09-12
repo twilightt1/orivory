@@ -385,16 +385,48 @@ async def main_async(args) -> int:
 
     benchmark_user_id = uuid4()
     async with AsyncSessionLocal() as db:
-        db.add(
-            User(
-                id=benchmark_user_id,
-                email="benchmark@orivory.local",
-                hashed_password="x",
-                is_verified=True,
-                is_active=True,
-            )
+        from sqlalchemy import delete, select
+
+        from app.models.memory import Memory
+        from app.retrieval.memory.vector_store import (
+            delete_memories as _delete_bench_vectors,
         )
-        await db.commit()
+
+        existing = (await db.execute(
+            select(User).where(User.email == "benchmark@orivory.local")
+        )).scalars().first()
+        if existing is None:
+            db.add(
+                User(
+                    id=benchmark_user_id,
+                    email="benchmark@orivory.local",
+                    hashed_password="x",
+                    is_verified=True,
+                    is_active=True,
+                )
+            )
+            await db.commit()
+        else:
+            # Reruns start clean: a prior run's bench memories (DB + vectors)
+            # would otherwise pollute recall under the same user. The resume
+            # flow re-ingests per-instance itself and never enters here.
+            benchmark_user_id = existing.id
+            stale = (await db.execute(
+                select(Memory.id).where(
+                    Memory.user_id == existing.id,
+                    Memory.source_ref.like("bench:%"),
+                )
+            )).scalars().all()
+            if stale:
+                await _delete_bench_vectors([str(i) for i in stale])
+                await db.execute(
+                    delete(Memory).where(
+                        Memory.user_id == existing.id,
+                        Memory.source_ref.like("bench:%"),
+                    )
+                )
+                await db.commit()
+                print(f"cleared {len(stale)} stale bench memories from a prior run")
 
     all_instances = load_instances(DATASET)
     rng = random.Random(args.seed)
