@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -124,10 +125,18 @@ def get_llm_client() -> AsyncOpenAI:
         # Drop the stale pool without awaiting its close: its loop is either
         # closed already or belongs to another task — either way we cannot
         # cleanly shut it down here, and abandoning beats reusing poison.
+        # Empty-string keys count as missing: an exported-but-empty
+        # OPENROUTER_API_KEY must not shadow a working OPENAI_* fallback
+        # (this silently killed query-rewrite in every run that sourced
+        # a .env with the OpenRouter line left blank).
+        api_key = settings.OPENROUTER_API_KEY or settings.OPENAI_API_KEY
+        base_url = settings.OPENROUTER_BASE_URL
+        if not settings.OPENROUTER_API_KEY and settings.OPENAI_API_KEY:
+            base_url = os.environ.get("OPENAI_BASE_URL") or base_url
         _client = ResilientAsyncOpenAI(
             AsyncOpenAI(
-                api_key=settings.OPENROUTER_API_KEY,
-                base_url=settings.OPENROUTER_BASE_URL,
+                api_key=api_key,
+                base_url=base_url,
                 timeout=DEFAULT_LLM_TIMEOUT_SECONDS,
                 max_retries=DEFAULT_LLM_MAX_RETRIES,
                 default_headers={

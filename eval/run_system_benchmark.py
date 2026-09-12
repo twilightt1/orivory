@@ -56,8 +56,9 @@ _RESULTS_DIR = ROOT / "eval/benchmarks/results"
 _RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{_RESULTS_DIR}/.system_run.db"
 # The stack's LLM client (rewriter) reads OPENROUTER_* — point it at the
-# same gateway the judge/answerer use.
-os.environ.setdefault("OPENROUTER_API_KEY", os.environ.get("OPENAI_API_KEY", ""))
+# same gateway the judge/answerer use. `or` (not setdefault): an exported
+# but EMPTY key must not block the fallback.
+os.environ["OPENROUTER_API_KEY"] = os.environ.get("OPENROUTER_API_KEY") or os.environ.get("OPENAI_API_KEY", "")
 if os.environ.get("OPENAI_BASE_URL"):
     os.environ["OPENROUTER_BASE_URL"] = os.environ["OPENAI_BASE_URL"]
 # Chroma local path: default /data/chroma is a Docker volume; on a dev box
