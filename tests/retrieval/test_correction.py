@@ -110,6 +110,16 @@ class _FakeDB:
         return None
 
 
+def test_decide_is_pure_no_store():
+    old = _mem({"cm_subject": "proj-x", "cm_attribute": "db", "cm_scope": "prod"})
+    status, meta, exact = C.decide_correction([old], slot=C.Slot.of("proj-x", "db", "prod"))
+    assert (status, exact) == ("superseded", [old])
+    assert C.CM_NEEDS_CHECK not in meta
+    # bad valid_from poisons only the meta, still no store touched
+    status2, meta2, _ = C.decide_correction([], valid_from="not-a-date")
+    assert status2 == "added" and meta2[C.CM_NEEDS_CHECK] is True
+
+
 async def test_resolve_supersede_chain_single_commit():
     from app.retrieval.memory.correction import Slot, resolve_correction
     uid = uuid.uuid4()

@@ -123,20 +123,15 @@ def find_derived_dependent_ids(memories, erased_ids: set[str]) -> list[str]:
             if _depends_on(m, erased_ids) and state_of(m) != "dirty"]
 
 
-async def resolve_correction(db, *, user_id, title, content, tags=None,
-        source_type="mcp_agent", source_ref=None, slot: Slot | None = None,
-        assertion="fact", valid_from=None,
-        evidence_ids=None, memory_id=None, summary=None) -> dict:
-    """Single creation path for add + correct. One commit, never raises.
+def decide_correction(cands, *, slot: Slot | None = None, assertion: str = "fact",
+                      valid_from: str | None = None, memory_id: str | None = None,
+                      evidence_ids=None) -> tuple[str, dict, list]:
+    """Pure matching step: (status, meta, exact_matches). No DB, no writes.
 
-    ``slot=None`` is a plain add (no identity, never supersedes).
+    ``slot=None`` is a plain add. Everything here is dict/list work so the
+    rules are testable without a store; ``resolve_correction`` applies the
+    returned decision in one commit.
     """
-    rows = (await db.execute(
-        select(Memory).where(Memory.user_id == user_id)
-    )).scalars().all()
-    cands = [m for m in rows if state_of(m) != "superseded"]
-
-    now = datetime.now(UTC)
     meta: dict = {CM_ASSERTION: assertion or "fact",
                   CM_SUBJECT: slot.subject if slot else "",
                   CM_ATTRIBUTE: slot.attribute if slot else "",
@@ -151,7 +146,7 @@ async def resolve_correction(db, *, user_id, title, content, tags=None,
     if memory_id:
         meta.setdefault(CM_EVIDENCE_IDS, []).append(str(memory_id))
 
-    status, superseded, dirtied = "added", [], []
+    status = "added"
     exact: list = []
     if slot is not None:
         exact = [m for m in cands if slot.matches(m)]
@@ -173,12 +168,34 @@ async def resolve_correction(db, *, user_id, title, content, tags=None,
                 meta[CM_NEEDS_CHECK] = True
                 status = "needs-check"
             # different non-empty scope, or no candidates at all: independent add
+    return status, meta, exact
 
+
+async def resolve_correction(db, *, user_id, title, content, tags=None,
+        source_type="mcp_agent", source_ref=None, slot: Slot | None = None,
+        assertion="fact", valid_from=None,
+        evidence_ids=None, memory_id=None, summary=None) -> dict:
+    """Single creation path for add + correct. One commit, never raises.
+
+    ``slot=None`` is a plain add (no identity, never supersedes).
+    """
+    rows = (await db.execute(
+        select(Memory).where(Memory.user_id == user_id)
+    )).scalars().all()
+    cands = [m for m in rows if state_of(m) != "superseded"]
+
+    status, meta, exact = decide_correction(
+        cands, slot=slot, assertion=assertion, valid_from=valid_from,
+        memory_id=str(memory_id) if memory_id else None,
+        evidence_ids=evidence_ids)
+
+    now = datetime.now(UTC)
     new = Memory(id=uuid4(), user_id=user_id, title=title, content=content,
                  tags=list(tags or []), source_type=source_type,
                  source_ref=source_ref, captured_at=now, extra_metadata=meta,
                  summary=summary)
     db.add(new)
+    superseded, dirtied = [], []
     if status == "superseded":
         for m in exact:
             set_cm(m, {CM_SUPERSEDED_BY: str(new.id)})
