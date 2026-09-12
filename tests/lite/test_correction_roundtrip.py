@@ -7,7 +7,7 @@ import pytest
 import pytest_asyncio
 
 from app.database import IS_SQLITE, AsyncSessionLocal, Base, engine
-from app.retrieval.memory.correction import resolve_correction
+from app.retrieval.memory.correction import Slot, resolve_correction
 
 pytestmark = pytest.mark.skipif(not IS_SQLITE, reason="lite-mode tests require a sqlite DATABASE_URL")
 
@@ -32,11 +32,11 @@ async def test_self_check_supersede_scope_isolation(_tables):
         await db.commit()
     async with AsyncSessionLocal() as db:
         r1 = await resolve_correction(db, user_id=uid, title="DB", content="Postgres",
-            subject="proj", attribute="db", scope="prod")
+            slot=Slot.of("proj", "db", "prod"))
         r2 = await resolve_correction(db, user_id=uid, title="DB", content="SQLite",
-            subject="proj", attribute="db", scope="demo")
+            slot=Slot.of("proj", "db", "demo"))
         r3 = await resolve_correction(db, user_id=uid, title="DB", content="PG16",
-            subject="proj", attribute="db", scope="prod")
+            slot=Slot.of("proj", "db", "prod"))
     assert r1["status"] == "added"
     assert r3["status"] == "superseded"
     assert r2["status"] == "added"  # other scope untouched

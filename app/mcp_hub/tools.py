@@ -33,7 +33,7 @@ from app.mcp_hub.identity import (
 )
 from app.models.memory import Memory
 from app.models.memory_access_log import MemoryAccessLog
-from app.retrieval.memory.correction import get_cm, resolve_correction, state_of
+from app.retrieval.memory.correction import Slot, get_cm, resolve_correction, state_of
 from app.retrieval.memory.write_back import index_new_memory, safe_delete_from_chroma
 from app.services.erasure_service import erase_memories
 
@@ -483,7 +483,7 @@ async def correct_memory(memory_id=None, subject="", attribute="", scope="defaul
     async with _session() as db:
         out = await resolve_correction(
             db, user_id=principal.user_id, title=title or (target.title if target else ""),
-            content=content, subject=subject, attribute=attribute, scope=scope,
+            content=content, slot=Slot.of(subject, attribute, scope),
             valid_from=valid_from, evidence_ids=list(evidence_ids or []),
             memory_id=str(target.id) if target else None,
             source_ref=f"agent:{principal.name}")

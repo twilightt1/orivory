@@ -30,6 +30,18 @@ def test_state_of_precedence():
     assert C.state_of(_mem({"cm_derived_dirty": True, "cm_needs_check": True})) == "dirty"
 
 
+def test_slot_normalizes_once():
+    s = C.Slot.of("  Proj-X  DB ", "DB", "")
+    assert s is not None
+    assert (s.subject, s.attribute, s.scope) == ("proj-x db", "db", "")
+    assert s.key == ("proj-x db", "db", "default")
+    assert s.has_scope is False
+    assert C.Slot.of("", "db", "prod") is None
+    assert C.Slot.of("p", "", "prod") is None
+    # matches() normalizes the stored side, so legacy rows still hit
+    assert s.matches(_mem({"cm_subject": "PROJ-X  DB", "cm_attribute": "DB"})) is True
+
+
 def test_depends_on_predicate():
     m = _mem({"cm_derived_from": ["A", "B"]})
     assert C._depends_on(m, {"B"}) is True
@@ -99,13 +111,13 @@ class _FakeDB:
 
 
 async def test_resolve_supersede_chain_single_commit():
-    from app.retrieval.memory.correction import resolve_correction
+    from app.retrieval.memory.correction import Slot, resolve_correction
     uid = uuid.uuid4()
     old = _mem({"cm_subject": "proj-x", "cm_attribute": "db", "cm_scope": "prod"})
     old.user_id = uid
     db = _FakeDB(rows=[old])
     out = await resolve_correction(db, user_id=uid, title="DB", content="Postgres",
-        subject="Proj-X", attribute="db", scope="prod")
+        slot=Slot.of("Proj-X", "db", "prod"))
     assert out["status"] == "superseded"
     assert db.committed == 1
     new = out["memory"]
@@ -115,13 +127,13 @@ async def test_resolve_supersede_chain_single_commit():
 
 
 async def test_resolve_ambiguous_scope_keeps_both():
-    from app.retrieval.memory.correction import resolve_correction
+    from app.retrieval.memory.correction import Slot, resolve_correction
     uid = uuid.uuid4()
     old = _mem({"cm_subject": "proj-x", "cm_attribute": "db", "cm_scope": "prod"})
     old.user_id = uid
     db = _FakeDB(rows=[old])
     out = await resolve_correction(db, user_id=uid, title="DB", content="SQLite",
-        subject="proj-x", attribute="db", scope="")
+        slot=Slot.of("proj-x", "db", ""))
     assert out["status"] == "needs-check"
     assert old.extra_metadata.get("cm_superseded_by") is None
     assert out["memory"].extra_metadata["cm_needs_check"] is True

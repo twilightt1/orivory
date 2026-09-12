@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import re
 from datetime import UTC, datetime
+from typing import NamedTuple
 from uuid import uuid4
 
 from sqlalchemy import select
@@ -33,6 +34,45 @@ _WORD = re.compile(r"[a-zà-ỹ]+", re.IGNORECASE)
 
 def normalize_slot(value: str | None) -> str:
     return " ".join((value or "").strip().lower().split())
+
+
+class Slot(NamedTuple):
+    """Identity triple for one correctable fact, normalized once at build.
+
+    Empty scope means "unspecified" (drives the ambiguous-scope path);
+    use ``Slot.of`` so normalization lives in exactly one place.
+    """
+
+    subject: str = ""
+    attribute: str = ""
+    scope: str = ""
+
+    @classmethod
+    def of(cls, subject: str | None = "", attribute: str | None = "",
+           scope: str | None = DEFAULT_SCOPE) -> Slot | None:
+        subj, attr = normalize_slot(subject), normalize_slot(attribute)
+        if not subj or not attr:
+            return None
+        return cls(subj, attr, normalize_slot(scope))
+
+    @property
+    def key(self) -> tuple[str, str, str]:
+        return (self.subject, self.attribute, self.scope or DEFAULT_SCOPE)
+
+    @property
+    def has_scope(self) -> bool:
+        return bool(self.scope)
+
+    def matches(self, memory) -> bool:
+        return _stored_key(memory) == self.key
+
+
+def _stored_key(memory) -> tuple[str, str, str]:
+    """Normalized identity triple as stored in a memory's metadata."""
+    meta = get_cm(memory)
+    return (normalize_slot(meta.get(CM_SUBJECT)),
+            normalize_slot(meta.get(CM_ATTRIBUTE)),
+            normalize_slot(meta.get(CM_SCOPE, DEFAULT_SCOPE)))
 
 
 def get_cm(memory) -> dict:
@@ -84,27 +124,23 @@ def find_derived_dependent_ids(memories, erased_ids: set[str]) -> list[str]:
 
 
 async def resolve_correction(db, *, user_id, title, content, tags=None,
-        source_type="mcp_agent", source_ref=None, subject="", attribute="",
-        scope=DEFAULT_SCOPE, assertion="fact", valid_from=None,
+        source_type="mcp_agent", source_ref=None, slot: Slot | None = None,
+        assertion="fact", valid_from=None,
         evidence_ids=None, memory_id=None, summary=None) -> dict:
-    """Single creation path for add + correct. One commit, never raises."""
+    """Single creation path for add + correct. One commit, never raises.
 
-    subj, attr, sc = normalize_slot(subject), normalize_slot(attribute), normalize_slot(scope)
+    ``slot=None`` is a plain add (no identity, never supersedes).
+    """
     rows = (await db.execute(
         select(Memory).where(Memory.user_id == user_id)
     )).scalars().all()
     cands = [m for m in rows if state_of(m) != "superseded"]
 
-    def _triple(m) -> tuple[str, str, str]:
-        meta = get_cm(m)
-        return (normalize_slot(meta.get(CM_SUBJECT)),
-                normalize_slot(meta.get(CM_ATTRIBUTE)),
-                normalize_slot(meta.get(CM_SCOPE, DEFAULT_SCOPE)))
-
     now = datetime.now(UTC)
     meta: dict = {CM_ASSERTION: assertion or "fact",
-                  CM_SUBJECT: subj, CM_ATTRIBUTE: attr,
-                  CM_SCOPE: sc or DEFAULT_SCOPE,
+                  CM_SUBJECT: slot.subject if slot else "",
+                  CM_ATTRIBUTE: slot.attribute if slot else "",
+                  CM_SCOPE: (slot.scope if slot else "") or DEFAULT_SCOPE,
                   CM_EVIDENCE_IDS: [str(e) for e in (evidence_ids or [])]}
     if valid_from:
         try:
@@ -117,8 +153,8 @@ async def resolve_correction(db, *, user_id, title, content, tags=None,
 
     status, superseded, dirtied = "added", [], []
     exact: list = []
-    if subj and attr:
-        exact = [m for m in cands if _triple(m) == (subj, attr, sc or DEFAULT_SCOPE)]
+    if slot is not None:
+        exact = [m for m in cands if slot.matches(m)]
         if memory_id and exact and str(exact[0].id) != str(memory_id) and len(exact) == 1:
             pass  # explicit target mismatch handled below as ambiguous
         if exact and not meta.get(CM_NEEDS_CHECK):
@@ -131,8 +167,9 @@ async def resolve_correction(db, *, user_id, title, content, tags=None,
                 status = "needs-check"
         elif not exact:
             same_subject_attr = [m for m in cands
-                       if _triple(m)[:2] == (subj, attr) and _triple(m)[2] not in ("", sc or DEFAULT_SCOPE)]
-            if same_subject_attr and not sc:
+                       if _stored_key(m)[:2] == (slot.subject, slot.attribute)
+                       and _stored_key(m)[2] not in ("", slot.key[2])]
+            if same_subject_attr and not slot.has_scope:
                 meta[CM_NEEDS_CHECK] = True
                 status = "needs-check"
             # different non-empty scope, or no candidates at all: independent add
