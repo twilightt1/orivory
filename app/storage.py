@@ -4,13 +4,17 @@
 stores objects under ``FS_STORAGE_PATH`` with the same async surface, so
 callers never branch on the backend.
 """
+from __future__ import annotations
+
 import asyncio
 import io
 from functools import partial
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from minio import Minio
-from minio.error import S3Error
+if TYPE_CHECKING:  # pragma: no cover — imported lazily in _get_client()
+    from minio import Minio
+    from minio.error import S3Error
 
 from app.config import settings
 
@@ -20,7 +24,9 @@ _client: Minio | None = None
 def _get_client() -> Minio:
     global _client
     if _client is None:
-        _client = Minio(
+        from minio import Minio as _Minio
+
+        _client = _Minio(
             settings.MINIO_ENDPOINT,
             access_key=settings.MINIO_ACCESS_KEY,
             secret_key=settings.MINIO_SECRET_KEY,
@@ -129,8 +135,12 @@ async def remove_object(object_name: str) -> None:
             None,
             partial(client.remove_object, settings.MINIO_BUCKET, object_name),
         )
-    except S3Error:
-        pass
+    except Exception as exc:
+        from minio.error import S3Error
+
+        if not isinstance(exc, S3Error):
+            raise
+        # Missing object on MinIO is fine — fs branch uses missing_ok=True.
 
 
 async def list_objects(prefix: str) -> list[str]:
