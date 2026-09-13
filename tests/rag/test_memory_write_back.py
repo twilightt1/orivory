@@ -2,7 +2,8 @@
 
 These verify the fix for the gap where connector-synced memories were written
 to Postgres but never embedded into ChromaDB (making them invisible to
-recall). All tests are CI-safe: ChromaDB, embeddings, and Celery are mocked.
+recall). All tests are CI-safe: ChromaDB, embeddings, and the graph builder
+are mocked.
 """
 from __future__ import annotations
 
@@ -58,16 +59,15 @@ class TestSafeUpsert:
 
 class TestSafeEnqueueGraph:
     def test_never_raises_when_builder_fails(self, monkeypatch):
-        # Force the eager sync path to raise; helper must swallow it.
+        # Force the sync builder to raise; helper must swallow it.
         def boom(*a, **k):
             raise RuntimeError("graph store down")
 
         monkeypatch.setattr("app.graph.builder.build_memory_graph_sync", boom)
-        monkeypatch.setattr(write_back.settings, "CELERY_TASK_ALWAYS_EAGER", True)
         # Should not raise
         write_back.safe_enqueue_graph_build(uuid.uuid4())
 
-    def test_eager_calls_builder_sync(self, monkeypatch):
+    def test_calls_builder_sync(self, monkeypatch):
         import app.graph.builder as gb
 
         calls = {}
@@ -76,14 +76,7 @@ class TestSafeEnqueueGraph:
             calls["memory_id"] = memory_id
             return None
 
-        def boom(*a, **k):
-            raise AssertionError("broker must not be touched on the eager path")
-
-        import app.tasks.graph_tasks as gt
-
         monkeypatch.setattr(gb, "build_memory_graph_sync", fake_build)
-        monkeypatch.setattr(gt.build_memory_graph_task, "delay", boom)
-        monkeypatch.setattr(write_back.settings, "CELERY_TASK_ALWAYS_EAGER", True)
         mid = uuid.uuid4()
         write_back.safe_enqueue_graph_build(mid)
         assert calls["memory_id"] == str(mid)

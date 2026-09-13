@@ -6,13 +6,11 @@ class Settings(BaseSettings):
 
     # ── Lite mode ──────────────────────────────────────────────────────────────
     # LITE_MODE=1 gives a zero-external-services deployment: SQLite storage,
-    # in-process Chroma, in-memory caches (no Redis), eager Celery tasks
-    # (no worker), filesystem uploads (no MinIO). Default DATABASE_URL /
-    # REDIS_URL point at the lite defaults; full-stack compose overrides them.
+    # in-process Chroma, in-memory caches (no Redis), synchronous in-process
+    # background work (no worker), filesystem uploads (no MinIO). Default
+    # DATABASE_URL / REDIS_URL point at the lite defaults; full-stack compose
+    # overrides them.
     LITE_MODE: bool = False
-
-    # Celery: lite mode runs tasks eagerly in-process (no broker, no workers).
-    CELERY_TASK_ALWAYS_EAGER: bool = False
 
     DATABASE_URL: str = "sqlite+aiosqlite:////data/orivory.db"
     DATABASE_POOL_SIZE: int = 10
@@ -163,10 +161,6 @@ class Settings(BaseSettings):
     EVALUATOR_FAILURE_MODE: str = "warn_only"
 
 
-    CELERY_BROKER_URL: str = "redis://localhost:6379/1"
-    CELERY_RESULT_BACKEND: str = "redis://localhost:6379/2"
-
-
     RATE_LIMIT_PER_MINUTE: int = 60
     RATE_LIMIT_PER_DAY: int = 1000
 
@@ -196,8 +190,7 @@ class Settings(BaseSettings):
             if not self.JWT_SECRET_KEY:
                 import secrets
                 self.JWT_SECRET_KEY = secrets.token_urlsafe(48)
-            # Eager tasks, local chroma, filesystem storage unless overridden.
-            self.CELERY_TASK_ALWAYS_EAGER = True
+            # In-process background work, local chroma, filesystem storage unless overridden.
             if self.CHROMA_MODE == "http" and self.CHROMA_HOST == "localhost":
                 self.CHROMA_MODE = "local"
             if self.STORAGE_BACKEND == "minio" and not self.MINIO_ACCESS_KEY:

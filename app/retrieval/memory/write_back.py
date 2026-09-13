@@ -9,8 +9,8 @@ is actually recallable:
 
 Both are **best-effort**: the Postgres ``Memory`` row is the source of truth,
 and a failure here must never fail the request that created the memory. If an
-embed is dropped, the reindex task (``app.tasks.reindex_tasks``) can replay it
-from Postgres later.
+embed is dropped, the reindex helper (``app.retrieval.memory.reindex``) can
+replay it from Postgres later.
 
 Centralizing these here removes the duplicate ``_safe_*`` helpers that
 previously lived in both ``api/v1/memories.py`` and ``ingestion/dispatcher.py``
@@ -21,7 +21,6 @@ from __future__ import annotations
 import logging
 from uuid import UUID
 
-from app.config import settings
 from app.models.memory import Memory
 
 log = logging.getLogger(__name__)
@@ -58,24 +57,16 @@ async def safe_delete_from_chroma(memory_id: UUID | str) -> None:
 
 
 def safe_enqueue_graph_build(memory_id: UUID | str) -> None:
-    """Enqueue knowledge-graph extraction for a memory. Never raises.
+    """Build the knowledge graph for a memory, synchronously in-process.
 
-    Eager (lite/CELERY_TASK_ALWAYS_EAGER): call the builder synchronously
-    in-process — no broker, no worker round-trip. Otherwise enqueue via the
-    Celery task as before.
+    Never raises — failures are logged; the memory row is already committed.
     """
     try:
+        from app.database import sync_session
         from app.graph.builder import build_memory_graph_sync
-        from app.tasks.db import sync_session
 
-        if settings.CELERY_TASK_ALWAYS_EAGER:
-            with sync_session() as db:
-                build_memory_graph_sync(db, str(memory_id))
-            return
-
-        from app.tasks.graph_tasks import build_memory_graph_task
-
-        build_memory_graph_task.delay(str(memory_id))
+        with sync_session() as db:
+            build_memory_graph_sync(db, str(memory_id))
     except Exception as exc:
         log.warning(
             "Graph build enqueue failed for memory %s: %s",

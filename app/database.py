@@ -1,6 +1,11 @@
+from collections.abc import Iterator
+from contextlib import contextmanager
+from functools import lru_cache
+
 from sqlalchemy import event
+from sqlalchemy.engine import Engine
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.orm import DeclarativeBase
+from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from app.config import settings
 
@@ -79,3 +84,39 @@ async def get_db():
             raise
         finally:
             await session.close()
+
+
+# ── Synchronous session (in-process background work) ─────────────────────────
+# Sync helpers (ingestion pipeline, graph build, reindex) cannot use the async
+# engine above, so they share one process-level sync engine + sessionmaker
+# instead of creating a brand-new connection pool per invocation.
+
+
+@lru_cache(maxsize=1)
+def get_sync_engine() -> Engine:
+    """Return the process-wide synchronous engine, creating it on first use."""
+    from sqlalchemy import create_engine
+
+    sync_url = settings.DATABASE_URL.replace("+asyncpg", "+psycopg2")
+    return create_engine(
+        sync_url,
+        pool_pre_ping=True,
+        pool_size=settings.DATABASE_POOL_SIZE,
+        max_overflow=settings.DATABASE_MAX_OVERFLOW,
+        pool_recycle=1800,
+    )
+
+
+@lru_cache(maxsize=1)
+def _get_sync_sessionmaker() -> sessionmaker:
+    return sessionmaker(bind=get_sync_engine(), expire_on_commit=False, autoflush=False)
+
+
+@contextmanager
+def sync_session() -> Iterator[Session]:
+    """Yield a synchronous session bound to the shared engine."""
+    session = _get_sync_sessionmaker()()
+    try:
+        yield session
+    finally:
+        session.close()

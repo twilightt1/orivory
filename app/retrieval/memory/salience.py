@@ -6,7 +6,8 @@ two halves of the loop:
 
   - ``bump_salience`` — when a memory is recalled AND used in an answer, nudge
     its salience up (asymptotically toward 1.0) and stamp ``last_used_at``.
-  - decay lives in ``app.tasks.salience_tasks`` (a periodic Celery job).
+  - decay was a periodic job alongside ``bump_salience``; it was removed
+    with the task queue (no scheduler in Lite), so only the bump half runs.
 
 The bump is asymptotic: ``new = old + step * (1 - old)``. This rewards repeated
 usefulness while never exceeding 1.0 and giving diminishing returns, so a

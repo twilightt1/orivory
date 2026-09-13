@@ -304,8 +304,8 @@ async def retry_document(
 
     await db.commit()
 
-    from app.tasks.ingestion_tasks import process_document
-    process_document.delay(str(doc.id))
+    from app.ingestion.pipeline import process_document_sync
+    process_document_sync(str(doc.id))
 
     return {"message": "Document queued for retry."}
 
@@ -480,22 +480,23 @@ async def reindex_memories(
     await db.commit()
 
     try:
-        from app.tasks.reindex_tasks import reindex_user_memories
+        from app.retrieval.memory.reindex import reindex_user_memories_sync
 
-        async_result = reindex_user_memories.delay(str(body.user_id), only_missing=body.only_missing)
+        summary = reindex_user_memories_sync(str(body.user_id), only_missing=body.only_missing)
         return ReindexResponse(
             queued=True,
-            task_id=getattr(async_result, "id", None),
+            task_id=None,
             user_id=body.user_id,
             only_missing=body.only_missing,
+            note="scanned={scanned} reindexed={reindexed} already_indexed={already_indexed} pages={pages}".format(**summary),
         )
-    except Exception as exc:  # pragma: no cover - broker unavailable
+    except Exception as exc:  # pragma: no cover - defensive
         return ReindexResponse(
             queued=False,
             task_id=None,
             user_id=body.user_id,
             only_missing=body.only_missing,
-            note=f"Could not enqueue reindex task: {exc}",
+            note=f"Reindex failed: {exc}",
         )
 
 

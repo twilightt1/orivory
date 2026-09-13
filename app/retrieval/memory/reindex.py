@@ -3,12 +3,12 @@
 The Postgres ``memories`` table is the source of truth. The ChromaDB
 ``Orivory_memories`` collection is a derived index that can be lost
 (restart with empty volume, corruption) or fall behind (memories written
-before write-through embedding existed). This task replays memories from
+before write-through embedding existed). This helper replays memories from
 Postgres into ChromaDB so recall can always be made whole again.
 
 Usage:
-    reindex_user_memories.delay(str(user_id))                 # only missing
-    reindex_user_memories.delay(str(user_id), only_missing=False)  # rebuild all
+    reindex_user_memories_sync(str(user_id))                     # only missing
+    reindex_user_memories_sync(str(user_id), only_missing=False)  # rebuild all
 """
 from __future__ import annotations
 
@@ -16,30 +16,19 @@ import logging
 
 from sqlalchemy import select
 
+from app.database import sync_session
 from app.models.memory import Memory
-from app.tasks.celery_app import celery_app
-from app.tasks.db import sync_session
 
 log = logging.getLogger(__name__)
 
 _PAGE_SIZE = 200
 
 
-@celery_app.task(
-    bind=True,
-    name="tasks.reindex_user_memories",
-    max_retries=2,
-    default_retry_delay=60,
-    retry_backoff=True,
-    retry_jitter=True,
-    queue="ingestion",
-    time_limit=1800,
-    soft_time_limit=1680,
-)
-def reindex_user_memories(self, user_id: str, only_missing: bool = True) -> dict:
+def reindex_user_memories_sync(user_id: str, only_missing: bool = True) -> dict:
     """Embed a user's memories into ChromaDB in batches.
 
     Returns a summary dict: scanned, already_indexed, reindexed, pages.
+    Raises on failure after logging (the admin caller reports ``queued=False``).
     """
     from app.retrieval.memory.vector_store import (
         get_existing_memory_ids_sync,
@@ -98,4 +87,4 @@ def reindex_user_memories(self, user_id: str, only_missing: bool = True) -> dict
             "Memory reindex failed",
             extra={"user_id": user_id, "scanned": scanned, "error": str(exc)},
         )
-        raise self.retry(exc=exc) from exc
+        raise

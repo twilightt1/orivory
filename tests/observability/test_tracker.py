@@ -178,6 +178,20 @@ class TestCostTracker:
         future = budget_window_iso(hours=-24)
         assert tracker.total(since_iso=future) == 0.0
 
+    def test_wal_mode_and_busy_timeout(self, tmp_path: Path) -> None:
+        # The ledger must use WAL + busy_timeout: a threading.Lock only works
+        # in-process; multi-worker servers would hit 'database is locked'.
+        tracker = CostTracker(db_path=tmp_path / "costs.db")
+        tracker.record(agent="t", model="openai/gpt-4o-mini", tokens_in=10, tokens_out=5)
+        conn = sqlite3.connect(tmp_path / "costs.db")
+        try:
+            journal_mode = conn.execute("PRAGMA journal_mode;").fetchone()[0]
+            busy_timeout = conn.execute("PRAGMA busy_timeout;").fetchone()[0]
+        finally:
+            conn.close()
+        assert journal_mode.lower() == "wal"
+        assert busy_timeout >= 5000
+
 
 class TestBudgetAlert:
     def test_under_budget(self) -> None:

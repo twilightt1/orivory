@@ -1,5 +1,4 @@
-"""
-Document ingestion pipeline — sync Celery task.
+"""Document ingestion pipeline — synchronous in-process function.
 
 Changes vs. original:
   - Uses build_parent_child_chunks() from smart chunker
@@ -12,8 +11,6 @@ Changes vs. original:
 from __future__ import annotations
 
 import logging
-
-from app.tasks.celery_app import celery_app
 
 log = logging.getLogger(__name__)
 
@@ -40,21 +37,14 @@ def _stage_error(stage: str, exc: Exception) -> IngestionStageError:
     return IngestionStageError(stage, message)
 
 
-@celery_app.task(
-    bind=True,
-    name="tasks.process_document",
-    max_retries=3,
-    default_retry_delay=30,
-    retry_backoff=True,
-    retry_jitter=True,
-    time_limit=900,
-    soft_time_limit=840,
-    queue="ingestion",
-)
-def process_document(self, document_id: str) -> None:
-    from celery.exceptions import MaxRetriesExceededError, Retry
+def process_document_sync(document_id: str) -> None:
+    """Run the ingestion pipeline for one document, synchronously.
 
-    from app.tasks.db import sync_session
+    Never raises: on failure the document row is marked ``failed`` (same
+    terminal state the old eager Celery task left behind) and the error is
+    logged. Single attempt — there is no worker to back off to.
+    """
+    from app.database import sync_session
 
     with sync_session() as db:
         try:
@@ -66,21 +56,11 @@ def process_document(self, document_id: str) -> None:
                 "Ingestion failed",
                 extra={"doc_id": document_id, "stage": stage, "error": str(exc)},
             )
-            try:
-                raise self.retry(exc=exc)
-            except Retry:
-                log.warning(
-                    "Ingestion retry scheduled",
-                    extra={"doc_id": document_id, "stage": stage, "error": str(exc)},
-                )
-                raise
-            except MaxRetriesExceededError:
-                _fail(db, document_id, str(exc))
-                log.error(
-                    "Ingestion failed permanently",
-                    extra={"doc_id": document_id, "stage": stage, "error": str(exc)},
-                )
-                raise
+            _fail(db, document_id, str(exc))
+            log.error(
+                "Ingestion failed permanently",
+                extra={"doc_id": document_id, "stage": stage, "error": str(exc)},
+            )
 
 
 def _ingest(db, document_id: str) -> None:
@@ -211,7 +191,7 @@ def _ingest(db, document_id: str) -> None:
     # Unify (roadmap P1.1): project this document into the user's cross-
     # conversation memory. Best-effort — the document is already "ready" and
     # the per-conversation path works regardless; a failure here is replayable
-    # via the reindex task and must not fail ingestion.
+    # via the reindex helper and must not fail ingestion.
     try:
         _project_document_to_memories(db, document_id, parents)
     except Exception as exc:

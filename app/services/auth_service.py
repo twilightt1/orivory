@@ -103,12 +103,11 @@ async def register_email(db: AsyncSession, email: str, password: str) -> User:
     await db.commit()
     await db.refresh(user)
 
-    # ponytail: broker-absent deploys (compose has no redis) must not fail
-    # registration when the mail queue is unreachable; the OTP row is already
-    # committed above so verification can be retried via resend.
-    from app.tasks.email_tasks import send_verification_email
+    # Best-effort send: the OTP row is already committed above so verification
+    # can be retried via resend.
+    from app.services.email_service import email_service
     try:
-        send_verification_email.delay(email, otp, token)
+        email_service.send_verification(email, otp, token)
     except Exception as exc:
         log.warning("Verification email enqueue failed for %s: %s", email, exc)
     return user
@@ -209,9 +208,9 @@ async def resend_verification(db: AsyncSession, email: str) -> None:
     await db.commit()
     # ponytail: same broker-absent guard as register_email — OTP row is
     # committed, so a dropped enqueue is retryable via resend.
-    from app.tasks.email_tasks import send_verification_email
+    from app.services.email_service import email_service
     try:
-        send_verification_email.delay(email, otp, token)
+        email_service.send_verification(email, otp, token)
     except Exception as exc:
         log.warning("Verification email enqueue failed for %s: %s", email, exc)
 
@@ -322,9 +321,9 @@ async def create_password_reset_session(db: AsyncSession, email: str) -> None:
     await db.commit()
     # ponytail: same broker-absent guard — reset row is committed, caller
     # already rate-limited, so a dropped enqueue degrades to "try again".
-    from app.tasks.email_tasks import send_password_reset_email
+    from app.services.email_service import email_service
     try:
-        send_password_reset_email.delay(email, otp, token)
+        email_service.send_password_reset(email, otp, token)
     except Exception as exc:
         log.warning("Password-reset email enqueue failed for %s: %s", email, exc)
 
