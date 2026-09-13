@@ -337,6 +337,15 @@ async def judge_one(client, instance, response: str) -> bool:
     return verdict == "correct"
 
 
+class QuotaExhausted(Exception):
+    """Raised when the provider daily quota dies mid-run.
+
+    Continuing would mark every remaining question error after burning
+    retries on each — abort loudly, keep the partial file, rerun after
+    reset instead (learned after two 68-error runs).
+    """
+
+
 async def run_instance(client, user_id, instance, top_k, run_dir: Path,
                       session_level: bool = True, chunk_chars: int = 0,
                       fuse: bool = False) -> dict:
@@ -355,6 +364,8 @@ async def run_instance(client, user_id, instance, top_k, run_dir: Path,
         import traceback
 
         traceback.print_exc()
+        if type(exc).__name__ == "RateLimitError":
+            raise QuotaExhausted(f"provider quota exhausted at {instance.question_id}") from exc
         response, recalled, ingested, correct, error = "", 0, 0, False, f"{type(exc).__name__}: {exc}"
     seconds = round(time.time() - t0, 1)
     status = "error" if error else ("correct" if correct else "incorrect")
@@ -451,14 +462,20 @@ async def main_async(args) -> int:
 
     records: list[dict] = []
     t0 = time.time()
-    for inst in selected:  # sequential: one user, deterministic ingest order
-        records.append(
-            await run_instance(
-                client, benchmark_user_id, inst, args.top_k, run_dir,
-                session_level=args.session, chunk_chars=args.chunk_chars,
-                fuse=args.fuse,
+    exit_code = 0
+    try:
+        for inst in selected:  # sequential: one user, deterministic ingest order
+            records.append(
+                await run_instance(
+                    client, benchmark_user_id, inst, args.top_k, run_dir,
+                    session_level=args.session, chunk_chars=args.chunk_chars,
+                    fuse=args.fuse,
+                )
             )
-        )
+    except QuotaExhausted as exc:
+        exit_code = 3
+        print(f"\nQUOTA EXHAUSTED — aborting run early ({exc}). Partial results "
+              f"below cover {len(records)}/{len(selected)}; rerun after reset.")
     total = round(time.time() - t0, 1)
 
     errors = [r for r in records if r["error"]]
@@ -554,7 +571,7 @@ async def main_async(args) -> int:
     type_summary = {k: "{}/{}".format(v["correct"], v["n"]) for k, v in by_type.items()}
     print(f"by type: {type_summary}")
     print(f"total: {total}s → {out}")
-    return 0
+    return exit_code
 
 
 def main() -> int:
