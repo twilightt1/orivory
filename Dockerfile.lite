@@ -28,7 +28,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     curl \
     && rm -rf /var/lib/apt/lists/* \
-    && pip install --no-cache-dir -r requirements.txt aiosqlite \
+    && pip install --no-cache-dir -r requirements.txt \
     # ponytail: gcc only builds wheels; purge it (~200MB) — runtime needs none.
     # kubernetes (~82M) is a chromadb dep nothing imports on the local path
     # (verified: add+query work without it). Re-check if chromadb is bumped.
