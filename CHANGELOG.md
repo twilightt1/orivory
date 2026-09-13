@@ -24,6 +24,14 @@ project adheres to [Semantic Versioning](https://semver.org/).
   Không tăng → revert cả 3, giữ code ngoài tree. Bài học: rerank tín
   hiệu trên pool top_k×3 đã bão hòa; muốn nhích phải đổi pool
   (retrieval), không phải sort lại pool cũ.
+- **arctic-embed-xs local (DEFAULT)** — Snowflake xs fp32 90MB, query-prefix
+  only, 384-dim, backend `local-arctic`. H1 probe tốt nhất trục local
+  (update 0.545 vs stale 0.451, +0.094). n=100 store tươi: **0.490**
+  (CI [0.394, 0.587]) — ngang band MiniLM, không breakthrough.
+  Pattern đáng chú ý: single-session mạnh lên (user 12/13, assistant 14/14)
+  nhưng multi-session sập 14→9 ở CẢ e5 lẫn arctic → nghi pool thiếu
+  diversity (model single giỏi hơn lấn át evidence cross-session),
+  không phải chất lượng embed. Hướng tiếp: điều tra multi riêng.
 - **e5-multilingual local (OPT-IN, not default)** — custom ONNX int8
   (Xenova quantized 118MB, prefix query:/passage: cả hai phía, 384-dim,
   backend `local-e5` tách khỏi `local`) đo n=100 store tươi: **0.430**
