@@ -14,7 +14,6 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # pragma: no cover — imported lazily in _get_client()
     from minio import Minio
-    from minio.error import S3Error
 
 from app.config import settings
 
