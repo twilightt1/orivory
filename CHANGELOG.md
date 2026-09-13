@@ -24,6 +24,14 @@ project adheres to [Semantic Versioning](https://semver.org/).
   Không tăng → revert cả 3, giữ code ngoài tree. Bài học: rerank tín
   hiệu trên pool top_k×3 đã bão hòa; muốn nhích phải đổi pool
   (retrieval), không phải sort lại pool cũ.
+- **e5-multilingual local (OPT-IN, not default)** — custom ONNX int8
+  (Xenova quantized 118MB, prefix query:/passage: cả hai phía, 384-dim,
+  backend `local-e5` tách khỏi `local`) đo n=100 store tươi: **0.430**
+  (CI [0.337, 0.528]) vs MiniLM 0.470–0.510, multi-session rớt 14→9.
+  Kết luận: quantized e5 thua MiniLM trên bench tiếng Anh (nghi ngờ
+  quantization + prefix-compression; bản fp32 470MB chưa thử vì vượt
+  ngân sách Lite). Default flip về `minilm`; e5 giữ lại cho user Việt
+  qua `LOCAL_EMBED_MODEL=e5`.
 - **Local-first env** — `.env.example`: `USE_LOCAL_EMBEDDINGS=true`
   (ONNX MiniLM, no key/no cost), `RETRIEVAL_SEMANTIC_RERANK=false`
   (opt-in khi eval chứng minh cần).
