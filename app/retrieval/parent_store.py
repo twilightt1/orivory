@@ -149,9 +149,11 @@ async def _load_batch_from_db(
 
 
 def store_parents_sync(conversation_id: str, parents: list[dict]) -> None:
-    import redis as redis_lib
-
     from app.config import settings
+
+    if not settings.REDIS_URL:  # lite mode: async path uses InMemoryRedis
+        return
+    import redis as redis_lib
 
     r    = redis_lib.from_url(settings.REDIS_URL, decode_responses=True)
     pipe = r.pipeline()

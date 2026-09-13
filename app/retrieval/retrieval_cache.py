@@ -56,6 +56,8 @@ async def invalidate_query_cache(conversation_id: str) -> int:
 
 
 def invalidate_query_cache_sync(conversation_id: str) -> int:
+    if not settings.REDIS_URL:  # lite mode: async path uses InMemoryRedis
+        return 0
     import redis as redis_lib
 
     redis = redis_lib.from_url(settings.REDIS_URL, decode_responses=True)

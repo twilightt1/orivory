@@ -93,37 +93,6 @@ class TestPostgresHealth:
 
 
 @pytest.mark.smoke
-class TestRedisHealth:
-    """Tests for Redis service."""
-
-    def test_redis_is_ready(self, docker_services):
-        """Redis should respond to PING."""
-        skip_if_no_docker()
-        import redis
-
-        try:
-            client = redis.Redis(host="localhost", port=6379, db=0, socket_timeout=5)
-            response = client.ping()
-            assert response is True
-        except (redis.ConnectionError, redis.TimeoutError):
-            pytest.skip("Redis not available")
-
-    def test_redis_set_get(self, docker_services):
-        """Redis should support basic SET/GET operations."""
-        skip_if_no_docker()
-        import redis
-
-        try:
-            client = redis.Redis(host="localhost", port=6379, db=0, socket_timeout=5)
-            client.set("smoke:test", "hello", ex=60)
-            value = client.get("smoke:test")
-            assert value == b"hello"
-            client.delete("smoke:test")
-        except (redis.ConnectionError, redis.TimeoutError):
-            pytest.skip("Redis not available")
-
-
-@pytest.mark.smoke
 class TestChromaDBHealth:
     """Tests for ChromaDB service."""
 
@@ -261,15 +230,4 @@ class TestServiceConnectivity:
             conn.close()
             assert result == (1,)
         except psycopg2.OperationalError:
-            pytest.skip("Running outside Docker network")
-
-    def test_redis_from_app_container(self, docker_services):
-        """App should be able to connect to Redis."""
-        skip_if_no_docker()
-        import redis
-
-        try:
-            client = redis.Redis(host="redis", port=6379, db=0, socket_timeout=5)
-            client.ping()
-        except redis.ConnectionError:
             pytest.skip("Running outside Docker network")

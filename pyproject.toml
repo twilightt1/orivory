@@ -32,7 +32,6 @@ dependencies = [
     "python-jose[cryptography]>=3.3.0",
     "python-multipart>=0.0.9",
     "rank-bm25>=0.2.2",
-    "redis[hiredis]>=5.0.8",
     "sendgrid>=6.11.0",
     "sqlalchemy[asyncio]>=2.0.35",
     "structlog>=24.4.0",

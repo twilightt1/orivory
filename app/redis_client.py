@@ -11,9 +11,10 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from redis.asyncio import ConnectionPool, Redis
+if TYPE_CHECKING:  # pragma: no cover — imported lazily in get_pool()
+    from redis.asyncio import ConnectionPool, Redis
 
 from app.config import settings
 
@@ -211,7 +212,9 @@ def get_pool() -> ConnectionPool:
         current_loop = None
 
     if _pool is None or (_pool_loop is not None and current_loop is not None and _pool_loop is not current_loop):
-        _pool = ConnectionPool.from_url(
+        from redis.asyncio import ConnectionPool as _ConnectionPool
+
+        _pool = _ConnectionPool.from_url(
             settings.REDIS_URL,
             max_connections=settings.REDIS_POOL_MAX,
             decode_responses=True,

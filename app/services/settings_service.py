@@ -1,11 +1,14 @@
 import json
+from typing import TYPE_CHECKING
 
-from redis.asyncio import Redis
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.system_setting import SystemSetting
 from app.redis_client import get_redis
+
+if TYPE_CHECKING:  # annotations only
+    from redis.asyncio import Redis
 
 
 class SettingsService:
