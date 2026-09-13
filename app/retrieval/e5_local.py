@@ -34,6 +34,18 @@ TOKENIZER_URL = (
 MODEL_FILE = "model_quantized.onnx"
 TOKENIZER_FILE = "tokenizer.json"
 
+ARCTIC_MODEL_URL = (
+    "https://huggingface.co/Snowflake/snowflake-arctic-embed-xs"
+    "/resolve/main/onnx/model.onnx"
+)
+ARCTIC_TOKENIZER_URL = (
+    "https://huggingface.co/Snowflake/snowflake-arctic-embed-xs"
+    "/resolve/main/tokenizer.json"
+)
+ARCTIC_MODEL_FILE = "arctic_model.onnx"
+ARCTIC_TOKENIZER_FILE = "arctic_tokenizer.json"
+ARCTIC_QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
+
 QUERY_PREFIX = "query: "
 PASSAGE_PREFIX = "passage: "
 
@@ -42,6 +54,8 @@ _MAX_TOKENS = 512
 
 _sess = None
 _tok = None
+_asess = None
+_atok = None
 
 
 def model_dir() -> Path:
@@ -109,7 +123,42 @@ def _feed(sess, ids, mask) -> dict:
 
 
 def _encode(texts: list[str]) -> list[list[float]]:
-    sess, tok = _session(), _tokenizer()
+    return _encode_with(texts, _session, _tokenizer)
+
+
+def ensure_arctic_files() -> tuple[Path, Path]:
+    d = model_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    model, tok = d / ARCTIC_MODEL_FILE, d / ARCTIC_TOKENIZER_FILE
+    if not model.exists():
+        _download(ARCTIC_MODEL_URL, model)
+    if not tok.exists():
+        _download(ARCTIC_TOKENIZER_URL, tok)
+    return model, tok
+
+
+def _asession():
+    global _asess
+    if _asess is None:
+        import onnxruntime as ort
+
+        model, _ = ensure_arctic_files()
+        _asess = ort.InferenceSession(str(model), providers=["CPUExecutionProvider"])
+    return _asess
+
+
+def _atokenizer():
+    global _atok
+    if _atok is None:
+        from tokenizers import Tokenizer
+
+        _, tok_path = ensure_arctic_files()
+        _atok = Tokenizer.from_file(str(tok_path))
+    return _atok
+
+
+def _encode_with(texts: list[str], sess_fn, tok_fn) -> list[list[float]]:
+    sess, tok = sess_fn(), tok_fn()
     out: list[list[float]] = []
     for i in range(0, len(texts), _BATCH):
         enc = tok.encode_batch(texts[i : i + _BATCH])
@@ -137,3 +186,11 @@ def embed_queries(texts: list[str]) -> list[list[float]]:
 
 def embed_passages(texts: list[str]) -> list[list[float]]:
     return _encode([PASSAGE_PREFIX + t for t in texts])
+
+
+def arctic_embed_queries(texts: list[str]) -> list[list[float]]:
+    return _encode_with([ARCTIC_QUERY_PREFIX + t for t in texts], _asession, _atokenizer)
+
+
+def arctic_embed_passages(texts: list[str]) -> list[list[float]]:
+    return _encode_with(texts, _asession, _atokenizer)

@@ -63,6 +63,16 @@ def test_passage_prefix_applied(stubbed):
     assert tok.texts == ["passage: hello"]
 
 
+def test_arctic_query_prefix_only(stubbed, monkeypatch):
+    tok, _ = stubbed
+    monkeypatch.setattr(e5_local, "_asession", lambda: e5_local._session())
+    monkeypatch.setattr(e5_local, "_atokenizer", lambda: e5_local._tokenizer())
+    e5_local.arctic_embed_queries(["hello"])
+    assert tok.texts[-1].startswith("Represent this sentence")
+    e5_local.arctic_embed_passages(["hello"])
+    assert tok.texts[-1] == "hello"
+
+
 def test_embeddings_l2_normalized(stubbed):
     _, sess = stubbed
     vecs = e5_local.embed_queries(["a", "b"])

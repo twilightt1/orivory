@@ -33,6 +33,9 @@ def test_active_backend_name_dispatch(monkeypatch):
     monkeypatch.setattr(embedder.settings, "LOCAL_EMBED_MODEL", "minilm")
     assert active_backend_name() == "local"
 
+    monkeypatch.setattr(embedder.settings, "LOCAL_EMBED_MODEL", "arctic")
+    assert active_backend_name() == "local-arctic"
+
     monkeypatch.setattr(embedder.settings, "USE_LOCAL_EMBEDDINGS", False)
     monkeypatch.setattr(embedder.settings, "USE_JINA_EMBEDDINGS", True)
     monkeypatch.setattr(embedder.settings, "JINA_API_KEY", "k")

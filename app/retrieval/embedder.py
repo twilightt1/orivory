@@ -40,7 +40,9 @@ class EmbeddingDimensionMismatch(ValueError):
 def active_backend_name() -> str:
     """Which embedding backend the current settings select."""
     if settings.USE_LOCAL_EMBEDDINGS:
-        return "local-e5" if settings.LOCAL_EMBED_MODEL == "e5" else "local"
+        return {"arctic": "local-arctic", "e5": "local-e5"}.get(
+            settings.LOCAL_EMBED_MODEL, "local"
+        )
     if settings.USE_JINA_EMBEDDINGS and settings.JINA_API_KEY:
         return "jina"
     return "openai"
@@ -286,6 +288,12 @@ def _embed_with_local(texts: list[str], *, query: bool = False) -> list[list[flo
         if query:
             return e5_local.embed_queries(texts)
         return e5_local.embed_passages(texts)
+    if settings.LOCAL_EMBED_MODEL == "arctic":
+        from app.retrieval import e5_local
+
+        if query:
+            return e5_local.arctic_embed_queries(texts)
+        return e5_local.arctic_embed_passages(texts)
     global _local_embed_fn
     if _local_embed_fn is None:
         import chromadb.utils.embedding_functions as ef
