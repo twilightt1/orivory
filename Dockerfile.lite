@@ -18,6 +18,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     REDIS_URL= \
     CHROMA_MODE=local \
     CHROMA_LOCAL_PATH=/data/chroma \
+    LOCAL_E5_DIR=/data/models/e5 \
     STORAGE_BACKEND=fs \
     FS_STORAGE_PATH=/data/uploads
 

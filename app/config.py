@@ -127,6 +127,16 @@ class Settings(BaseSettings):
     # Takes precedence over Jina/OpenAI when true — keeps lite mode and
     # benchmarks fully self-contained. Do not mix backends in one store.
     USE_LOCAL_EMBEDDINGS: bool = False
+    # Which local model backs USE_LOCAL_EMBEDDINGS: "e5" (multilingual-e5-small
+    # int8, default) or "minilm" (chroma-bundled MiniLM, legacy). Both 384-dim
+    # but semantically incompatible — the dim guard records them as different
+    # backends ("local-e5" vs "local") and refuses to mix them; switching on
+    # an existing store requires reindexing into a fresh collection.
+    LOCAL_EMBED_MODEL: str = "e5"
+    # Where the e5 onnx/tokenizer files live (downloaded once on first use).
+    # Empty = ~/.cache/orivory/e5; the lite image sets /data/models/e5 so the
+    # download persists on the data volume.
+    LOCAL_E5_DIR: str = ""
 
     # ── Corrective-RAG (CRAG) ────────────────────────────────────────────────────
     # CRAG self-critiques retrieval quality and falls back to web search when needed.

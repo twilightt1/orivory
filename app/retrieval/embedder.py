@@ -18,7 +18,7 @@ def __getattr__(name):
 
 _async_client: AsyncOpenAI | None = None
 _sync_client: OpenAI | None = None
-_local_embed_fn = None  # chromadb ONNX MiniLM (USE_LOCAL_EMBEDDINGS)
+_local_embed_fn = None  # chromadb ONNX MiniLM (USE_LOCAL_EMBEDDINGS + minilm)
 
 # Collection metadata keys recording which embedding backend + dimension a
 # Chroma collection was created with. Flipping USE_JINA_EMBEDDINGS /
@@ -40,7 +40,7 @@ class EmbeddingDimensionMismatch(ValueError):
 def active_backend_name() -> str:
     """Which embedding backend the current settings select."""
     if settings.USE_LOCAL_EMBEDDINGS:
-        return "local"
+        return "local-e5" if settings.LOCAL_EMBED_MODEL == "e5" else "local"
     if settings.USE_JINA_EMBEDDINGS and settings.JINA_API_KEY:
         return "jina"
     return "openai"
@@ -274,14 +274,18 @@ def _embed_sync_with_jina(texts: list[str]) -> list[list[float]]:
         raise ValueError(f"Failed to get Jina embeddings: {e}") from e
 
 
-def _embed_with_local(texts: list[str]) -> list[list[float]]:
-    """Embed with chromadb's bundled ONNX MiniLM — fully local, no API key.
+def _embed_with_local(texts: list[str], *, query: bool = False) -> list[list[float]]:
+    """Embed fully locally — e5-multilingual (default) or bundled MiniLM.
 
-    384-dim vectors. Chosen explicitly via USE_LOCAL_EMBEDDINGS=true (or
-    automatically when Jina/OpenAI are unconfigured): keeps lite mode and
-    benchmarks self-contained and free. Different dim than Jina/OpenAI —
-    fine for a fresh collection, do NOT mix backends in one store.
+    384-dim vectors either way. e5 applies its required ``query:``/``passage:``
+    prefixes; MiniLM takes raw text. Do NOT mix backends in one store.
     """
+    if settings.LOCAL_EMBED_MODEL == "e5":
+        from app.retrieval import e5_local
+
+        if query:
+            return e5_local.embed_queries(texts)
+        return e5_local.embed_passages(texts)
     global _local_embed_fn
     if _local_embed_fn is None:
         import chromadb.utils.embedding_functions as ef
@@ -303,6 +307,8 @@ async def embed_texts(texts: list[str]) -> list[list[float]]:
 
 
 async def embed_query(query: str) -> list[float]:
+    if settings.USE_LOCAL_EMBEDDINGS:
+        return _embed_with_local([query], query=True)[0]
     return (await embed_texts([query]))[0]
 
 
