@@ -88,7 +88,13 @@ class MemoryRetriever:
     ) -> RecallResponse:
         """Run the full recall pipeline and return a ``RecallResponse``."""
         t0 = time.perf_counter()
-        stage_ms: dict[str, float] = dict.fromkeys(RECALL_TRACE_STAGE_KEYS, 0.0)
+        stage_ms: dict[str, float] = {
+            **dict.fromkeys(RECALL_TRACE_STAGE_KEYS, 0.0),
+            "rewrite_ms": 0.0,
+            "embed_ms": 0.0,
+            "search_ms": 0.0,
+            "hydrate_ms": 0.0,
+        }
 
         # 1) Personal context
         context: list[Memory] = []
@@ -111,14 +117,6 @@ class MemoryRetriever:
                 rewrite_result = {"rewritten_query": query, "entities": [],
                                   "reasoning": "fast-path: no pronouns", "_fallback_used": False}
                 rewrite_skipped = True
-        except Exception as e:
-            log.warning("rewrite_query failed", extra={"error": str(e)})
-            rewrite_result = {
-                "rewritten_query": query,
-                "entities": [],
-                "reasoning": f"rewrite fallback: {e}",
-                "_fallback_used": True,
-            }
         finally:
             stage_ms["rewrite_ms"] = (time.perf_counter() - t_rewrite) * 1000.0
         rewritten = rewrite_result["rewritten_query"]
@@ -195,13 +193,12 @@ class MemoryRetriever:
 
         # 5) Hydrate from Postgres (with entity_links)
         t_hydrate = time.perf_counter()
-        hydrated: dict[str, Memory] = {}
         try:
             if candidates:
                 memory_ids = [UUID(c["memory_id"]) for c in candidates]
                 hydrated = await self._hydrate(memory_ids)
-        except Exception as e:
-            log.error("hydrate memories failed", extra={"error": str(e)})
+            else:
+                hydrated = {}
         finally:
             stage_ms["hydrate_ms"] = (time.perf_counter() - t_hydrate) * 1000.0
 
