@@ -36,7 +36,7 @@ from app.models.memory import Memory
 from app.models.memory_access_log import MemoryAccessLog
 from app.retrieval.embedder import EmbeddingDimensionMismatch
 from app.retrieval.memory.correction import Slot, get_cm, resolve_correction, state_of
-from app.retrieval.memory.write_back import index_new_memory, safe_delete_from_chroma
+from app.retrieval.memory.write_back import index_new_memory
 from app.services.erasure_service import erase_memories
 
 log = logging.getLogger(__name__)
@@ -376,7 +376,12 @@ async def add_memory(title: str, content: str, tags: list[str] | None = None) ->
 
 
 async def delete_memory(memory_id: str) -> dict[str, Any]:
-    """Delete one memory owned by the caller (requires ``memory:write``)."""
+    """Delete one memory owned by the caller (requires ``memory:write``).
+
+    Goes through the durable erasure path (``erase_memories``): one closure
+    transaction, a delete intent per affected id, and a receipt. Response shape
+    is unchanged; ``receipt_id`` is additive.
+    """
     principal = _current_principal()
     if principal is None:
         return IDENTITY_ERROR
@@ -393,14 +398,21 @@ async def delete_memory(memory_id: str) -> dict[str, Any]:
             )
         ).scalars().first()
         if row is None:
-            db.add(_ledger_entry(principal, ACTION_DELETE, memory_id=mid, detail={"deleted": False}))
+            # The id rides ``detail``, not the ``memory_id`` column: that column
+            # FKs memories.id (SET NULL) and a dangling reference fails the
+            # INSERT on Postgres.
+            db.add(_ledger_entry(principal, ACTION_DELETE,
+                                 detail={"deleted": False, "memory_id": str(mid)}))
             await db.commit()
             return {"error": "memory not found"}
-        await db.delete(row)
-        await safe_delete_from_chroma(mid)  # best-effort vector cleanup
-        db.add(_ledger_entry(principal, ACTION_DELETE, memory_id=mid, detail={"deleted": True}))
+        receipt = await erase_memories(db, principal.user_id, [mid],
+                                       requested_by=f"agent:{principal.name}")
+        receipt_id = str(receipt.id)
+        db.add(_ledger_entry(principal, ACTION_DELETE,
+                             detail={"deleted": True, "memory_id": str(mid),
+                                     "receipt_id": receipt_id}))
         await db.commit()
-    return {"deleted": True, "id": str(mid)}
+    return {"deleted": True, "id": str(mid), "receipt_id": receipt_id}
 
 
 async def forget_memory(memory_ids: list[str]) -> dict[str, Any]:

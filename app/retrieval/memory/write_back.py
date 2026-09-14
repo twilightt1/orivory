@@ -51,18 +51,23 @@ async def safe_upsert_to_chroma(memory: Memory) -> bool:
         return False
 
 
-async def safe_delete_from_chroma(memory_id: UUID | str) -> None:
-    """Remove a memory's vector from ChromaDB. Never raises."""
+async def safe_delete_from_chroma(memory_id: UUID | str) -> bool:
+    """Remove a memory's vector from ChromaDB. Never raises.
+
+    Returns whether the backend confirmed the delete, so a caller that owns a
+    durable intent (the outbox drain) can tell a purge from an outage.
+    """
     try:
         from app.retrieval.memory.vector_store import delete_memory
 
-        await delete_memory(str(memory_id))
+        return await delete_memory(str(memory_id))
     except Exception as exc:
         log.warning(
             "ChromaDB delete failed for memory %s: %s",
             memory_id, exc,
             extra={"memory_id": str(memory_id)},
         )
+        return False
 
 
 def safe_enqueue_graph_build(memory_id: UUID | str) -> None:

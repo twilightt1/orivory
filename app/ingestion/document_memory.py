@@ -44,7 +44,12 @@ from sqlalchemy.orm import Session
 from app.models.conversation import Conversation
 from app.models.document import Document
 from app.models.memory import Memory, MemorySuppression
-from app.retrieval.memory.outbox import bump_revision, enqueue_delete_sync, enqueue_upsert_sync
+from app.retrieval.memory.outbox import (
+    bump_revision,
+    enqueue_delete,
+    enqueue_delete_sync,
+    enqueue_upsert_sync,
+)
 from app.utils.chunker import ParentChunk
 
 log = logging.getLogger(__name__)
@@ -162,8 +167,9 @@ async def delete_document_memories_async(db: AsyncSession, document_id: str, *, 
     """Async variant of :func:`delete_document_memories_sync`.
 
     Used by the API delete paths (document delete, conversation delete). Deletes
-    the rows in Postgres and returns the ids so the caller can also purge the
-    vector store. Caller commits.
+    the rows in Postgres, enqueues one durable delete intent per row in the SAME
+    transaction, and returns the ids so the caller can also purge the vector
+    store after committing. Caller commits.
     """
     rows = (
         await db.execute(
@@ -175,6 +181,10 @@ async def delete_document_memories_async(db: AsyncSession, document_id: str, *, 
     ).scalars().all()
     ids = [str(m.id) for m in rows]
     for mem in rows:
+        # Durable intent in the same transaction as the row delete: a crash
+        # before the caller's vector purge is replayable by the drain.
+        await enqueue_delete(db, entity_id=str(mem.id), tenant_id=str(user_id),
+                             revision=int(mem.revision or 1))
         await db.delete(mem)
     return ids
 
@@ -211,6 +221,13 @@ def build_document_memories_sync(
     if conversation is None:
         log.warning("Doc→memory skipped: conversation not found", extra={"doc_id": document_id})
         return DocMemoryResult(document_id=document_id, doc_memory_id=None, passage_memory_ids=[])
+    if conversation.user_id != user_id:
+        # The projection is stored under the passed owner, so a mismatched
+        # caller would write (and later erase) another tenant's memories.
+        raise ValueError(
+            f"document {document_id} belongs to a conversation owned by another user; "
+            f"refusing to project memories for {user_id}"
+        )
 
     # Idempotency: replace this owner's prior projection. A delete intent per
     # removed row rides the caller's transaction, so the vectors cannot be

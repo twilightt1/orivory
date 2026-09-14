@@ -220,8 +220,20 @@ async def resolve_correction(db, *, user_id, title, content, tags=None,
             "superseded": superseded, "dirtied": dirtied}
 
 
+class DerivedClosureError(RuntimeError):
+    """The derived-memory closure could not be enumerated.
+
+    Erasure must record ``unknown`` for it — returning ``[]`` on a query
+    failure would let a receipt claim a complete closure it never saw.
+    """
+
+
 async def collect_derived_ids(db, user_id, erased_ids: list) -> list:
-    """Return ids of memories deriving from erased ids. Never raises."""
+    """Return ids of memories deriving from erased ids.
+
+    Raises :class:`DerivedClosureError` when the closure cannot be read — a
+    silent ``[]`` is an unfalsifiable claim of completeness.
+    """
     try:
         erased = {str(e) for e in erased_ids}
         rows = (await db.execute(
@@ -229,5 +241,5 @@ async def collect_derived_ids(db, user_id, erased_ids: list) -> list:
         )).scalars().all()
         return [m.id for m in rows
                 if str(m.id) not in erased and _depends_on(m, erased)]
-    except Exception:
-        return []
+    except Exception as exc:
+        raise DerivedClosureError(f"derived-memory closure query failed: {exc}") from exc

@@ -14,6 +14,7 @@ import pytest
 
 from app.mcp_hub import tools as hub_tools
 from app.mcp_hub.identity import AgentPrincipal
+from app.models.erasure_receipt import ErasureReceipt
 from app.models.memory import Memory
 
 
@@ -175,23 +176,34 @@ async def test_delete_requires_write_scope(reader):
     assert result == {"error": "scope memory:write required"}
 
 
-async def test_delete_owned_memory_deletes_and_logs(writer, monkeypatch):
+async def test_delete_owned_memory_goes_through_erasure_and_logs(writer, monkeypatch):
     p, db = writer
-    removed_from_chroma = []
-
-    async def _fake_chroma_delete(memory_id):
-        removed_from_chroma.append(memory_id)
-
     memory_id = uuid.uuid4()
     db.rows = [_memory_row(memory_id, p.user_id)]
-    monkeypatch.setattr(hub_tools, "safe_delete_from_chroma", _fake_chroma_delete)
+    receipt_id = uuid.uuid4()
+    seen: list[dict] = []
+
+    async def _fake_erase(db_, user_id, memory_ids, *, requested_by):
+        seen.append({"user_id": user_id, "ids": list(memory_ids), "requested_by": requested_by})
+        return ErasureReceipt(id=receipt_id, user_id=user_id,
+                              requested_memory_ids=[str(m) for m in memory_ids],
+                              status="completed",
+                              detail={"targets": [{"memory_id": str(memory_ids[0]), "status": "deleted"}]})
+
+    monkeypatch.setattr(hub_tools, "erase_memories", _fake_erase)
     result = await hub_tools.delete_memory(memory_id=str(memory_id))
-    assert result["deleted"] is True
-    assert db.deleted and db.deleted[0].id == memory_id
+
+    assert result["deleted"] is True and result["id"] == str(memory_id)
+    assert result["receipt_id"] == str(receipt_id)
+    # The ad-hoc delete is gone: the durable erasure path is the only one.
+    assert seen == [{"user_id": p.user_id, "ids": [memory_id], "requested_by": "agent:TestAgent"}]
     ledger = [o for o in db.added if type(o).__name__ == "MemoryAccessLog"]
     assert ledger and ledger[0].action == "mcp_delete"
-    assert ledger[0].memory_id == memory_id
-    assert removed_from_chroma == [memory_id]
+    # The memory is gone by the time the ledger row lands, and `memory_id` FKs
+    # memories.id (SET NULL) — so the id rides the detail, like forget does.
+    assert ledger[0].memory_id is None
+    assert ledger[0].detail == {"deleted": True, "memory_id": str(memory_id),
+                                "receipt_id": str(receipt_id)}
     assert db.committed >= 1
 
 

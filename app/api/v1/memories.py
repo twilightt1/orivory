@@ -29,11 +29,7 @@ from app.models.memory import Memory
 from app.models.user import User
 from app.retrieval.memory.outbox import bump_revision, enqueue_upsert
 from app.retrieval.memory.retriever import MemoryRetriever
-from app.retrieval.memory.write_back import (
-    index_new_memory,
-    safe_delete_from_chroma,
-    safe_upsert_to_chroma,
-)
+from app.retrieval.memory.write_back import index_new_memory, safe_upsert_to_chroma
 from app.schemas.Orivory import (
     DigestResponse,
     MemoryCreate,
@@ -43,6 +39,7 @@ from app.schemas.Orivory import (
     RecallRequest,
     RecallResponse,
 )
+from app.services.erasure_service import erase_memories
 from app.utils.dependencies import enforce_llm_quota, get_current_verified_user
 
 log = logging.getLogger(__name__)
@@ -303,13 +300,16 @@ async def delete_memory(
     current_user: Annotated[User, Depends(get_current_verified_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> None:
+    """Delete one owned memory through the durable erasure path.
+
+    Same response shape as before (404 for foreign/missing ids — no existence
+    leak); the erase is one closure transaction that leaves a receipt and a
+    durable delete intent per affected id.
+    """
     memory = await db.get(Memory, memory_id)
     if not memory or memory.user_id != current_user.id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Memory not found.")
-    await db.delete(memory)
-    await db.commit()
-    # Write-through: remove from ChromaDB (best-effort)
-    await safe_delete_from_chroma(memory_id)
+    await erase_memories(db, current_user.id, [memory_id], requested_by="rest_api")
 
 
 # ── Phase 3.7: recall endpoint ──────────────────────────────────────────────

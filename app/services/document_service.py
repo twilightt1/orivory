@@ -108,15 +108,17 @@ async def delete_document(db: AsyncSession, document: Document, conversation: Co
     except Exception as e:
         log.warning("MinIO delete failed", extra={"error": str(e)})
 
-    await delete_document_chunks(str(conversation.id), document_id)
-
     # Unify (P1.1): also remove the cross-conversation memories derived from
-    # this document, and their vectors. Best-effort on the vector side.
+    # this document. Rows AND their durable delete intents ride the commit
+    # below; the vector purges (chunk + memory) come after it — never before
+    # it — so a failed delete can never take the DB rows with it.
     memory_ids = await delete_document_memories_async(db, document_id, user_id=conversation.user_id)
 
     await db.delete(document)
     conversation.document_count = max(0, conversation.document_count - 1)
     await db.commit()
+
+    await delete_document_chunks(str(conversation.id), document_id)
 
     if memory_ids:
         await delete_memory_vectors(memory_ids)

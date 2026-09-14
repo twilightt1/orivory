@@ -52,6 +52,14 @@ _ERROR_TEXT_LIMIT = 500
 _GENERATION_CACHE_KEY = "orivory_outbox_generation"
 
 
+class VectorDeleteUnconfirmed(RuntimeError):
+    """The vector backend did not confirm a delete.
+
+    Transient by contract: the intent stays ``pending`` and the drain retries
+    it instead of acking a delete that never happened.
+    """
+
+
 def bump_revision(memory) -> int:
     """Advance (and return) the memory's monotonic write counter.
 
@@ -264,17 +272,28 @@ async def _apply_memory_intent(db: AsyncSession, row: IndexOutbox) -> str:
     if memory is None:
         # The SQL row is gone: upsert and delete intents alike mean "forget".
         # Vector ids are the dashed UUID string (``upsert_memory`` contract).
-        await delete_memory(str(entity_id))
+        await _delete_vector_or_fail(str(entity_id))
         return "applied"
     if row.revision < int(memory.revision):
         # A newer write enqueued its own intent in the same commit; applying
         # this one would index an older revision over it.
         return "skipped"
     if row.operation == OPERATION_DELETE:
-        await delete_memory(str(memory.id))
+        await _delete_vector_or_fail(str(memory.id))
     else:
         await upsert_memory(memory)
     return "applied"
+
+
+async def _delete_vector_or_fail(entity_id: str) -> None:
+    """Raise unless the vector backend confirmed the delete.
+
+    An unconfirmed delete must never ack ``done``: the intent is the only
+    record that the vector still has to go, so a failure stays pending and
+    rides the normal backoff retry.
+    """
+    if not await delete_memory(entity_id):
+        raise VectorDeleteUnconfirmed(f"vector delete not confirmed for {entity_id}")
 
 
 __all__ = [
@@ -282,6 +301,7 @@ __all__ = [
     "OPERATION_DELETE",
     "OPERATION_UPSERT",
     "TARGET_GENERATION",
+    "VectorDeleteUnconfirmed",
     "bump_revision",
     "drain_pending",
     "enqueue_delete",

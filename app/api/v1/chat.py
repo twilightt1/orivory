@@ -211,13 +211,55 @@ async def get_session_messages(
     return {"messages": [MessageResponse.model_validate(m) for m in messages]}
 
 
+async def _purge_conversation(db: AsyncSession, conversation: Conversation) -> None:
+    """Durably delete a conversation and everything it projected.
+
+    The projected memory rows are deleted with one durable delete intent per
+    row, in the same transaction as the conversation delete
+    (``delete_document_memories_async``); the vector purges after the commit
+    are best-effort — the intents are the durable backstop. Shared by the
+    session delete and the conversation delete so the two cannot drift.
+    """
+    from sqlalchemy import select
+
+    from app.ingestion.document_memory import delete_document_memories_async
+    from app.models.document import Document
+    from app.retrieval.bm25_retriever import bm25_retriever
+    from app.retrieval.memory.vector_store import (
+        delete_memories as delete_memory_vectors,
+    )
+    from app.retrieval.vector_retriever import delete_conversation_collection
+
+    conv_id = str(conversation.id)
+
+    # Unify (P1.1): the conversation cascade-deletes its documents, so first
+    # remove the cross-conversation memories those documents projected. Ids are
+    # captured before the commit and every removed row carries an intent.
+    doc_ids = (
+        await db.execute(select(Document.id).where(Document.conversation_id == conversation.id))
+    ).scalars().all()
+    removed_memory_ids: list[str] = []
+    for doc_id in doc_ids:
+        removed_memory_ids.extend(
+            await delete_document_memories_async(db, str(doc_id), user_id=conversation.user_id)
+        )
+
+    await db.delete(conversation)
+    await db.commit()
+
+    if removed_memory_ids:
+        await delete_memory_vectors(removed_memory_ids)
+    await delete_conversation_collection(conv_id)
+    await bm25_retriever.publish_invalidate_async(conv_id)
+
+
 @router.delete("/sessions/{session_id}", status_code=204)
 async def delete_session(
     session_id: UUID,
     current_user=Depends(get_current_active_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Delete a session."""
+    """Delete a session — same durable treatment as a conversation delete."""
     conv = await db.scalar(
         select(Conversation).where(
             Conversation.id == session_id,
@@ -226,8 +268,7 @@ async def delete_session(
     )
     if not conv:
         raise HTTPException(404, detail="Session not found.")
-    await db.delete(conv)
-    await db.commit()
+    await _purge_conversation(db, conv)
 
 
 # LangGraph agents dropped — chat endpoints that need the graph raise 501.
@@ -336,36 +377,7 @@ async def delete_conversation(
     conversation: Conversation = Depends(_get_conversation),
     db: AsyncSession = Depends(get_db),
 ):
-    from sqlalchemy import select
-
-    from app.ingestion.document_memory import delete_document_memories_async
-    from app.models.document import Document
-    from app.retrieval.bm25_retriever import bm25_retriever
-    from app.retrieval.memory.vector_store import (
-        delete_memories as delete_memory_vectors,
-    )
-    from app.retrieval.vector_retriever import delete_conversation_collection
-
-    conv_id = str(conversation.id)
-
-    # Unify (P1.1): the conversation cascade-deletes its documents, so first
-    # remove the cross-conversation memories those documents projected.
-    doc_ids = (
-        await db.execute(select(Document.id).where(Document.conversation_id == conversation.id))
-    ).scalars().all()
-    removed_memory_ids: list[str] = []
-    for doc_id in doc_ids:
-        removed_memory_ids.extend(
-            await delete_document_memories_async(db, str(doc_id), user_id=conversation.user_id)
-        )
-
-    await db.delete(conversation)
-    await db.commit()
-
-    if removed_memory_ids:
-        await delete_memory_vectors(removed_memory_ids)
-    await delete_conversation_collection(conv_id)
-    await bm25_retriever.publish_invalidate_async(conv_id)
+    await _purge_conversation(db, conversation)
 
 
 

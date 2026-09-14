@@ -98,10 +98,10 @@ async def _close(client: AsyncClient) -> None:
 
 @pytest.fixture()
 def no_chroma(monkeypatch):
-    """Stub the erasure service's vector cleanup — behavioral tests cover DB
+    """Stub the erasure service's vector seams — behavioral tests cover DB
     + HTTP semantics, not live Chroma (which isn't running here)."""
     async def _noop_delete(memory_id):
-        return []
+        return True
 
     async def _no_residual(memory_ids):
         return set()
@@ -265,6 +265,11 @@ async def test_erasure_receipt_records_targets_and_deletes(no_chroma):
         assert {t["memory_id"] for t in targets} == {m1_id, m2_id}
         assert all(t["status"] == "deleted" for t in targets)
         assert all(t["vector_residual_checked"] for t in targets)
+        # Additive (Task 4): the receipt says what was verified and what the
+        # index side still owes, and every target carries its own vector state.
+        assert all(t["vector_state"] == "verified" for t in targets)
+        assert receipt["detail"]["verification"] == "verified"
+        assert receipt["detail"]["index_pending"] == 2  # one delete intent per memory
     await _close(client)
 
 

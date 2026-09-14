@@ -393,32 +393,41 @@ async def get_memory_ids_present(memory_ids: list[str]) -> set[str]:
     return {str(i) for i in (found.get("ids") or [])}
 
 
-async def delete_memory(memory_id: str) -> None:
-    """Remove a memory's vector from the collection (best-effort)."""
+async def delete_memory(memory_id: str) -> bool:
+    """Remove a memory's vector from the collection.
+
+    Returns whether the backend confirmed the delete. A failure is reported
+    (never swallowed) because the durable outbox acks a delete intent ``done``
+    from this result: ``False`` keeps it pending and retried.
+    """
     try:
         collection = await _get_collection()
         await collection.delete(ids=[memory_id])
         log.info("Deleted memory from ChromaDB", extra={"memory_id": memory_id})
+        return True
     except Exception as e:
         log.warning(
             "Failed to delete memory from ChromaDB",
             extra={"memory_id": memory_id, "error": str(e)},
         )
+        return False
 
 
-async def delete_memories(memory_ids: list[str]) -> None:
-    """Remove many memories' vectors from the collection (best-effort)."""
+async def delete_memories(memory_ids: list[str]) -> bool:
+    """Remove many memories' vectors from the collection (see ``delete_memory``)."""
     if not memory_ids:
-        return
+        return True
     try:
         collection = await _get_collection()
         await collection.delete(ids=memory_ids)
         log.info("Deleted memories from ChromaDB", extra={"n": len(memory_ids)})
+        return True
     except Exception as e:
         log.warning(
             "Failed to batch-delete memories from ChromaDB",
             extra={"n": len(memory_ids), "error": str(e)},
         )
+        return False
 
 
 def delete_memories_sync(memory_ids: list[str]) -> None:

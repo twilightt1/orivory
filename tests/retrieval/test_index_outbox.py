@@ -243,6 +243,7 @@ async def test_drain_converts_upsert_to_delete_when_the_row_is_gone(db, owner, m
 
     async def record(memory_id):
         deletes.append(memory_id)
+        return True  # the backend confirmed the delete
 
     monkeypatch.setattr(outbox, "delete_memory", record)
 
@@ -266,6 +267,7 @@ async def test_drain_applies_an_explicit_delete_intent(db, owner, monkeypatch):
 
     async def record(memory_id):
         deletes.append(memory_id)
+        return True  # the backend confirmed the delete
 
     monkeypatch.setattr(outbox, "delete_memory", record)
 
@@ -279,6 +281,26 @@ async def test_drain_applies_an_explicit_delete_intent(db, owner, monkeypatch):
 
     assert report["applied"] == 1
     assert deletes == [str(memory.id)]
+
+
+async def test_drain_keeps_an_unconfirmed_delete_pending(db, owner, monkeypatch):
+    """An unconfirmed vector delete is transient, never `done` (Task 2 review)."""
+    async def unconfirmed(_memory_id):
+        return False
+
+    monkeypatch.setattr(outbox, "delete_memory", unconfirmed)
+
+    memory = _memory(owner)
+    db.add(memory)
+    revision = outbox.bump_revision(memory)
+    await outbox.enqueue_delete(db, entity_id=memory.id.hex, tenant_id=owner.hex, revision=revision)
+    await db.commit()
+
+    assert (await outbox.drain_pending())["failed"] == 1
+    row = (await _outbox_rows())[0]
+    assert row.status == "pending" and row.attempts == 1
+    assert row.next_attempt_at is not None
+    assert "VectorDeleteUnconfirmed" in row.last_error
 
 
 async def test_drain_marks_blocked_on_dimension_mismatch(db, owner, monkeypatch):

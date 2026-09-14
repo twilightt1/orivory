@@ -1,8 +1,15 @@
 import pytest
 
+from app.database import IS_SQLITE
 from app.services import health_service
 
-pytestmark = pytest.mark.service
+# These two assert the full-stack checker map (postgres + minio + …); lite mode
+# deliberately exposes its own map (sqlite + storage + …), so they only apply
+# under a Postgres-shaped DATABASE_URL.
+pytestmark = [
+    pytest.mark.service,
+    pytest.mark.skipif(IS_SQLITE, reason="full-stack readiness map; lite mode exposes its own checks"),
+]
 
 
 @pytest.mark.asyncio
