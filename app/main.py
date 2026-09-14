@@ -1,3 +1,5 @@
+import os
+import sys
 from contextlib import asynccontextmanager
 
 import structlog
@@ -44,8 +46,50 @@ async def _drain_index_outbox_on_startup() -> None:
         log.warning("Index outbox startup drain failed", error=str(e))
 
 
+def _requested_processes() -> int:
+    """How many app processes the launcher asked for (1 = a single owner).
+
+    ``uvicorn --reload``/``--workers N`` re-launch the app in each process with
+    the same argv; ``WEB_CONCURRENCY`` is uvicorn's/Gunicorn's worker count and
+    ``UVICORN_RELOAD`` is uvicorn's env fallback for the ``--reload`` flag.
+    """
+    if os.environ.get("UVICORN_RELOAD", "").strip() or "--reload" in sys.argv:
+        return 2  # a reloader: a supervisor plus the app it restarts
+    workers = os.environ.get("WEB_CONCURRENCY", "").strip()
+    if workers.isdigit() and int(workers) > 1:
+        return int(workers)
+    if "--workers" in sys.argv:
+        index = sys.argv.index("--workers")
+        value = sys.argv[index + 1] if index + 1 < len(sys.argv) else ""
+        if value.isdigit() and int(value) > 1:
+            return int(value)
+    return 1
+
+
+def _refuse_multi_owner_local_qdrant() -> None:
+    """Local Qdrant is owned by exactly ONE process (spec §3.1).
+
+    An embedded storage folder is exclusive: the second process to touch it dies
+    with qdrant-client's raw "already accessed" RuntimeError at its first write.
+    Refuse the boot instead — before anything is served — when the launcher
+    asked for more than one process while ``QDRANT_MODE=local``.
+    """
+    from app.retrieval.vector_backend import is_local_mode
+
+    if not is_local_mode():
+        return
+    processes = _requested_processes()
+    if processes > 1:
+        raise RuntimeError(
+            f"QDRANT_MODE=local owns the storage folder {settings.QDRANT_LOCAL_PATH} "
+            f"exclusively, but the launcher asked for {processes} processes: run a "
+            "single process, or set QDRANT_MODE=server with a Qdrant server"
+        )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    _refuse_multi_owner_local_qdrant()
     log.info("Starting RAG backend", environment=settings.ENVIRONMENT, lite=settings.LITE_MODE)
     if settings.DATABASE_URL.startswith("sqlite"):
         # Lite mode: versioned fresh-install bootstrap; an existing unversioned
@@ -60,17 +104,26 @@ async def lifespan(app: FastAPI):
         log.info("Storage ready (backend=%s)", settings.STORAGE_BACKEND)
     except Exception as e:
         log.warning("Storage init failed", error=str(e))
-    if settings.MCP_HUB_ENABLED:
-        # Starlette does not run a mounted app's lifespan, so the host lifespan
-        # must run the MCP session manager itself (see app/mcp_hub/server.py).
-        from app.mcp_hub.server import build_mcp_server
+    try:
+        if settings.MCP_HUB_ENABLED:
+            # Starlette does not run a mounted app's lifespan, so the host
+            # lifespan must run the MCP session manager itself (see
+            # app/mcp_hub/server.py).
+            from app.mcp_hub.server import build_mcp_server
 
-        async with build_mcp_server().session_manager.run():
-            log.info("MCP hub ready", path="/mcp")
+            async with build_mcp_server().session_manager.run():
+                log.info("MCP hub ready", path="/mcp")
+                yield
+        else:
             yield
-    else:
-        yield
-    log.info("Shutting down")
+    finally:
+        # Always close the vector client(s): in local mode this is what releases
+        # the storage-folder lock for the next process — or for the offline
+        # migration CLI that owns the folder during a cutover.
+        from app.retrieval.vector_backend import close_clients
+
+        await close_clients()
+        log.info("Shutting down")
 
 
 app = FastAPI(

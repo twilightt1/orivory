@@ -1,5 +1,13 @@
+from urllib.parse import urlsplit
+
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+def _is_local_host(url: str) -> bool:
+    return (urlsplit(url).hostname or "") in _LOCAL_HOSTS
 
 
 class Settings(BaseSettings):
@@ -73,6 +81,15 @@ class Settings(BaseSettings):
     COMPRESSION_THRESHOLD_CHARS: int = 2000
     COMPRESSION_MODEL: str = "gpt-4o-mini"
     CHROMA_LOCAL_PATH: str = "/data/chroma"
+
+    # ── Qdrant vector backend ─────────────────────────────────────────────────
+    # "local" runs Qdrant embedded in-process against QDRANT_LOCAL_PATH — one
+    # process owns that folder (qdrant-client locks it; a second client on the
+    # same folder refuses); "server" talks to QDRANT_URL.
+    QDRANT_URL: str = "http://localhost:6333"
+    QDRANT_API_KEY: str = ""
+    QDRANT_MODE: str = "server"  # server | local
+    QDRANT_LOCAL_PATH: str = "/data/qdrant"
 
     # lite: "fs" stores uploads on the local filesystem instead of MinIO.
     STORAGE_BACKEND: str = "minio"  # minio | fs
@@ -204,6 +221,14 @@ class Settings(BaseSettings):
             # In-process background work, local chroma, filesystem storage unless overridden.
             if self.CHROMA_MODE == "http" and self.CHROMA_HOST == "localhost":
                 self.CHROMA_MODE = "local"
+            # Same flip for Qdrant: no API key + a localhost URL means there is
+            # no server to talk to, so own a local folder instead.
+            if (
+                self.QDRANT_MODE == "server"
+                and not self.QDRANT_API_KEY
+                and _is_local_host(self.QDRANT_URL)
+            ):
+                self.QDRANT_MODE = "local"
             if self.STORAGE_BACKEND == "minio" and not self.MINIO_ACCESS_KEY:
                 self.STORAGE_BACKEND = "fs"
             # Zero-key lite must still remember: no embedding API key means
@@ -237,6 +262,10 @@ class Settings(BaseSettings):
     def _validate_ai_runtime_settings(self) -> None:
         if self.EMBED_BATCH_SIZE < 1 or self.EMBED_BATCH_SIZE > 2048:
             raise ValueError("EMBED_BATCH_SIZE must be between 1 and 2048")
+        if self.QDRANT_MODE not in {"server", "local"}:
+            # A typo'd mode would silently boot a server client against a folder
+            # path (or the reverse); refuse instead.
+            raise ValueError("QDRANT_MODE must be one of: server, local")
         allowed_modes = {"warn_only", "fail_open", "fail_closed"}
         if self.EVALUATOR_FAILURE_MODE not in allowed_modes:
             raise ValueError(
