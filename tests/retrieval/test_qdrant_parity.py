@@ -709,12 +709,28 @@ def test_payload_indexes_are_only_added_once(monkeypatch):
     assert [name for name, _ in client.created] == ["pinned", "salience", "captured_at"]
 
 
-def test_other_kinds_have_no_payload_indexes(monkeypatch):
+def test_the_chunk_kind_has_its_own_payload_indexes(monkeypatch):
+    """The chunk filters read tenant + conversation + document: server mode
+    indexes exactly those fields, never the memory kind's set."""
     client = _RecorderClient()
     monkeypatch.setattr(vector_backend, "is_local_mode", lambda: False)
     monkeypatch.setattr(vector_backend, "get_sync_client", lambda: client)
 
     vector_backend.ensure_collection("chunk", OTHER_GENERATION, dim=DIM)
+
+    assert client.created == [
+        ("user_id", qm.PayloadSchemaType.KEYWORD),
+        ("conversation_id", qm.PayloadSchemaType.KEYWORD),
+        ("document_id", qm.PayloadSchemaType.KEYWORD),
+    ]
+
+
+def test_an_unknown_kind_gets_no_payload_indexes(monkeypatch):
+    client = _RecorderClient()
+    monkeypatch.setattr(vector_backend, "is_local_mode", lambda: False)
+    monkeypatch.setattr(vector_backend, "get_sync_client", lambda: client)
+
+    vector_backend.ensure_collection("not-a-kind", OTHER_GENERATION, dim=DIM)
 
     assert client.created == []
 

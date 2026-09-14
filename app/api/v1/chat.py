@@ -224,11 +224,13 @@ async def _purge_conversation(db: AsyncSession, conversation: Conversation) -> N
 
     from app.ingestion.document_memory import delete_document_memories_async
     from app.models.document import Document
+    from app.models.document_chunk import DocumentChunk
     from app.retrieval.bm25_retriever import bm25_retriever
+    from app.retrieval.memory.outbox import enqueue_chunk_delete
     from app.retrieval.memory.vector_store import (
         delete_memories as delete_memory_vectors,
     )
-    from app.retrieval.vector_retriever import delete_conversation_collection
+    from app.retrieval.vector_retriever import delete_conversation_chunks
 
     conv_id = str(conversation.id)
 
@@ -244,12 +246,24 @@ async def _purge_conversation(db: AsyncSession, conversation: Conversation) -> N
             await delete_document_memories_async(db, str(doc_id), user_id=conversation.user_id)
         )
 
+    # The chunk rows go with the documents; capture their ids (and a durable
+    # delete intent each) in this same transaction, before the cascade.
+    if doc_ids:
+        chunk_ids = (
+            await db.execute(
+                select(DocumentChunk.id).where(DocumentChunk.document_id.in_(doc_ids))
+            )
+        ).scalars().all()
+        if chunk_ids:
+            await enqueue_chunk_delete(db, chunk_ids=chunk_ids, tenant_id=conversation.user_id)
+
     await db.delete(conversation)
     await db.commit()
 
     if removed_memory_ids:
         await delete_memory_vectors(removed_memory_ids)
-    await delete_conversation_collection(conv_id)
+    # Immediate attempt; the intents above are the durable proof each point goes.
+    await delete_conversation_chunks(conv_id, user_id=str(conversation.user_id))
     await bm25_retriever.publish_invalidate_async(conv_id)
 
 

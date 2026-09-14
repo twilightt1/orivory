@@ -1,143 +1,300 @@
+"""Qdrant-backed store for document CHILD chunks (spec §4.2).
+
+One PHYSICAL collection per generation — never one per conversation: the
+per-conversation ``rag_conv_<id>`` collections are gone, and a conversation is
+a payload filter inside the generation's collection instead. The tenant clause
+is the security boundary and is built once, in
+:mod:`app.retrieval.qdrant_filter`; nothing here hand-rolls a ``Filter``.
+
+The SQL ``DocumentChunk`` row stays the source of truth. The payload is derived,
+verifiable index data (see :func:`_chunk_payload` for the contract); a write
+verifies the generation's contract first (the collection's dim/metric AND the
+manifest row's fingerprint), exactly like the memory store.
+
+An upsert/delete intent is enqueued in the SAME transaction as the SQL write
+(:mod:`app.retrieval.memory.outbox`); the post-commit attempts here are the fast
+path, never the record of truth.
+"""
 from __future__ import annotations
 
-import asyncio
 import logging
-import time
-from collections.abc import Callable
+from typing import Any
 
-import chromadb
-import httpx
+from qdrant_client import models as qm
 
-from app.config import settings
+from app.models.document_chunk import DocumentChunk
+from app.retrieval import vector_backend
 from app.retrieval.embedder import (
-    astamp_collection_dim,
-    check_collection_dim,
+    EmbeddingDimensionMismatch,
+    check_generation_contract,
     embed_query,
     embed_texts,
     embed_texts_sync,
-    stamp_collection_dim,
 )
+from app.retrieval.embedding_fingerprint import canonical_fingerprint, current_fingerprint
+from app.retrieval.qdrant_filter import build_chunk_filter
 
 log = logging.getLogger(__name__)
-_async_client: chromadb.AsyncHttpClient | None = None
-_sync_client: chromadb.HttpClient | None = None
+
+KIND_CHUNK = "chunk"
 
 
 class VectorUnavailableError(Exception):
-    """ChromaDB itself is unreachable (not: empty collection, no matches).
+    """The vector backend itself is unreachable (not: empty collection, no matches).
 
-    Raised instead of returning [] so callers can distinguish "vector
-    search is down" (degrade to BM25-only + flag it) from "no vectors".
+    Raised instead of returning [] so callers can distinguish "vector search
+    is down" (degrade to BM25-only + flag it) from "no vectors".
     """
 
 
-def with_retry(retries: int = 3, base_delay: float = 1.0):
-    def decorator(func: Callable):
-        if asyncio.iscoroutinefunction(func):
-            async def async_wrapper(*args, **kwargs):
-                last_exc = None
-                for i in range(retries):
-                    try:
-                        return await func(*args, **kwargs)
-                    except (ValueError, httpx.ConnectError, httpx.HTTPError, Exception) as e:
-                        last_exc = e
-
-                        if any(msg in str(e) for msg in ["Could not connect", "connection", "Refused"]) or \
-                           isinstance(e, (ValueError, httpx.ConnectError)):
-                            delay = base_delay * (2 ** i)
-                            log.warning(f"Chroma connection failed (attempt {i+1}/{retries}). Retrying in {delay}s...", extra={"error": str(e)})
-                            await asyncio.sleep(delay)
-                        else:
-                            raise e
-                log.error("Failed to connect to Chroma after all retries.", extra={"error": str(last_exc)})
-                raise last_exc
-            return async_wrapper
-        else:
-            def sync_wrapper(*args, **kwargs):
-                last_exc = None
-                for i in range(retries):
-                    try:
-                        return func(*args, **kwargs)
-                    except (ValueError, httpx.ConnectError, httpx.HTTPError, Exception) as e:
-                        last_exc = e
-                        if any(msg in str(e) for msg in ["Could not connect", "connection", "Refused"]) or \
-                           isinstance(e, (ValueError, httpx.ConnectError)):
-                            delay = base_delay * (2 ** i)
-                            log.warning(f"Chroma connection failed (attempt {i+1}/{retries}). Retrying in {delay}s...", extra={"error": str(e)})
-                            time.sleep(delay)
-                        else:
-                            raise e
-                log.error("Failed to connect to Chroma after all retries.", extra={"error": str(last_exc)})
-                raise last_exc
-            return sync_wrapper
-    return decorator
+def _current_dim() -> int:
+    """The ACTIVE embedding dimension (384 local / 1024 Jina / 1536 OpenAI)."""
+    return int(current_fingerprint()["dim"])
 
 
-@with_retry()
-async def _get_async_client() -> chromadb.AsyncHttpClient:
-    global _async_client
-    if _async_client is None:
-        _async_client = await chromadb.AsyncHttpClient(
-            host=settings.CHROMA_HOST,
-            port=settings.CHROMA_PORT,
-        )
-    return _async_client
+# ── chunk <-> payload helpers ───────────────────────────────────────────────
 
 
-@with_retry()
-def _get_sync_client() -> chromadb.HttpClient:
-    global _sync_client
-    if _sync_client is None:
-        _sync_client = chromadb.HttpClient(
-            host=settings.CHROMA_HOST,
-            port=settings.CHROMA_PORT,
-        )
-    return _sync_client
+def _chunk_metadata(chunk: DocumentChunk) -> dict[str, Any]:
+    return dict(chunk.chunk_metadata or {})
 
 
-def _col_name(conversation_id: str) -> str:
-    return f"rag_conv_{conversation_id}"
+def _chunk_payload(chunk: DocumentChunk, *, user_id: str) -> dict[str, Any]:
+    """The payload written next to the vector — the chunk contract (§4.2).
+
+    Identity and scope come from SQL (never from a caller-supplied id), the
+    revision is the row's monotonic counter, and ``fingerprint`` is the
+    embedding contract the vector was produced under. The embedded text rides
+    the payload so a result can carry it; consumers still hydrate content from
+    SQL. ``parent_id`` is omitted when absent (a payload never carries a null
+    for a consumer to re-interpret).
+    """
+    metadata = _chunk_metadata(chunk)
+    payload: dict[str, Any] = {
+        "kind": KIND_CHUNK,
+        "user_id": str(user_id),
+        "conversation_id": str(metadata.get("conversation_id", "")),
+        "document_id": str(chunk.document_id),
+        "chunk_id": str(chunk.id),
+        "revision": int(chunk.revision or 1),
+        "fingerprint": canonical_fingerprint(current_fingerprint()),
+        "child_index": int(metadata.get("child_index", chunk.chunk_index)),
+        "content": chunk.content,
+    }
+    parent_id = metadata.get("parent_id")
+    if parent_id:
+        payload["parent_id"] = str(parent_id)
+    return payload
 
 
+def _point(chunk: DocumentChunk, vector: list[float], *, user_id: str) -> qm.PointStruct:
+    """One point: the chunk's UUID as the point id (Qdrant's own id type)."""
+    return qm.PointStruct(
+        id=str(chunk.id), vector=vector, payload=_chunk_payload(chunk, user_id=user_id)
+    )
 
 
-async def upsert_chunks(conversation_id: str, chunks: list[dict]) -> None:
+# ── generation + contract (the manifest is the only pointer) ────────────────
+
+
+def _generation_sync() -> tuple[str, str | None]:
+    """(generation, manifest fingerprint) for kind=chunk, sync face."""
+    from app.retrieval.memory import outbox  # local: outbox imports this module
+
+    return outbox.active_generation_sync(kind=outbox.KIND_CHUNK)
+
+
+async def _generation() -> tuple[str, str | None]:
+    """(generation, manifest fingerprint) for kind=chunk, async face."""
+    from app.retrieval.memory import outbox
+
+    return await outbox.active_generation(kind=outbox.KIND_CHUNK)
+
+
+def _open_collection_sync(embedding_dim: int) -> tuple[Any, str, str | None]:
+    """Sync face: client + the active generation, created if missing."""
+    client = vector_backend.get_sync_client()
+    generation, manifest_fingerprint = _generation_sync()
+    vector_backend.ensure_collection(KIND_CHUNK, generation, embedding_dim)
+    return client, generation, manifest_fingerprint
+
+
+async def _open_collection(embedding_dim: int) -> tuple[Any, str, str | None]:
+    """Async face: the same three facts, without blocking the event loop."""
+    client = vector_backend.get_async_client()
+    generation, manifest_fingerprint = await _generation()
+    await vector_backend.ensure_collection_async(KIND_CHUNK, generation, embedding_dim)
+    return client, generation, manifest_fingerprint
+
+
+def _checked_collection_sync(embedding_dim: int) -> tuple[Any, str, int]:
+    """Sync face plus the contract guard — verified before anything is written."""
+    client, generation, manifest_fingerprint = _open_collection_sync(embedding_dim)
+    count = int(client.count(generation).count)
+    check_generation_contract(
+        vector_backend.collection_info(KIND_CHUNK, generation),
+        embedding_dim,
+        manifest_fingerprint=manifest_fingerprint,
+        collection_is_empty=count == 0,
+    )
+    return client, generation, count
+
+
+async def _checked_collection(embedding_dim: int) -> tuple[Any, str, int]:
+    """Async face plus the contract guard."""
+    client, generation, manifest_fingerprint = await _open_collection(embedding_dim)
+    count = int((await client.count(generation)).count)
+    check_generation_contract(
+        await vector_backend.collection_info_async(KIND_CHUNK, generation),
+        embedding_dim,
+        manifest_fingerprint=manifest_fingerprint,
+        collection_is_empty=count == 0,
+    )
+    return client, generation, count
+
+
+# ── public API: writes ──────────────────────────────────────────────────────
+
+
+async def upsert_chunks(chunks: list[DocumentChunk], *, user_id: str) -> int:
+    """Embed child chunks and write them to the active generation. Returns count.
+
+    ``user_id`` is the owner resolved from SQL by the caller (never a
+    caller-supplied tenant). A contract mismatch propagates as
+    :class:`EmbeddingDimensionMismatch` — indexing into a generation whose
+    contract cannot be verified is an integrity failure, not a retry.
+    """
     if not chunks:
-        return
-    cli        = await _get_async_client()
-    collection = await cli.get_or_create_collection(
-        _col_name(conversation_id),
-        metadata={"hnsw:space": "cosine"},
+        return 0
+    vectors = await embed_texts([chunk.content for chunk in chunks])
+    client, generation, _ = await _checked_collection(len(vectors[0]))
+    await client.upsert(
+        collection_name=generation,
+        points=[
+            _point(chunk, vectors[index], user_id=user_id)
+            for index, chunk in enumerate(chunks)
+        ],
     )
-    embeddings = await embed_texts([c["content"] for c in chunks])
-    await astamp_collection_dim(collection, len(embeddings[0]))
-    await collection.upsert(
-        ids=[c["id"] for c in chunks],
-        documents=[c["content"] for c in chunks],
-        embeddings=embeddings,
-        metadatas=[c["metadata"] for c in chunks],
-    )
-    log.info("Upserted child chunks", extra={"conversation_id": conversation_id, "n": len(chunks)})
+    log.info("Upserted chunks into Qdrant", extra={"n": len(chunks), "user_id": str(user_id)})
+    return len(chunks)
 
 
-def upsert_chunks_sync(conversation_id: str, chunks: list[dict]) -> None:
+def upsert_chunks_sync(chunks: list[DocumentChunk], *, user_id: str) -> int:
+    """Synchronous variant of :func:`upsert_chunks` (ingestion / CLI face)."""
     if not chunks:
-        return
-    cli        = _get_sync_client()
-    collection = cli.get_or_create_collection(
-        _col_name(conversation_id),
-        metadata={"hnsw:space": "cosine"},
+        return 0
+    vectors = embed_texts_sync([chunk.content for chunk in chunks])
+    client, generation, _ = _checked_collection_sync(len(vectors[0]))
+    client.upsert(
+        collection_name=generation,
+        points=[
+            _point(chunk, vectors[index], user_id=user_id)
+            for index, chunk in enumerate(chunks)
+        ],
     )
-    embeddings = embed_texts_sync([c["content"] for c in chunks])
-    stamp_collection_dim(collection, len(embeddings[0]))
-    collection.upsert(
-        ids=[c["id"] for c in chunks],
-        documents=[c["content"] for c in chunks],
-        embeddings=embeddings,
-        metadatas=[c["metadata"] for c in chunks],
+    log.info("Upserted chunks into Qdrant (sync)", extra={"n": len(chunks)})
+    return len(chunks)
+
+
+# ── public API: deletes ─────────────────────────────────────────────────────
+
+
+async def delete_chunks(chunk_ids: list[str]) -> bool:
+    """Remove points by chunk id; ``True`` only when absence was read back.
+
+    Deliberately UNGUARDED by the contract check: erasure must still work when
+    a generation's contract is stale, and the durable outbox acks a delete
+    intent ``done`` from this result — ``False`` keeps it pending and retried.
+    """
+    if not chunk_ids:
+        return True
+    try:
+        client, generation, _ = await _open_collection(_current_dim())
+        await client.delete(
+            collection_name=generation,
+            points_selector=qm.PointIdsList(points=list(chunk_ids)),
+        )
+        survivors = await client.retrieve(
+            collection_name=generation, ids=list(chunk_ids), with_payload=False
+        )
+        if survivors:
+            log.warning("Chunk delete not confirmed", extra={"still_present": len(survivors)})
+            return False
+        log.info("Deleted chunks from Qdrant", extra={"n": len(chunk_ids)})
+        return True
+    except Exception as e:
+        log.warning(
+            "Failed to delete chunks from Qdrant",
+            extra={"n": len(chunk_ids), "error": str(e)},
+        )
+        return False
+
+
+async def _delete_filtered(chunk_filter: qm.Filter, *, what: str) -> bool:
+    """Server-side filtered delete + count readback (no get-then-delete)."""
+    try:
+        client, generation, _ = await _open_collection(_current_dim())
+        await client.delete(collection_name=generation, points_selector=chunk_filter)
+        remaining = await client.count(collection_name=generation, count_filter=chunk_filter)
+        if int(remaining.count):
+            log.warning("Filtered chunk delete not confirmed", extra={"what": what})
+            return False
+        log.info("Deleted chunks from Qdrant", extra={"scope": what})
+        return True
+    except Exception as e:
+        log.warning(
+            "Failed to delete chunks by filter from Qdrant",
+            extra={"scope": what, "error": str(e)},
+        )
+        return False
+
+
+def _delete_filtered_sync(chunk_filter: qm.Filter, *, what: str) -> bool:
+    """Synchronous twin of :func:`_delete_filtered` (ingestion / CLI face)."""
+    try:
+        client, generation, _ = _open_collection_sync(_current_dim())
+        client.delete(collection_name=generation, points_selector=chunk_filter)
+        remaining = client.count(collection_name=generation, count_filter=chunk_filter)
+        if int(remaining.count):
+            log.warning("Filtered chunk delete not confirmed", extra={"what": what})
+            return False
+        return True
+    except Exception as e:
+        log.warning(
+            "Failed to delete chunks by filter from Qdrant (sync)",
+            extra={"scope": what, "error": str(e)},
+        )
+        return False
+
+
+async def delete_document_chunks(
+    conversation_id: str, document_id: str, *, user_id: str
+) -> bool:
+    """Delete one document's points with a server-side filtered delete."""
+    return await _delete_filtered(
+        build_chunk_filter(user_id, conversation_id, document_id=document_id),
+        what=f"document:{document_id}",
     )
 
 
+def delete_document_chunks_sync(
+    conversation_id: str, document_id: str, *, user_id: str
+) -> bool:
+    """Synchronous variant of :func:`delete_document_chunks`."""
+    return _delete_filtered_sync(
+        build_chunk_filter(user_id, conversation_id, document_id=document_id),
+        what=f"document:{document_id}",
+    )
+
+
+async def delete_conversation_chunks(conversation_id: str, *, user_id: str) -> bool:
+    """Delete a whole conversation's points (the session/document cascade)."""
+    return await _delete_filtered(
+        build_chunk_filter(user_id, conversation_id), what=f"conversation:{conversation_id}"
+    )
+
+
+# ── public API: search ──────────────────────────────────────────────────────
 
 
 async def search(
@@ -145,82 +302,108 @@ async def search(
     top_k: int,
     conversation_id: str,
     hyde_text: str | None = None,
+    *,
+    user_id: str | None = None,
 ) -> list[dict]:
+    """Semantic search over the active chunk generation.
+
+    Returns the pinned shape, best first:
+        ``{content, score, source, rank, metadata, child_id, parent_id}``
+
+    ``score`` is the cosine SIMILARITY the store reports (never ``1 - dist``),
+    and the list is sorted by ``(-score, child_id)`` so equal scores have a
+    stable order. Scope is the conversation — plus the tenant clause when
+    ``user_id`` is given (the API face must pass it).
+
+    Raises :class:`VectorUnavailableError` when the generation cannot be
+    acquired or the count/query calls themselves fail — a vector outage is a
+    readiness signal, never an empty list — and
+    :class:`EmbeddingDimensionMismatch` on a contract mismatch. Only a
+    genuinely empty generation (or a query matching nothing) yields ``[]``.
+    """
+    chunk_filter = build_chunk_filter(user_id, conversation_id)
     try:
-        cli        = await _get_async_client()
-        collection = await cli.get_collection(_col_name(conversation_id))
-    except Exception as exc:
-        raise VectorUnavailableError(f"ChromaDB unreachable: {exc}") from exc
+        # The read path opens the generation at the CONTRACT dim (the active
+        # fingerprint), never the query's.
+        client, generation, manifest_fingerprint = await _open_collection(_current_dim())
+    except Exception as e:
+        log.warning("Qdrant unavailable for chunk search", extra={"error": str(e)})
+        raise VectorUnavailableError(f"Qdrant unreachable for chunk search: {e}") from e
 
-    count = await collection.count()
-    if count == 0:
+    try:
+        count = int((await client.count(generation)).count)
+    except EmbeddingDimensionMismatch:
+        raise
+    except Exception as e:
+        log.warning("Qdrant count failed for chunk search", extra={"error": str(e)})
+        raise VectorUnavailableError(f"Qdrant chunk search failed at count: {e}") from e
+
+    # Fail loud on backend/dim switches; never stamp/write the manifest here
+    # (read path). An empty generation has nothing to verify and no points.
+    if count == 0 or top_k <= 0:
         return []
-
 
     embed_input = hyde_text if hyde_text else query
-    embedding   = await embed_query(embed_input)
-
-    # Fail loud on backend/dim switches; never stamp here (read path). The
-    # count lets the guard quarantine an unstamped populated collection.
-    check_collection_dim(
-        collection,
-        len(embedding),
-        collection_is_empty=count == 0,
-    )
-
-    results = await collection.query(
-        query_embeddings=[embedding],
-        n_results=min(top_k, count),
-    )
-
-    if not results["documents"] or not results["documents"][0]:
-        return []
-
-    return [
-        {
-            "content":   doc,
-            "score":     1 - dist,
-            "source":    "vector",
-            "rank":      i,
-            "metadata":  meta,
-            "child_id":  meta.get("child_id", ""),
-            "parent_id": meta.get("parent_id", ""),
-        }
-        for i, (doc, dist, meta) in enumerate(zip(
-            results["documents"][0],
-            results["distances"][0],
-            results["metadatas"][0], strict=False,
-        ))
-    ]
-
-
-
-
-async def delete_document_chunks(conversation_id: str, document_id: str) -> None:
+    embedding = await embed_query(embed_input)
     try:
-        cli        = await _get_async_client()
-        collection = await cli.get_collection(_col_name(conversation_id))
-        results    = await collection.get(where={"document_id": {"$eq": document_id}})
-        if results["ids"]:
-            await collection.delete(ids=results["ids"])
+        check_generation_contract(
+            await vector_backend.collection_info_async(KIND_CHUNK, generation),
+            len(embedding),
+            manifest_fingerprint=manifest_fingerprint,
+            collection_is_empty=False,
+        )
+    except EmbeddingDimensionMismatch:
+        raise
     except Exception as e:
-        log.warning("Failed to delete chunks", extra={"error": str(e)})
+        # Reading the contract needs the store too: an unreadable contract is
+        # an outage, while a READABLE mismatch stays the integrity error above.
+        log.warning("Qdrant contract check failed for chunk search", extra={"error": str(e)})
+        raise VectorUnavailableError(
+            f"Qdrant chunk search failed at contract check: {e}"
+        ) from e
 
-
-def delete_document_chunks_sync(conversation_id: str, document_id: str) -> None:
     try:
-        cli = _get_sync_client()
-        collection = cli.get_collection(_col_name(conversation_id))
-        results = collection.get(where={"document_id": {"$eq": document_id}})
-        if results["ids"]:
-            collection.delete(ids=results["ids"])
+        response = await client.query_points(
+            collection_name=generation,
+            query=list(embedding),
+            query_filter=chunk_filter,
+            limit=min(top_k, count),
+        )
+    except EmbeddingDimensionMismatch:
+        raise
     except Exception as e:
-        log.warning("Failed to delete chunks sync", extra={"error": str(e)})
+        log.warning("Qdrant query failed for chunk search", extra={"error": str(e)})
+        raise VectorUnavailableError(f"Qdrant chunk search failed at query: {e}") from e
+
+    items: list[dict] = []
+    for point in response.points:
+        payload = dict(point.payload or {})
+        content = payload.pop("content", None)
+        items.append(
+            {
+                "content": content,
+                "score": float(point.score),
+                "source": "vector",
+                "rank": 0,
+                "metadata": payload,
+                "child_id": str(payload.get("chunk_id") or ""),
+                "parent_id": str(payload.get("parent_id") or ""),
+            }
+        )
+    items.sort(key=lambda item: (-item["score"], item["child_id"]))
+    for rank, item in enumerate(items):
+        item["rank"] = rank
+    return items
 
 
-async def delete_conversation_collection(conversation_id: str) -> None:
-    try:
-        cli = await _get_async_client()
-        await cli.delete_collection(_col_name(conversation_id))
-    except Exception:
-        pass
+__all__ = [
+    "KIND_CHUNK",
+    "VectorUnavailableError",
+    "delete_chunks",
+    "delete_conversation_chunks",
+    "delete_document_chunks",
+    "delete_document_chunks_sync",
+    "search",
+    "upsert_chunks",
+    "upsert_chunks_sync",
+]

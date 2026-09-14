@@ -18,6 +18,7 @@ from app import database
 from app.ingestion import document_memory
 from app.models.conversation import Conversation
 from app.models.document import Document
+from app.models.document_chunk import DocumentChunk
 from app.models.entity import Entity, MemoryEntity, Relation
 from app.models.erasure_receipt import ErasureReceipt
 from app.models.index_outbox import IndexOutbox
@@ -33,6 +34,20 @@ from app.utils.chunker import ParentChunk
 
 def _memory(user_id, content="x", **kwargs) -> Memory:
     return Memory(id=uuid.uuid4(), user_id=user_id, content=content, tags=[], **kwargs)
+
+
+def _chunk(document: Document, *, index: int = 0) -> DocumentChunk:
+    """A child chunk as the pipeline writes it (id, revision, metadata)."""
+    return DocumentChunk(
+        id=uuid.uuid4(), document_id=document.id, content=f"chunk {index}",
+        chunk_index=index, revision=1,
+        chunk_metadata={
+            "document_id": str(document.id),
+            "conversation_id": str(document.conversation_id),
+            "chunk_type": "child",
+            "child_index": index,
+        },
+    )
 
 
 async def _owner(db) -> uuid.UUID:
@@ -429,13 +444,15 @@ async def test_delete_document_purges_chunks_after_the_commit(db, no_chroma, mon
     conversation = Conversation(id=uuid.uuid4(), user_id=uid, title="conv", document_count=1)
     doc = Document(id=uuid.uuid4(), conversation_id=conversation.id, filename="f.pdf",
                    file_path="uploads/f.pdf")
-    db.add_all([conversation, doc])
+    chunks = [_chunk(doc, index=i) for i in range(2)]
+    db.add_all([conversation, doc, *chunks])
     await db.flush()
     projected = _memory(uid, "projected", source_type="file_upload", source_ref=str(doc.id))
     db.add(projected)
     await db.commit()
 
     order: list[str] = []
+    purges: list[tuple] = []
     real_commit = db.commit
 
     async def _commit_spy():
@@ -443,8 +460,9 @@ async def test_delete_document_purges_chunks_after_the_commit(db, no_chroma, mon
         await real_commit()
         order.append("after-commit")
 
-    async def _chunks(*_args, **_kwargs):
+    async def _chunks(*args, **kwargs):
         order.append("chunk-purge")
+        purges.append((args, kwargs))
 
     async def _vectors(*_args, **_kwargs):
         order.append("memory-purge")
@@ -463,14 +481,21 @@ async def test_delete_document_purges_chunks_after_the_commit(db, no_chroma, mon
 
     assert order.index("after-commit") < order.index("chunk-purge")
     assert order.index("commit") < order.index("memory-purge")
+    # The purge is the immediate attempt for the document's points, scoped to
+    # the owner — the delete intents above it are the durable proof.
+    assert purges == [((str(conversation.id), str(doc.id)), {"user_id": str(uid)})]
 
     async with database.AsyncSessionLocal() as session:
         doc_gone = await session.get(Document, doc.id)
         mem_gone = await session.get(Memory, projected.id)
-    assert doc_gone is None and mem_gone is None
+        chunk_gone = await session.get(DocumentChunk, chunks[0].id)
+    assert doc_gone is None and mem_gone is None and chunk_gone is None
     intents = await _outbox_rows()
-    assert [(row.entity_id, row.operation) for row in intents] == [
-        (projected.id.hex, "delete")]
+    assert sorted((row.entity_id, row.operation) for row in intents) == sorted([
+        (projected.id.hex, "delete"),
+        (chunks[0].id.hex, "delete"),
+        (chunks[1].id.hex, "delete"),
+    ])
 
 
 async def test_delete_session_enqueues_intents_and_purges_best_effort(db, no_chroma, monkeypatch):
@@ -481,26 +506,28 @@ async def test_delete_session_enqueues_intents_and_purges_best_effort(db, no_chr
     conversation = Conversation(id=uuid.uuid4(), user_id=uid, title="session", document_count=1)
     doc = Document(id=uuid.uuid4(), conversation_id=conversation.id, filename="f.pdf",
                    file_path="uploads/f.pdf")
-    db.add_all([conversation, doc])
+    chunks = [_chunk(doc, index=i) for i in range(2)]
+    db.add_all([conversation, doc, *chunks])
     await db.flush()
     projected = _memory(uid, "projected", source_type="file_upload", source_ref=str(doc.id))
     db.add(projected)
     await db.commit()
 
     purged: list[list[str]] = []
+    swept: list[tuple] = []
     invalidated: list[str] = []
 
     async def _vectors(ids):
         purged.append([str(i) for i in ids])
 
-    async def _collection(_conv_id):
-        return None
+    async def _chunks(*args, **kwargs):
+        swept.append((args, kwargs))
 
     async def _invalidate(conv_id):
         invalidated.append(conv_id)
 
     monkeypatch.setattr(vector_store, "delete_memories", _vectors)
-    monkeypatch.setattr(vector_retriever, "delete_conversation_collection", _collection)
+    monkeypatch.setattr(vector_retriever, "delete_conversation_chunks", _chunks)
     monkeypatch.setattr(
         "app.retrieval.bm25_retriever.bm25_retriever.publish_invalidate_async", _invalidate)
 
@@ -509,9 +536,14 @@ async def test_delete_session_enqueues_intents_and_purges_best_effort(db, no_chr
     async with database.AsyncSessionLocal() as session:
         assert await session.get(Conversation, conversation.id) is None
         assert await session.get(Memory, projected.id) is None
-    assert [(row.entity_id, row.operation) for row in await _outbox_rows()] == [
-        (projected.id.hex, "delete")]
+        assert await session.get(DocumentChunk, chunks[0].id) is None
+    assert sorted((row.entity_id, row.operation) for row in await _outbox_rows()) == sorted([
+        (projected.id.hex, "delete"),
+        (chunks[0].id.hex, "delete"),
+        (chunks[1].id.hex, "delete"),
+    ])
     assert purged == [[str(projected.id)]]
+    assert swept == [((str(conversation.id),), {"user_id": str(uid)})]
     assert invalidated == [str(conversation.id)]
 
 

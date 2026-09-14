@@ -47,6 +47,11 @@ _PAYLOAD_INDEXES: dict[str, dict[str, PayloadSchemaType]] = {
         "salience": PayloadSchemaType.FLOAT,
         "captured_at": PayloadSchemaType.DATETIME,
     },
+    "chunk": {
+        "user_id": PayloadSchemaType.KEYWORD,
+        "conversation_id": PayloadSchemaType.KEYWORD,
+        "document_id": PayloadSchemaType.KEYWORD,
+    },
 }
 
 

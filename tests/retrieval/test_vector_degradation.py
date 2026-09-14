@@ -1,12 +1,10 @@
-"""Chroma-down degradation contract on the chat retrieval path.
+"""Chunk-store-down degradation contract on the chat retrieval path.
 
 Contract:
-- vector_retriever.search raises VectorUnavailableError when Chroma itself
-  is unreachable (client acquisition fails).
-- Empty collection / no matching docs still return [] (genuinely no vectors).
-- retrieval_agent sets state["vector_unavailable"]=True only when ALL
-  vector calls failed AND no vector results came back; BM25 results are
-  still used (Postgres-only degradation, never a silent total miss).
+- vector_retriever.search raises VectorUnavailableError when the vector
+  backend is unreachable (generation acquisition fails).
+- An empty generation / no matching docs still return [] (genuinely no
+  vectors).
 - The personal-memory path (memory.vector_store.search_memories) mirrors
   the same typed-outage contract; see TestMemorySearchAvailability.
 """
@@ -16,32 +14,28 @@ import pytest
 
 
 class TestVectorUnavailableSignal:
-    async def test_search_raises_when_chroma_unreachable(self, monkeypatch):
+    async def test_search_raises_when_the_chunk_store_is_unreachable(self, monkeypatch):
         from app.retrieval import vector_retriever
 
-        async def boom():
+        async def boom(_dim):
             raise ConnectionError("refused")
 
-        monkeypatch.setattr(vector_retriever, "_get_async_client", boom)
+        monkeypatch.setattr(vector_retriever, "_open_collection", boom)
         with pytest.raises(vector_retriever.VectorUnavailableError):
-            await vector_retriever.search("q", 5, "cid")
+            await vector_retriever.search("q", 5, "cid", user_id="user-1")
 
     async def test_search_empty_collection_still_returns_empty(self, monkeypatch):
         from app.retrieval import vector_retriever
 
-        class FakeCollection:
-            async def count(self):
-                return 0
-
         class FakeClient:
-            async def get_collection(self, name):
-                return FakeCollection()
+            async def count(self, _generation):
+                return SimpleNamespace(count=0)
 
-        async def fake_client():
-            return FakeClient()
+        async def fake_collection(_dim):
+            return FakeClient(), "generation", None
 
-        monkeypatch.setattr(vector_retriever, "_get_async_client", fake_client)
-        assert await vector_retriever.search("q", 5, "cid") == []
+        monkeypatch.setattr(vector_retriever, "_open_collection", fake_collection)
+        assert await vector_retriever.search("q", 5, "cid", user_id="user-1") == []
 
 
 class TestMemorySearchAvailability:
@@ -78,4 +72,3 @@ class TestMemorySearchAvailability:
         monkeypatch.setattr(vector_store, "check_generation_contract", lambda *a, **k: None)
         monkeypatch.setattr(vector_backend, "collection_info_async", fake_info)
         assert await vector_store.search_memories([0.1] * 8, user_id="user-1") == []
-

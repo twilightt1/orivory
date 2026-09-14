@@ -5,7 +5,9 @@ as the canonical write, so a crash between SQL and the vector backend is
 recoverable (replay, never lost). ``index_generations`` names the active
 physical collection per kind, so a cutover is a pointer swap.
 
-P1a keeps Chroma as the vector backend: nothing here talks to a vector store.
+P1b's vector backend is Qdrant: nothing here talks to a vector store, and the
+stores that do (memory, chunks) resolve each kind's active generation from
+``index_generations`` — never from a hard-coded collection name.
 """
 from __future__ import annotations
 

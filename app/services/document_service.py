@@ -94,7 +94,9 @@ async def get_document(db: AsyncSession, document_id: UUID, conversation_id: UUI
 async def delete_document(db: AsyncSession, document: Document, conversation: Conversation) -> None:
     from app import storage
     from app.ingestion.document_memory import delete_document_memories_async
+    from app.models.document_chunk import DocumentChunk
     from app.retrieval.bm25_retriever import bm25_retriever
+    from app.retrieval.memory.outbox import enqueue_chunk_delete
     from app.retrieval.memory.vector_store import (
         delete_memories as delete_memory_vectors,
     )
@@ -114,11 +116,24 @@ async def delete_document(db: AsyncSession, document: Document, conversation: Co
     # it — so a failed delete can never take the DB rows with it.
     memory_ids = await delete_document_memories_async(db, document_id, user_id=conversation.user_id)
 
+    # The chunk rows cascade with the document: their ids must be captured —
+    # with a durable delete intent each — BEFORE the rows go (spec §5.4).
+    chunk_ids = (
+        await db.execute(
+            select(DocumentChunk.id).where(DocumentChunk.document_id == document.id)
+        )
+    ).scalars().all()
+    if chunk_ids:
+        await enqueue_chunk_delete(db, chunk_ids=chunk_ids, tenant_id=conversation.user_id)
+
     await db.delete(document)
     conversation.document_count = max(0, conversation.document_count - 1)
     await db.commit()
 
-    await delete_document_chunks(str(conversation.id), document_id)
+    # Immediate attempt; the intents above are the durable proof each point goes.
+    await delete_document_chunks(
+        str(conversation.id), document_id, user_id=str(conversation.user_id)
+    )
 
     if memory_ids:
         await delete_memory_vectors(memory_ids)

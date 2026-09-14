@@ -1,4 +1,4 @@
-"""Memory filters -> Qdrant ``Filter`` (spec §4.2).
+"""Memory + chunk filters -> Qdrant ``Filter`` (spec §4.2, §4.3).
 
 The ONE translation of the caller-facing filter language
 (``{"source_type": {"$eq": "note"}}``) into the store's native form, and the
@@ -6,6 +6,10 @@ ONE place the tenant clause is built: it is always ``must[0]``, and a caller's
 ``where`` can never widen it (``user_id`` is rejected outright). The allowlist,
 the one-operator-per-field rule and the error types match the Chroma-era
 ``_build_user_filter`` the API grew around — only the native shape changed.
+
+The chunk family (one collection per generation, payload-filtered) gets its own
+builder beside it (ruling R14): tenant first, conversation AND — never a
+collection per conversation.
 
 A value that is not an operator object means ``$eq``; ``$ne``/``$nin`` are
 exclusions, so they land in ``must_not`` (a point whose field is absent never
@@ -47,6 +51,30 @@ def build_filter(user_id: str, where: dict[str, Any] | None = None) -> qm.Filter
         bucket = must_not if operator in _EXCLUSIONS else must
         bucket.append(_condition(key, operator, operand))
     return qm.Filter(must=must, must_not=must_not or None)
+
+
+def build_chunk_filter(
+    user_id: str | None,
+    conversation_id: str,
+    *,
+    document_id: str | None = None,
+) -> qm.Filter:
+    """The chunk family's filter: the tenant clause first, the conversation AND.
+
+    Chunks live in ONE collection per generation and are scoped by payload, so
+    the tenant clause is what keeps a conversation id — or a document id — from
+    reaching another owner's points. ``user_id`` is the authenticated
+    principal; ``None`` is the legacy call form, where the conversation scope
+    alone is the boundary (an API-face caller must pass it). ``document_id``
+    narrows to one document's points (deletes), never widens anything.
+    """
+    must: list[Any] = []
+    if user_id is not None:
+        must.append(_match("user_id", "$eq", user_id))
+    must.append(_match("conversation_id", "$eq", conversation_id))
+    if document_id is not None:
+        must.append(_match("document_id", "$eq", document_id))
+    return qm.Filter(must=must)
 
 
 def _operator(key: str, value: Any) -> tuple[str, Any]:
@@ -132,4 +160,4 @@ def _timestamp(key: str, operand: Any) -> datetime:
     return parsed
 
 
-__all__ = ["ALLOWED_FIELDS", "ALLOWED_OPERATORS", "build_filter"]
+__all__ = ["ALLOWED_FIELDS", "ALLOWED_OPERATORS", "build_chunk_filter", "build_filter"]
