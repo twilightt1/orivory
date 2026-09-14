@@ -412,7 +412,7 @@ async def test_backoff_grows_and_is_capped(db, owner, monkeypatch):
     assert deltas[5] < min(deltas[6:])  # the cap is a wait, still past the last growth step
     # The two capped waits are the SAME ladder step, so their jittered order is
     # not meaningful — only that both saturate at the 3600s cap.
-    assert deltas[6:] == pytest.approx([3600, 3600], abs=30)  # 60*2**6 = 3840 -> capped
+    assert deltas[6:] == pytest.approx([3600, 3600], abs=32)  # 60*2**6 = 3840 -> capped; abs covers +30 jitter +2s drain
 
     # The capped intent is still not due: the cap is a wait, not a terminal state.
     assert (await outbox.drain_pending())["claimed"] == 0

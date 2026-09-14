@@ -89,9 +89,9 @@ memory_ids, *, requested_by)`:
 5. **Receipt** — one `erasure_receipts` row per call, with additive
    `detail.verification` and `detail.index_pending` (omitted when nothing was
    erased — no erase, no verification claim):
-   `completed_unverified` (no positive presence readback; spec §5.4/P1 gate)
-   / `completed` (positively verified) / `completed_with_residual` /
-   `completed_with_errors` — that precedence order
+   `completed_with_errors` > `completed_with_residual` >
+   `completed_unverified` (no positive presence readback; spec §5.4/P1 gate) >
+   `completed` (positively verified) — rollup precedence, highest wins
    (per-target try/except + session rollback so remaining targets still
    process). Receipt-commit failure is the one documented unrecorded mode.
 
