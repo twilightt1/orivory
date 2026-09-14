@@ -47,9 +47,12 @@ def _fs_root_dir() -> Path:
 
 def _fs_path(object_name: str) -> Path:
     """Resolve an object name inside the fs root, refusing traversal."""
-    root = _fs_root_dir()
+    # Resolve BOTH sides: FS_STORAGE_PATH may itself sit under a symlink
+    # (macOS /tmp -> /private/tmp, /var -> /private/var), which made the
+    # string-prefix check reject every object name on those hosts.
+    root = _fs_root_dir().resolve()
     candidate = (root / object_name).resolve()
-    if not str(candidate).startswith(str(root)):
+    if not candidate.is_relative_to(root):
         raise ValueError(f"invalid object name: {object_name!r}")
     return candidate
 
