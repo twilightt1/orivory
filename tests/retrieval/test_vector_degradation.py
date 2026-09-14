@@ -10,6 +10,8 @@ Contract:
 - The personal-memory path (memory.vector_store.search_memories) mirrors
   the same typed-outage contract; see TestMemorySearchAvailability.
 """
+from types import SimpleNamespace
+
 import pytest
 
 
@@ -49,25 +51,31 @@ class TestMemorySearchAvailability:
         from app.retrieval import vector_retriever
         from app.retrieval.memory import vector_store
 
-        async def boom():
+        async def boom(_dim):
             raise ConnectionError("refused")
 
-        monkeypatch.setattr(vector_store, "_get_collection", boom)
+        monkeypatch.setattr(vector_store, "_open_collection", boom)
         with pytest.raises(vector_retriever.VectorUnavailableError):
             await vector_store.search_memories([0.1] * 8, user_id="user-1")
 
     async def test_memory_search_empty_collection_still_returns_empty(self, monkeypatch):
         from app.retrieval.memory import vector_store
 
-        class FakeCollection:
-            metadata = {}
+        class FakeClient:
+            async def count(self, _generation):
+                return SimpleNamespace(count=0)
 
-            async def count(self):
-                return 0
+        async def fake_collection(_dim):
+            return FakeClient(), "generation", "f" * 64
 
-        async def fake_collection():
-            return FakeCollection()
+        async def fake_info(*_args, **_kwargs):
+            return {"dim": 8, "distance": "Cosine"}
 
-        monkeypatch.setattr(vector_store, "_get_collection", fake_collection)
+        from app.retrieval import vector_backend
+
+        monkeypatch.setattr(vector_store, "_open_collection", fake_collection)
+        # The guard is called synchronously: this double must be sync too.
+        monkeypatch.setattr(vector_store, "check_generation_contract", lambda *a, **k: None)
+        monkeypatch.setattr(vector_backend, "collection_info_async", fake_info)
         assert await vector_store.search_memories([0.1] * 8, user_id="user-1") == []
 

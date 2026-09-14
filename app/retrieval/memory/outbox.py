@@ -9,7 +9,8 @@ it was (best-effort, fast path); on success it acks its own intent
 (:func:`mark_done`), so only an un-indexed write stays pending. The outbox is
 the durable backstop, not a replacement.
 
-P1a keeps Chroma (:mod:`app.retrieval.memory.vector_store`) as the backend.
+P1b keeps the memory store on Qdrant (:mod:`app.retrieval.memory.vector_store`)
+and resolves the physical generation through :func:`active_generation`.
 A drain applies one intent at a time: a dead row collapses to a delete, a
 stale revision is skipped (a newer intent owns the entity), a contract
 mismatch blocks terminally, a transient failure retries with backoff.
@@ -26,7 +27,7 @@ from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
-from app.database import AsyncSessionLocal
+from app.database import AsyncSessionLocal, sync_session
 from app.models.index_outbox import IndexGeneration, IndexOutbox
 from app.models.memory import Memory
 from app.retrieval.embedder import EmbeddingDimensionMismatch
@@ -139,8 +140,8 @@ async def _target_generation(db: AsyncSession) -> str:
     cache = _session_cache(db)
     if cache is not None and _GENERATION_CACHE_KEY in cache:
         return cache[_GENERATION_CACHE_KEY]
-    rows = (await db.execute(_active_generation_stmt())).scalars().all()
-    generation = rows[0].generation if rows and isinstance(rows[0], IndexGeneration) else TARGET_GENERATION
+    row = await _active_row(db)
+    generation = row.generation if row is not None else TARGET_GENERATION
     if cache is not None:
         cache[_GENERATION_CACHE_KEY] = generation
     return generation
@@ -150,8 +151,8 @@ def _target_generation_sync(db: Session) -> str:
     cache = _session_cache(db)
     if cache is not None and _GENERATION_CACHE_KEY in cache:
         return cache[_GENERATION_CACHE_KEY]
-    rows = db.execute(_active_generation_stmt()).scalars().all()
-    generation = rows[0].generation if rows and isinstance(rows[0], IndexGeneration) else TARGET_GENERATION
+    row = _active_row_sync(db)
+    generation = row.generation if row is not None else TARGET_GENERATION
     if cache is not None:
         cache[_GENERATION_CACHE_KEY] = generation
     return generation
@@ -163,6 +164,40 @@ def _active_generation_stmt():
         .where(IndexGeneration.kind == KIND_MEMORY, IndexGeneration.is_active.is_(True))
         .limit(1)
     )
+
+
+async def _active_row(db: AsyncSession) -> IndexGeneration | None:
+    """The active ``index_generations`` row for kind=memory, or None."""
+    rows = (await db.execute(_active_generation_stmt())).scalars().all()
+    return rows[0] if rows and isinstance(rows[0], IndexGeneration) else None
+
+
+def _active_row_sync(db: Session) -> IndexGeneration | None:
+    rows = db.execute(_active_generation_stmt()).scalars().all()
+    return rows[0] if rows and isinstance(rows[0], IndexGeneration) else None
+
+
+async def active_generation() -> tuple[str, str | None]:
+    """The active memory generation as ``(generation, manifest fingerprint)``.
+
+    The vector store reads its physical collection name from here: P1a's
+    manifest stays the only resolution path, so a cutover is a pointer flip.
+    The fingerprint is the row's ``fingerprint_generation`` token, which the
+    contract guard compares against the active embedding contract; ``None``
+    means there is no active row (the transitional fallback), so there is
+    nothing to verify and a POPULATED generation must then refuse — P0's
+    quarantine law, enforced by the caller's guard.
+    """
+    async with AsyncSessionLocal() as db:
+        row = await _active_row(db)
+    return (row.generation, row.fingerprint) if row is not None else (TARGET_GENERATION, None)
+
+
+def active_generation_sync() -> tuple[str, str | None]:
+    """Synchronous variant of :func:`active_generation` (Celery / CLI face)."""
+    with sync_session() as db:
+        row = _active_row_sync(db)
+    return (row.generation, row.fingerprint) if row is not None else (TARGET_GENERATION, None)
 
 
 def _session_cache(db) -> dict | None:
@@ -365,6 +400,8 @@ __all__ = [
     "OPERATION_UPSERT",
     "TARGET_GENERATION",
     "VectorDeleteUnconfirmed",
+    "active_generation",
+    "active_generation_sync",
     "bump_revision",
     "drain_pending",
     "enqueue_delete",

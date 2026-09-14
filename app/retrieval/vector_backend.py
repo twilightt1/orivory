@@ -23,11 +23,25 @@ from typing import Any
 
 from qdrant_client import AsyncQdrantClient, QdrantClient
 from qdrant_client.http.exceptions import UnexpectedResponse
-from qdrant_client.models import Distance, VectorParams
+from qdrant_client.models import Distance, PayloadSchemaType, VectorParams
 
 from app.config import settings
 
 _LOCAL_THREAD_PREFIX = "qdrant-local"
+
+# Per-kind payload indexes (spec §4.2): the fields a filter reads must be
+# indexed or every search is a full scan. SERVER mode only — the embedded
+# store ignores payload indexes and warns on each request, and lite mode
+# holds one user's small store anyway.
+_PAYLOAD_INDEXES: dict[str, dict[str, PayloadSchemaType]] = {
+    "memory": {
+        "user_id": PayloadSchemaType.KEYWORD,
+        "tags": PayloadSchemaType.KEYWORD,
+        "pinned": PayloadSchemaType.BOOL,
+        "salience": PayloadSchemaType.FLOAT,
+        "captured_at": PayloadSchemaType.DATETIME,
+    },
+}
 
 
 def _new_local_executor() -> ThreadPoolExecutor:
@@ -159,19 +173,53 @@ async def close_clients() -> None:
     _LOCAL_EXECUTOR = _new_local_executor()
 
 
+def _missing_payload_indexes(kind: str, present: Any) -> dict[str, PayloadSchemaType]:
+    """The kind's payload indexes this collection does not have yet."""
+    have = set(present or {})
+    return {
+        field: schema
+        for field, schema in _PAYLOAD_INDEXES.get(kind, {}).items()
+        if field not in have
+    }
+
+
+def _ensure_payload_indexes_sync(client: Any, kind: str, generation: str) -> None:
+    if is_local_mode():
+        return
+    created = _missing_payload_indexes(kind, client.get_collection(generation).payload_schema)
+    for field_name, field_schema in created.items():
+        client.create_payload_index(
+            collection_name=generation, field_name=field_name, field_schema=field_schema
+        )
+
+
+async def _ensure_payload_indexes_async(client: Any, kind: str, generation: str) -> None:
+    if is_local_mode():
+        return
+    info = await client.get_collection(generation)
+    created = _missing_payload_indexes(kind, info.payload_schema)
+    for field_name, field_schema in created.items():
+        await client.create_payload_index(
+            collection_name=generation, field_name=field_name, field_schema=field_schema
+        )
+
+
 def ensure_collection(kind: str, generation: str, dim: int) -> None:
     """Create ``kind``'s collection for ``generation`` if it is missing.
 
     The generation token IS the physical name (spec §4.2): a cutover is a
-    pointer flip in SQLite, never a rename in the store. ``kind`` labels the
-    family the per-kind payload indexes hang off (T2). ``dim`` is the ACTIVE
-    embedding dimension supplied by the caller from its fingerprint (384 local
-    / 1024 Jina / 1536 OpenAI) — never a constant here. An existing collection
-    is left exactly as it is: its dim/metric belong to the contract guard, not
-    to a silent overwrite.
+    pointer flip in SQLite, never a rename in the store. ``kind`` selects the
+    payload index set the family filters on (server mode only — the embedded
+    store ignores indexes; in server mode this costs one metadata read per
+    call, which is what "ensure" means). ``dim`` is the ACTIVE embedding
+    dimension supplied by the caller from its fingerprint (384 local / 1024
+    Jina / 1536 OpenAI) — never a constant here. An existing collection is left
+    exactly as it is: its dim/metric belong to the contract guard, not to a
+    silent overwrite.
     """
     client = get_sync_client()
     if client.collection_exists(generation):
+        _ensure_payload_indexes_sync(client, kind, generation)
         return
     try:
         client.create_collection(
@@ -184,13 +232,37 @@ def ensure_collection(kind: str, generation: str, dim: int) -> None:
         # real failure wearing one of these types — re-raises below.
         if not client.collection_exists(generation):
             raise
+    _ensure_payload_indexes_sync(client, kind, generation)
 
 
-def collection_info(kind: str, generation: str) -> dict:
-    """The collection's actual contract as the store reports it: dim/metric."""
-    info = get_sync_client().get_collection(generation)
+async def ensure_collection_async(kind: str, generation: str, dim: int) -> None:
+    """Async twin of :func:`ensure_collection` (request paths never block)."""
+    client = get_async_client()
+    if not await client.collection_exists(generation):
+        try:
+            await client.create_collection(
+                collection_name=generation,
+                vectors_config=VectorParams(size=int(dim), distance=Distance.COSINE),
+            )
+        except (ValueError, UnexpectedResponse):
+            if not await client.collection_exists(generation):
+                raise
+    await _ensure_payload_indexes_async(client, kind, generation)
+
+
+def _info_from(info: Any) -> dict:
     vectors = info.config.params.vectors
     return {
         "dim": int(vectors.size),
         "distance": str(getattr(vectors.distance, "value", vectors.distance)),
     }
+
+
+def collection_info(kind: str, generation: str) -> dict:
+    """The collection's actual contract as the store reports it: dim/metric."""
+    return _info_from(get_sync_client().get_collection(generation))
+
+
+async def collection_info_async(kind: str, generation: str) -> dict:
+    """Async twin of :func:`collection_info`."""
+    return _info_from(await get_async_client().get_collection(generation))

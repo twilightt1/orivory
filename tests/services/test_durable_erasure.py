@@ -268,21 +268,21 @@ async def test_collect_derived_ids_raises_typed_error(db):
 
 
 async def test_vector_store_delete_reports_failure(monkeypatch):
-    class _Collection:
-        async def delete(self, ids):
+    class _Client:
+        async def delete(self, **_kwargs):
             return None
 
-    async def _up():
-        return _Collection()
+    async def _up(_dim):
+        return _Client(), "generation", None
 
-    monkeypatch.setattr(vector_store, "_get_collection", _up)
+    monkeypatch.setattr(vector_store, "_open_collection", _up)
     assert await vector_store.delete_memory("mem-1") is True
     assert await vector_store.delete_memories(["mem-1", "mem-2"]) is True
 
-    async def _down():
-        raise ConnectionError("chroma down")
+    async def _down(_dim):
+        raise ConnectionError("qdrant down")
 
-    monkeypatch.setattr(vector_store, "_get_collection", _down)
+    monkeypatch.setattr(vector_store, "_open_collection", _down)
     assert await vector_store.delete_memory("mem-1") is False
     assert await vector_store.delete_memories(["mem-1"]) is False
 

@@ -23,41 +23,38 @@ def test_require_str_accepts_strings():
     assert _require_str({"answer": "Runkeeper"}, "answer", "ctx") == "Runkeeper"
 
 
-def test_vector_store_collection_wrapped_in_local_mode(monkeypatch):
-    """Regression from the real system run: local (lite) Chroma returns a
-    sync Collection whose count()/query() are plain ints/lists — call sites
-    `await` them. The wrapper must be applied to the COLLECTION too, not
-    just the client, or every search fails silently (recalled=0)."""
+def test_vector_store_async_face_is_awaitable_in_local_mode(monkeypatch, tmp_path):
+    """Regression from the real system run: the embedded store hands back a
+    SYNCHRONOUS client while the store's read path awaits it — every search
+    then failed silently (recalled=0). In lite mode the async face must expose
+    awaitable store calls, driven from the ONE embedded client."""
     import asyncio
     import inspect
-    import tempfile
-    from pathlib import Path
 
-    with tempfile.TemporaryDirectory() as tmp:
-        # Patch settings, not just env: app.config.settings is a module
-        # singleton built at first import (likely BEFORE this test set any
-        # env), and vector_store reads settings.* — env changes alone are
-        # invisible in a combined test run.
-        from app.config import settings
-        from app.retrieval.memory import vector_store
+    # Patch settings, not just env: app.config.settings is a module
+    # singleton built at first import (likely BEFORE this test set any
+    # env), and the backend reads settings.* — env changes alone are
+    # invisible in a combined test run.
+    from app.config import settings
+    from app.retrieval import vector_backend
 
-        monkeypatch.setattr(settings, "CHROMA_MODE", "local")
-        monkeypatch.setattr(settings, "CHROMA_LOCAL_PATH", str(Path(tmp) / "chroma"))
+    monkeypatch.setattr(settings, "QDRANT_MODE", "local")
+    monkeypatch.setattr(settings, "QDRANT_LOCAL_PATH", str(tmp_path / "qdrant"))
 
-        # Reset cached clients — earlier tests may have built one against
-        # a different (read-only) path; the singleton would ignore ours.
-        vector_store._sync_client = None
-        vector_store._async_client = None
-
-        async def _check():
-            collection = await vector_store._get_collection()
+    async def _check():
+        try:
+            client = vector_backend.get_async_client()
             return (
-                inspect.iscoroutinefunction(collection.count),
-                inspect.iscoroutinefunction(collection.query),
+                inspect.iscoroutinefunction(client.count),
+                inspect.iscoroutinefunction(client.query_points),
+                client._inner is vector_backend.get_sync_client()._inner,
             )
+        finally:
+            await vector_backend.close_clients()
 
-        count_async, query_async = asyncio.run(_check())
+    count_async, query_async, one_owner = asyncio.run(_check())
     assert count_async and query_async, (
-        "local-mode collection must expose awaitable count/query — "
-        "raw sync methods silently break recall"
+        "local-mode store calls must be awaitable — raw sync methods silently "
+        "break recall"
     )
+    assert one_owner, "both faces must drive the ONE embedded client"

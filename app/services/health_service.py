@@ -41,11 +41,22 @@ async def _check_minio() -> None:
 
 
 async def _check_chroma() -> None:
-    if settings.CHROMA_MODE == "local":
-        # In-process Chroma: prove the client opens (no HTTP heartbeat).
-        from app.retrieval.memory.vector_store import _get_sync_client
+    """Vector readiness.
 
-        if _get_sync_client() is None:
+    Lite mode runs the stores in-process, so readiness proves each client
+    opens (no heartbeat to poll): the memory generation's embedded Qdrant
+    owner (P1b) and the chunk path's local Chroma (removed in T7). Server mode
+    keeps the Chroma HTTP heartbeat until T7 renames this check.
+    """
+    from app.retrieval import vector_backend
+
+    if settings.CHROMA_MODE == "local" or vector_backend.is_local_mode():
+        from app.retrieval import vector_retriever
+        from app.retrieval.vector_backend import get_sync_client
+
+        if get_sync_client() is None:
+            raise RuntimeError("local Qdrant client unavailable")
+        if vector_retriever._get_sync_client() is None:
             raise RuntimeError("local Chroma client unavailable")
         return
     url = f"http://{settings.CHROMA_HOST}:{settings.CHROMA_PORT}/api/v2/heartbeat"

@@ -189,6 +189,62 @@ def check_collection_dim(
     return None
 
 
+def check_generation_contract(
+    info: dict,
+    embedding_dim: int,
+    *,
+    manifest_fingerprint: str | None,
+    collection_is_empty: bool,
+    fingerprint: str | dict | None = None,
+) -> None:
+    """Verify a Qdrant generation against the embedding contract (spec §4.2).
+
+    The Chroma guard below reads a collection's own metadata stamp; a Qdrant
+    collection has none — its contract lives in TWO places that must agree:
+
+    - the PHYSICAL collection: dim/metric, read from
+      :func:`app.retrieval.vector_backend.collection_info`;
+    - the MANIFEST row: the active ``index_generations.fingerprint`` for the
+      kind, which names the embedding contract those vectors were built with.
+
+    ``manifest_fingerprint is None`` means no active manifest row: an EMPTY
+    generation is then unclaimed (allowed — the ladder/cutover claims it), a
+    POPULATED one is unknown data and must be quarantined, never served.
+    Read-only by construction: nothing here writes the manifest (that is the
+    cutover's job), so a read path can never claim a generation.
+    """
+    if manifest_fingerprint is None and not collection_is_empty:
+        raise EmbeddingDimensionMismatch(
+            "populated generation has no manifest row — quarantine/rebuild"
+        )
+    expected_fingerprint = _canonical_fingerprint(fingerprint)
+    if manifest_fingerprint is not None and (
+        manifest_fingerprint != fingerprint_generation(expected_fingerprint)
+    ):
+        raise EmbeddingDimensionMismatch(
+            "same dim but different embedding contract: generation manifest is "
+            f"{manifest_fingerprint!r} vs {fingerprint_generation(expected_fingerprint)!r} — "
+            "fresh reindex required"
+        )
+    distance = str(info.get("distance", "")).lower()
+    if distance != "cosine":
+        raise EmbeddingDimensionMismatch(
+            f"generation distance metric is {distance!r}, expected cosine — fresh reindex required"
+        )
+    try:
+        recorded_dim = int(info["dim"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise EmbeddingDimensionMismatch(
+            "generation has no readable vector dim — quarantine/rebuild"
+        ) from exc
+    if recorded_dim != int(embedding_dim):
+        raise EmbeddingDimensionMismatch(
+            f"Embedding backend/dim mismatch: generation holds dim={recorded_dim}, but the "
+            f"current config produces dim={int(embedding_dim)}. Restore the previous embedding "
+            "backend or reindex into a fresh generation — mixing dims silently corrupts recall."
+        )
+
+
 def stamp_collection_dim(
     collection,
     embedding_dim: int,
