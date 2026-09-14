@@ -116,7 +116,7 @@ async def test_foreign_keys_are_enforced_on_both_write_paths(sqlite_engines):
 
 
 @pytest.mark.asyncio
-async def test_bootstrap_versions_fresh_schema_and_rejects_unversioned_existing(tmp_path, monkeypatch):
+async def test_bootstrap_versions_fresh_schema_and_rejects_divergent_unversioned_existing(tmp_path, monkeypatch):
     fresh_path = tmp_path / "fresh.sqlite"
     fresh_engine = create_async_engine(
         f"sqlite+aiosqlite:///{fresh_path}",

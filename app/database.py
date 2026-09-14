@@ -68,14 +68,35 @@ class Base(DeclarativeBase):
     pass
 
 
+def _adoptable_sqlite_schema(sync_conn) -> bool:
+    """True when an unversioned SQLite schema matches the model metadata.
+
+    Pre-versioning installs (<= v1.1.0) built the full schema with
+    ``create_all`` and left ``PRAGMA user_version`` at 0. Such a DB is
+    schema-identical to version 1 by construction, so startup may adopt it
+    by stamping the version. Divergence (missing table/column) is not a
+    match and must fail closed.
+    """
+    insp = sa_inspect(sync_conn)
+    existing = set(insp.get_table_names())
+    for table in Base.metadata.sorted_tables:
+        if table.name not in existing:
+            return False
+        have = {col["name"] for col in insp.get_columns(table.name)}
+        if {col.name for col in table.columns} - have:
+            return False
+    return True
+
+
 async def bootstrap_sqlite() -> None:
     """Create a fresh, versioned SQLite schema for lite mode.
 
     Full-stack (Postgres) deployments use Alembic migrations instead —
     `docker compose up migrate` / `alembic upgrade head`. SQLite deployments
-    are created fresh from the model metadata. Existing unversioned schemas
-    fail closed until a reviewed SQLite migration exists; ``create_all`` is
-    never used as an existing-schema migration mechanism.
+    are created fresh from the model metadata. An existing unversioned
+    schema is adopted as version 1 only when it matches the metadata exactly
+    (schema-identical, no migration needed); any divergence fails closed —
+    ``create_all`` is never used as an existing-schema migration mechanism.
     """
     if not IS_SQLITE:
         raise RuntimeError("bootstrap_sqlite() is only for SQLite deployments")
@@ -89,14 +110,17 @@ async def bootstrap_sqlite() -> None:
                 f"unsupported SQLite schema version {version}; expected "
                 f"{SQLITE_SCHEMA_VERSION}"
             )
-        if version == 0 and tables:
-            raise RuntimeError(
-                "existing SQLite schema requires a versioned SQLite migration "
-                "before startup; fresh-install bootstrap cannot evolve it"
-            )
         if version == 0:
-            await conn.run_sync(Base.metadata.create_all)
-            await conn.execute(text(f"PRAGMA user_version = {SQLITE_SCHEMA_VERSION}"))
+            if not tables:
+                await conn.run_sync(Base.metadata.create_all)
+                await conn.execute(text(f"PRAGMA user_version = {SQLITE_SCHEMA_VERSION}"))
+            elif await conn.run_sync(_adoptable_sqlite_schema):
+                await conn.execute(text(f"PRAGMA user_version = {SQLITE_SCHEMA_VERSION}"))
+            else:
+                raise RuntimeError(
+                    "existing SQLite schema does not match SQLITE_SCHEMA_VERSION "
+                    f"{SQLITE_SCHEMA_VERSION}; requires a versioned SQLite migration"
+                )
         elif {"users", "memories"} - tables:
             raise RuntimeError(
                 "SQLite schema version is marked active but required tables are missing"

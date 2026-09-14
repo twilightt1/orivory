@@ -70,6 +70,9 @@ jobs:
       - name: Run config tests
         run: python -m pytest --confcutdir=tests/config tests/config/test_settings_validation.py -q
 
+      - name: Run SQLite schema-adoption tests (DB-free)
+        run: python -m pytest --confcutdir=tests/lite tests/lite/test_sqlite_schema_adoption.py -q
+
       - name: Run Hub unit tests (DB-free)
         run: |
           python -m pytest --confcutdir=tests/mcp_hub tests/mcp_hub -q
