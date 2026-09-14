@@ -40,11 +40,10 @@ jobs:
 
       - name: Run RAG tests
         run: |
-          python -m pytest --confcutdir=tests/rag \
-            tests/rag/test_graph_routing.py \
-            tests/rag/test_evaluation.py \
-            tests/rag/test_integration.py \
-            tests/rag/test_ai_hardening.py \
+          # Dir-run (file lists go stale); test_dispatcher needs the root db
+          # fixture, which --confcutdir intentionally excludes.
+          python -m pytest --confcutdir=tests/rag tests/rag \
+            --ignore=tests/rag/test_dispatcher.py \
             -q
 
       - name: Run evaluation tests
