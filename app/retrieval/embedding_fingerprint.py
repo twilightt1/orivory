@@ -45,7 +45,7 @@ def current_fingerprint() -> dict:
         }
     if settings.USE_JINA_EMBEDDINGS and settings.JINA_API_KEY:
         return {
-            "model_id": "jina-embeddings-v5-text-small",
+            "model_id": settings.JINA_EMBED_MODEL,
             "pooling": "api",
             "query_prefix": "",
             "passage_prefix": "",
@@ -55,7 +55,7 @@ def current_fingerprint() -> dict:
             "doc_format": DOC_FORMAT,
         }
     return {
-        "model_id": "openai",
+        "model_id": settings.EMBED_MODEL,
         "pooling": "api",
         "query_prefix": "",
         "passage_prefix": "",
