@@ -27,8 +27,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.models.memory import Memory
 from app.models.user import User
+from app.retrieval.memory.correction import state_of
 from app.retrieval.memory.outbox import bump_revision, enqueue_upsert, mark_done
 from app.retrieval.memory.retriever import MemoryRetriever
+from app.retrieval.memory.visibility import not_dirty_predicate, state_expression
 from app.retrieval.memory.write_back import index_new_memory, safe_upsert_to_chroma
 from app.schemas.Orivory import (
     DigestResponse,
@@ -47,11 +49,19 @@ log = logging.getLogger(__name__)
 router = APIRouter(prefix="/memories", tags=["memories"])
 
 
-def _memory_response(memory: Memory, *, indexing: Literal["ready", "pending"] | None = None) -> MemoryResponse:
+def _memory_response(
+    memory: Memory,
+    *,
+    indexing: Literal["ready", "pending"] | None = None,
+    state: str | None = None,
+) -> MemoryResponse:
     """Map ORM Memory.extra_metadata to API field `metadata`.
 
     ``indexing`` is set by write paths only (POST/PATCH); read paths leave it
     None so a response never claims an index state it did not observe.
+
+    ``state`` is the row's lifecycle label; when the caller already selected it
+    in SQL the SQL value is passed through, otherwise ``state_of`` labels here.
     """
     return MemoryResponse(
         id=memory.id,
@@ -73,6 +83,7 @@ def _memory_response(memory: Memory, *, indexing: Literal["ready", "pending"] | 
         updated_at=memory.updated_at,
         revision=memory.revision or 1,  # unsaved/detached rows carry the column default
         indexing=indexing,
+        state=state if state is not None else state_of(memory),
         metadata=memory.extra_metadata or {},
     )
 
@@ -146,9 +157,15 @@ async def list_memories(
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
 ) -> MemoryListResponse:
-    """List memories for the current user with optional filters."""
-    base = select(Memory).where(Memory.user_id == current_user.id)
-    count_base = select(func.count(Memory.id)).where(Memory.user_id == current_user.id)
+    """List memories for the current user with optional filters.
+
+    Dirty rows are never listed (their derived view is stale); superseded rows
+    are listed with ``state="superseded"`` — history stays readable, labeled.
+    """
+    base = select(Memory, state_expression()).where(
+        Memory.user_id == current_user.id, not_dirty_predicate())
+    count_base = select(func.count(Memory.id)).where(
+        Memory.user_id == current_user.id, not_dirty_predicate())
 
     if source_type:
         base = base.where(Memory.source_type == source_type)
@@ -179,10 +196,10 @@ async def list_memories(
     total = (await db.execute(count_base)).scalar_one()
     rows  = (await db.execute(
         base.order_by(*order_by).offset(offset).limit(limit)
-    )).scalars().all()
+    )).all()
 
     return MemoryListResponse(
-        items=[_memory_response(m) for m in rows],
+        items=[_memory_response(m, state=state) for m, state in rows],
         total=total,
         limit=limit,
         offset=offset,

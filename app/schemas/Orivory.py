@@ -79,6 +79,10 @@ class MemoryResponse(BaseModel):
     # "ready" = it landed. None on read paths — a response that did not
     # observe an index state makes no claim about one.
     indexing:    Literal["ready", "pending"] | None = None
+    # Lifecycle state, mirroring correction.state_of (spec §4.2): a superseded
+    # row stays readable but never reads as current; dirty rows are not served
+    # by list views at all.
+    state:       Literal["current", "superseded", "dirty", "needs-check"]
     metadata:    dict
 
     model_config = ConfigDict(from_attributes=True)

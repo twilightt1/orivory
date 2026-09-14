@@ -481,5 +481,6 @@ def _memory_response(memory: Memory) -> MemoryResponse:
         indexed_at=memory.indexed_at,
         updated_at=memory.updated_at,
         revision=memory.revision or 1,  # unsaved/detached rows carry the column default
+        state=_state_of(memory),
         metadata=getattr(memory, "extra_metadata", getattr(memory, "metadata", {})) or {},
     )

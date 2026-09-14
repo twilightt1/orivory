@@ -37,6 +37,7 @@ from app.models.memory_access_log import MemoryAccessLog
 from app.retrieval.embedder import EmbeddingDimensionMismatch
 from app.retrieval.memory.correction import Slot, get_cm, resolve_correction, state_of
 from app.retrieval.memory.outbox import mark_done
+from app.retrieval.memory.visibility import not_dirty_predicate
 from app.retrieval.memory.write_back import index_new_memory
 from app.services.erasure_service import erase_memories
 
@@ -77,6 +78,7 @@ def _memory_brief(memory: Memory) -> dict[str, Any]:
         "tags": list(memory.tags or []),
         "salience": memory.salience,
         "captured_at": _iso(memory.captured_at),
+        "state": state_of(memory),
     }
 
 
@@ -166,11 +168,17 @@ async def search_memory(query: str, limit: int = 8, include_history: bool = Fals
                     select(Memory).where(
                         Memory.id.in_([mid for mid, _ in recalled]),
                         Memory.user_id == principal.user_id,
+                        # Dirty rows are never served, not even in history.
+                        not_dirty_predicate(),
                     )
                 )
             ).scalars().all()
             by_id = {row.id: row for row in rows}
             rows_in_rank = [mem for mem in (by_id.get(mid) for mid, _ in recalled) if mem is not None]
+            # Defence in depth (the query above already filters dirty): this
+            # mirror of state_of is the layer that also catches a hand-written
+            # falsy marker. History widens to superseded, never to dirty.
+            rows_in_rank = [m for m in rows_in_rank if state_of(m) != "dirty"]
             if not include_history:
                 rows_in_rank = [m for m in rows_in_rank if state_of(m) != "superseded"]
             results = [_memory_index_row(m) for m in rows_in_rank]
@@ -271,7 +279,8 @@ async def timeline(memory_id: str, window: int = 4) -> dict[str, Any]:
 
     def _row(m: Memory) -> dict[str, Any]:
         return {"id": str(m.id), "title": m.title,
-                "snippet": (m.content or "")[:160], "captured_at": _iso(m.captured_at)}
+                "snippet": (m.content or "")[:160], "captured_at": _iso(m.captured_at),
+                "state": state_of(m)}
 
     return {
         "anchor": _row(anchor),
@@ -318,7 +327,7 @@ async def list_recent(limit: int = 20) -> dict[str, Any]:
         rows = (
             await db.execute(
                 select(Memory)
-                .where(Memory.user_id == principal.user_id)
+                .where(Memory.user_id == principal.user_id, not_dirty_predicate())
                 .order_by(Memory.captured_at.desc(), Memory.id.desc())
                 .limit(capped)
             )

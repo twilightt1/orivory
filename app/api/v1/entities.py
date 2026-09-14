@@ -24,6 +24,7 @@ from app.graph.extraction import (
 from app.models.entity import Entity, MemoryEntity, Relation
 from app.models.memory import Memory
 from app.models.user import User
+from app.retrieval.memory.correction import state_of
 from app.schemas.Orivory import (
     EntityCreate,
     EntityListResponse,
@@ -101,6 +102,7 @@ def _memory_response(memory: Memory) -> MemoryResponse:
         indexed_at=memory.indexed_at,
         updated_at=memory.updated_at,
         revision=memory.revision or 1,  # unsaved/detached rows carry the column default
+        state=state_of(memory),
         metadata=memory.extra_metadata or {},
     )
 
