@@ -2,8 +2,15 @@
 from __future__ import annotations
 
 import math
+import uuid
 from datetime import UTC, datetime, timedelta
 
+import pytest
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+
+from app.database import Base
+from app.retrieval.memory import retriever as retriever_module
+from app.retrieval.memory.retriever import MemoryRetriever
 from app.retrieval.memory.scoring import time_decay_score
 
 
@@ -37,3 +44,48 @@ def test_floor_keeps_semantic_ordering():
     # total exclusion from top-k
     fresh_weak, _ = time_decay_score(0.2, now - timedelta(days=1), now=now)
     assert strong_old > fresh_weak * 0.1
+
+
+async def _empty_context(*_args, **_kwargs):
+    return []
+
+
+async def _identity_rewrite(*_args, **_kwargs):
+    return {
+        "rewritten_query": "trace probe",
+        "entities": [],
+        "reasoning": None,
+        "_fallback_used": False,
+    }
+
+
+async def _zero_embedding(*_args, **_kwargs):
+    return [0.0]
+
+
+async def _empty_search(*_args, **_kwargs):
+    return []
+
+
+@pytest.mark.asyncio
+async def test_trace_has_new_stage_keys_and_total(monkeypatch):
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    async with AsyncSession(engine) as db:
+        monkeypatch.setattr(retriever_module, "fetch_personal_context", _empty_context)
+        monkeypatch.setattr(retriever_module, "rewrite_query", _identity_rewrite)
+        monkeypatch.setattr(retriever_module, "embed_query", _zero_embedding)
+        monkeypatch.setattr(retriever_module, "search_memories", _empty_search)
+        response = await MemoryRetriever(db, uuid.uuid4()).recall(
+            "trace probe", top_k=5, include_personal_context=True
+        )
+    await engine.dispose()
+    required = {
+        "context", "queue_wait", "embed_compute", "lexical", "rerank",
+        "eligibility", "score", "serialization", "total",
+    }
+    assert required <= response.trace.stage_ms.keys()
+    assert response.trace.stage_ms["total"] >= max(
+        value for key, value in response.trace.stage_ms.items() if key != "total"
+    )
