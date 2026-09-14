@@ -4,7 +4,8 @@ Design rules:
   - Every tool resolves its own AgentPrincipal (via the ``_current_principal``
     seam — in production the FastMCP wrappers in ``server.py`` publish the
     principal resolved from the MCP Context's HTTP request headers) and
-    enforces scopes; failures return ``{"error": ...}`` dicts, never raise.
+    enforces scopes; ordinary tool failures return ``{"error": ...}`` dicts.
+    Embedding contract failures raise their typed integrity error.
   - Every authorized call appends a ``MemoryAccessLog`` row — the ledger is the
     product. Identity/scope denials return *before* any DB write.
   - Reads bump nothing (salience bumping stays in the chat pipeline); writes
@@ -33,6 +34,7 @@ from app.mcp_hub.identity import (
 )
 from app.models.memory import Memory
 from app.models.memory_access_log import MemoryAccessLog
+from app.retrieval.embedder import EmbeddingDimensionMismatch
 from app.retrieval.memory.correction import Slot, get_cm, resolve_correction, state_of
 from app.retrieval.memory.write_back import index_new_memory, safe_delete_from_chroma
 from app.services.erasure_service import erase_memories
@@ -356,6 +358,8 @@ async def add_memory(title: str, content: str, tags: list[str] | None = None) ->
         memory = out["memory"]
     try:
         await index_new_memory(memory)  # best-effort: embed + graph enqueue
+    except EmbeddingDimensionMismatch:
+        raise
     except Exception as exc:
         log.warning("MCP add_memory indexing failed for %s: %s", memory.id, exc)
     async with _session() as db:
@@ -494,6 +498,8 @@ async def correct_memory(memory_id=None, subject="", attribute="", scope="defaul
         await db.commit()
     try:
         await index_new_memory(new)
+    except EmbeddingDimensionMismatch:
+        raise
     except Exception as exc:
         log.warning("MCP correct_memory indexing failed for %s: %s", new.id, exc)
     return {"status": out["status"], "id": str(new.id),

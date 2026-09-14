@@ -227,6 +227,19 @@ class MemoryWithScore(MemoryResponse):
     match_reasons: list[str] = Field(default_factory=list)
 
 
+RECALL_TRACE_STAGE_KEYS = (
+    "context",
+    "queue_wait",
+    "embed_compute",
+    "lexical",
+    "rerank",
+    "eligibility",
+    "score",
+    "serialization",
+    "total",
+)
+
+
 class RecallTrace(BaseModel):
     """Debug info returned alongside recall results."""
     rewritten_query:    str
@@ -239,7 +252,9 @@ class RecallTrace(BaseModel):
     llm_reasoning:      str | None = None
     half_life_days:     float = 30.0
     rewrite_skipped:    bool = False
-    stage_ms:           dict[str, float] = Field(default_factory=dict)
+    stage_ms:           dict[str, float] = Field(
+        default_factory=lambda: dict.fromkeys(RECALL_TRACE_STAGE_KEYS, 0.0)
+    )
 
 
 class RecallResponse(BaseModel):

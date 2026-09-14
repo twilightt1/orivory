@@ -92,11 +92,28 @@ def test_long_batches_split(stubbed, monkeypatch):
 
 
 def test_backend_guard_distinguishes_e5_from_minilm():
-    stamped = {"orivory_embed_backend": "local", "orivory_embed_dim": 384}
+    stamped = {
+        "orivory_embed_backend": "local",
+        "orivory_embed_dim": 384,
+        "orivory_embed_fingerprint": "local-test-contract",
+    }
 
     class _C:
         metadata = stamped
 
     with pytest.raises(EmbeddingDimensionMismatch):
-        check_collection_dim(_C(), 384, backend="local-e5")
-    assert check_collection_dim(_C(), 384, backend="local") is None
+        check_collection_dim(
+            _C(),
+            384,
+            backend="local-e5",
+            fingerprint="local-test-contract",
+        )
+    assert (
+        check_collection_dim(
+            _C(),
+            384,
+            backend="local",
+            fingerprint="local-test-contract",
+        )
+        is None
+    )

@@ -73,6 +73,8 @@ from eval.benchmarks.llm_judge import JUDGE_PROMPT_VERSION, build_judge_messages
 from eval.benchmarks.longmemeval_s import load_instances  # noqa: E402
 
 DATASET = ROOT / "eval/benchmarks/data/longmemeval_s_cleaned.json"
+if not DATASET.exists():  # worktree: ignored benchmark data lives on main checkout
+    DATASET = ROOT.parent.parent / "eval/benchmarks/data/longmemeval_s_cleaned.json"
 MODEL = os.environ.get("BENCHMARK_JUDGE_MODEL", os.environ["LLM_MODEL"])
 BASELINE = ROOT / "eval/benchmarks/results/longmemeval_s_baseline.json"
 if not BASELINE.exists():  # worktree: committed baseline lives on main checkout
@@ -83,6 +85,136 @@ ANSWER_SYSTEM = (
     "Answer in at most two sentences. If the memories do not contain the "
     "answer, reply exactly: I have no information about that."
 )
+
+
+def build_stack_metadata(
+    *,
+    top_k: int,
+    selected_question_ids: list[str] | None = None,
+    sample_seed: int | None = None,
+    concurrency: int | None = None,
+    session_level: bool | None = None,
+    chunk_chars: int | None = None,
+    fuse: bool | None = None,
+    write_index_costs: dict | None = None,
+) -> dict:
+    """Build reproducibility metadata from the active benchmark stack.
+
+    The benchmark remains sequential in this P0 script, so requested and
+    actual concurrency are recorded separately rather than implying parallel
+    work that did not run.
+    """
+    import importlib.metadata
+    import platform
+    import subprocess
+
+    from app.config import settings
+    from app.retrieval.embedder import active_backend_name
+    from app.retrieval.embedding_fingerprint import current_fingerprint
+
+    fingerprint = current_fingerprint()
+    try:
+        git_head = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True
+        ).strip()
+        git_dirty = bool(
+            subprocess.check_output(
+                ["git", "status", "--porcelain"], cwd=ROOT, text=True
+            ).strip()
+        )
+    except Exception:
+        git_head = "unknown"
+        git_dirty = None
+
+    def package_version(name: str) -> str | None:
+        try:
+            return importlib.metadata.version(name)
+        except importlib.metadata.PackageNotFoundError:
+            return None
+
+    dataset_path = DATASET.resolve()
+    try:
+        dataset_source = "worktree" if dataset_path.is_relative_to(ROOT) else "external-checkout-fallback"
+    except AttributeError:  # pragma: no cover - Python 3.8 compatibility
+        dataset_source = "worktree" if str(dataset_path).startswith(str(ROOT)) else "external-checkout-fallback"
+    thread_limits = {
+        name: os.environ.get(name)
+        for name in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "ORT_NUM_THREADS")
+    }
+    return {
+        "database": "sqlite (lite mode)",
+        "vector_store": "chroma local (in-process)",
+        # Keep the legacy scalar key for existing result consumers.
+        "embeddings": fingerprint["model_id"],
+        "embeddings_actual": {
+            "model_id": fingerprint["model_id"],
+            "pooling": fingerprint["pooling"],
+            "dim": fingerprint["dim"],
+            "provider": fingerprint.get("provider"),
+            "model_revision": fingerprint.get("model_revision"),
+            "artifact_digest": fingerprint.get("artifact_digest"),
+            "tokenizer_digest": fingerprint.get("tokenizer_digest"),
+            "fingerprint": fingerprint,
+        },
+        "embedding_backend": active_backend_name(),
+        "query_prefix": fingerprint["query_prefix"],
+        "passage_prefix": fingerprint["passage_prefix"],
+        "retriever": "MemoryRetriever (vector + salience + entity boost + rerank)",
+        "recall_top_k": top_k,
+        "git_head": git_head,
+        "git_dirty": git_dirty,
+        "dataset_path": str(dataset_path),
+        "dataset_source": dataset_source,
+        "dataset_sha256": hashlib.sha256(dataset_path.read_bytes()).hexdigest(),
+        "selected_question_ids": selected_question_ids,
+        "sample_seed": sample_seed,
+        "runtime": {
+            "python": platform.python_version(),
+            "os": platform.platform(),
+            "architecture": platform.machine(),
+            "cpu_count": os.cpu_count(),
+            "packages": {
+                name: package_version(name)
+                for name in ("aiosqlite", "chromadb", "onnxruntime", "sqlalchemy", "tokenizers")
+            },
+        },
+        "rerank": {
+            "enabled": bool(settings.RETRIEVAL_SEMANTIC_RERANK),
+            "model": settings.JINA_RERANKER_MODEL,
+            "top_n": settings.JINA_RERANKER_TOP_N,
+        },
+        "answer": {
+            "model": MODEL,
+            "temperature": 0.0,
+            "max_tokens": 300,
+        },
+        "judge": {
+            "model": MODEL,
+            "prompt_version": JUDGE_PROMPT_VERSION,
+            "temperature": 0.0,
+            "max_tokens": 8,
+        },
+        "timeouts_seconds": {
+            "embedding_jina": 60,
+            "embedding_openai": 30,
+            "rerank": 30,
+            "answer_and_judge_client": 240,
+        },
+        "execution": {
+            "requested_concurrency": concurrency if concurrency is not None else 1,
+            "actual_concurrency": 1,
+            "thread_limits": thread_limits,
+            "warmup_performed": False,
+            "cache_state": "not_reset; process/model/filesystem cache may be warm",
+            "rewrite_policy": "personal-context plus pronoun policy; fast-path when eligible",
+            "context_policy": {
+                "session_level": session_level,
+                "chunk_chars": chunk_chars,
+                "fuse": fuse,
+            },
+        },
+        "write_index_costs": write_index_costs or {},
+    }
 
 
 def _parse_session_date(raw: str) -> datetime | None:
@@ -350,20 +482,29 @@ async def run_instance(client, user_id, instance, top_k, run_dir: Path,
                       session_level: bool = True, chunk_chars: int = 0,
                       fuse: bool = False) -> dict:
     t0 = time.time()
+    ingest_seconds = recall_seconds = 0.0
     try:
+        ingest_t0 = time.perf_counter()
         ingested = await ingest_instance(
             user_id, instance, run_dir, session_level=session_level,
             chunk_chars=chunk_chars,
         )
+        ingest_seconds = time.perf_counter() - ingest_t0
+        recall_t0 = time.perf_counter()
         response, recalled = await answer_from_stack(
             user_id, instance, top_k, fuse=fuse
         )
+        recall_seconds = time.perf_counter() - recall_t0
         correct = await judge_one(client, instance, response)
         error = None
     except Exception as exc:
         import traceback
 
+        from app.retrieval.embedder import EmbeddingDimensionMismatch
+
         traceback.print_exc()
+        if isinstance(exc, EmbeddingDimensionMismatch):
+            raise
         if type(exc).__name__ == "RateLimitError":
             raise QuotaExhausted(f"provider quota exhausted at {instance.question_id}") from exc
         response, recalled, ingested, correct, error = "", 0, 0, False, f"{type(exc).__name__}: {exc}"
@@ -378,6 +519,8 @@ async def run_instance(client, user_id, instance, top_k, run_dir: Path,
         "response": response[:500],
         "memories_ingested": ingested,
         "memories_recalled": recalled,
+        "ingest_seconds": round(ingest_seconds, 3),
+        "recall_seconds": round(recall_seconds, 3),
         "seconds": seconds,
         "error": error,
     }
@@ -512,30 +655,45 @@ async def main_async(args) -> int:
         half = z * _math.sqrt(p * (1 - p) / n_s + z * z / (4 * n_s * n_s)) / denom
         wilson = [round(center - half, 3), round(center + half, 3)]
 
+    write_index_costs = {
+        "memories_ingested": sum(r["memories_ingested"] for r in records),
+        "ingest_seconds": round(sum(r["ingest_seconds"] for r in records), 3),
+        "recall_seconds": round(sum(r["recall_seconds"] for r in records), 3),
+        "questions_completed": len(records),
+    }
+    stack = build_stack_metadata(
+        top_k=args.top_k,
+        selected_question_ids=[instance.question_id for instance in selected],
+        sample_seed=args.seed,
+        concurrency=getattr(args, "concurrency", 1),
+        session_level=args.session,
+        chunk_chars=args.chunk_chars,
+        fuse=args.fuse,
+        write_index_costs=write_index_costs,
+    )
     payload = {
         "benchmark": "longmemeval_s",
         "run_kind": "orivory_stack",
         "chunking": "session_level" if args.session else "per_turn",
         "answer_mode": "single_pass",
         "note": (
-            "REAL dataset, REAL Orivory stack (SQLite + local Chroma + Jina "
-            "embeddings + MemoryRetriever salience/rerank), REAL judge. Same "
-            "seed and n as the committed full-context baseline. First "
-            "system-vs-baseline comparison — small n, treat as directional."
+            "REAL dataset, REAL Orivory stack (SQLite + local Chroma + "
+            f"{stack['embeddings']} embeddings + MemoryRetriever salience/rerank), "
+            "REAL judge. Same seed and n as the committed full-context baseline. "
+            "First system-vs-baseline comparison — small n, treat as directional."
         ),
-        "dataset_path": "eval/benchmarks/data/longmemeval_s_cleaned.json",
-        "dataset_sha256": hashlib.sha256(DATASET.read_bytes()).hexdigest(),
+        "dataset_path": str(DATASET.resolve()),
+        "dataset_source": stack["dataset_source"],
+        "dataset_sha256": stack["dataset_sha256"],
         "dataset_instances": len(all_instances),
-        "sample": {"n": len(selected), "seed": args.seed},
+        "sample": {
+            "n": len(selected),
+            "seed": args.seed,
+            "question_ids": [instance.question_id for instance in selected],
+        },
         "model": MODEL,
         "judge_prompt_version": JUDGE_PROMPT_VERSION,
-        "stack": {
-            "database": "sqlite (lite mode)",
-            "vector_store": "chroma local (in-process)",
-            "embeddings": "jina-embeddings-v5-text-small",
-            "retriever": "MemoryRetriever (vector + salience + entity boost + rerank)",
-            "recall_top_k": args.top_k,
-        },
+        "stack": stack,
         "mean": mean,
         "questions": len(scored),
         "correct": correct,
@@ -579,6 +737,12 @@ def main() -> int:
     parser.add_argument("--n", type=int, default=20)
     parser.add_argument("--seed", type=int, default=20260906)
     parser.add_argument("--top-k", type=int, default=10)
+    parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=1,
+        help="requested concurrency (this benchmark currently executes sequentially)",
+    )
     parser.add_argument("--session", action="store_true",
                         help="session-level memories (v2 strategy) — "
                              "one memory per haystack session")
