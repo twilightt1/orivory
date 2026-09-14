@@ -125,7 +125,9 @@ async def _recall_memory_ids(query: str, limit: int) -> list[tuple[UUID, float]]
     MVP ranking is a plain SQL select — the user's memories ordered by
     salience desc, then captured_at desc (``query`` is kept for seam
     compatibility; semantic recall replaces this body later without touching
-    the tool bodies). Tests monkeypatch this and return
+    the tool bodies). Dirty rows are filtered before the LIMIT so they cannot
+    consume capped candidate slots; superseded rows stay eligible (history
+    widening happens at the hydration step). Tests monkeypatch this and return
     ``[(memory_id, score), ...]`` pairs.
     """
     principal = _current_principal()
@@ -135,7 +137,7 @@ async def _recall_memory_ids(query: str, limit: int) -> list[tuple[UUID, float]]
         rows = (
             await db.execute(
                 select(Memory.id, Memory.salience)
-                .where(Memory.user_id == principal.user_id)
+                .where(Memory.user_id == principal.user_id, not_dirty_predicate())
                 .order_by(Memory.salience.desc(), Memory.captured_at.desc())
                 .limit(limit)
             )

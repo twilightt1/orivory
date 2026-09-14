@@ -1061,6 +1061,8 @@ List memories with filtering and semantic search.
 }
 ```
 
+> **Note — `total` counts visible rows only:** dirty (stale-derived) memories are excluded from the page and from the total; superseded rows stay listed, labeled `state: "superseded"`.
+
 ---
 
 ### GET /api/v1/memories/{id}

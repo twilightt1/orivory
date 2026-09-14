@@ -250,6 +250,48 @@ async def test_mcp_search_hides_dirty_even_with_history(db, monkeypatch):
     assert {r["state"] for r in history["results"]} == {"current", "superseded"}
 
 
+async def test_mcp_search_dirty_rows_do_not_consume_candidate_slots(db, monkeypatch):
+    """The recall LIMIT applies AFTER the dirty filter: a dirty row that ranks
+    top cannot crowd a current row out of the capped candidate slots (pre-fix
+    this returned 1 row for ``limit=3``)."""
+    owner = await _owner(db)
+    current = [_mem(owner, f"current {i}", minutes=10 - i) for i in range(3)]
+    dirty = [_mem(owner, f"dirty {i}", meta={CM_DERIVED_DIRTY: True}, minutes=i)
+             for i in range(2)]
+    for stale in dirty:
+        stale.salience = 0.99  # dirty rows outrank every current row
+    db.add_all([*current, *dirty])
+    await db.commit()
+    _as_reader(monkeypatch, owner)
+
+    out = await hub_tools.search_memory("body", limit=3)  # real _recall_memory_ids
+
+    assert len(out["results"]) == 3  # honest count: no slot eaten by a dirty row
+    assert [r["id"] for r in out["results"]] == [str(m.id) for m in reversed(current)]
+    assert all(r["state"] == "current" for r in out["results"])
+
+
+async def test_mcp_search_recall_keeps_superseded_for_history(db, monkeypatch):
+    """Superseded rows stay eligible in recall (history widening happens at
+    hydration); the ``include_history=False`` path still excludes them, dirty
+    rows are never served either way."""
+    owner = await _owner(db)
+    current = _mem(owner, "current", minutes=0)
+    superseded = _mem(owner, "superseded", meta={CM_SUPERSEDED_BY: "s"}, minutes=1)
+    dirty = _mem(owner, "dirty", meta={CM_DERIVED_DIRTY: True}, minutes=2)
+    dirty.salience = 0.99
+    db.add_all([current, superseded, dirty])
+    await db.commit()
+    _as_reader(monkeypatch, owner)
+
+    plain = await hub_tools.search_memory("body")  # real _recall_memory_ids
+    assert [r["id"] for r in plain["results"]] == [str(current.id)]
+
+    history = await hub_tools.search_memory("body", include_history=True)
+    assert [r["id"] for r in history["results"]] == [str(current.id), str(superseded.id)]
+    assert [r["state"] for r in history["results"]] == ["current", "superseded"]
+
+
 async def test_mcp_timeline_labels_every_row(db, monkeypatch):
     owner = await _owner(db)
     older = _mem(owner, "older", meta={CM_SUPERSEDED_BY: "s"}, minutes=2)
