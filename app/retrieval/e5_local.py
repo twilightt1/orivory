@@ -182,7 +182,20 @@ def _atokenizer():
     return _atok
 
 
-def _encode_with(texts: list[str], sess_fn, tok_fn) -> list[list[float]]:
+def _encode_with(
+    texts: list[str], sess_fn, tok_fn, pooling: str = "mean"
+) -> list[list[float]]:
+    """Tokenize → batch-pad to the longest truncated sequence → pool → L2.
+
+    ``pooling`` is the only contract difference between the two local models
+    and it is part of the embedding fingerprint: e5 has no CLS convention
+    (masked mean over non-pad tokens — the sentence-transformers default),
+    while arctic-embed-xs is trained for CLS (``last_hidden_state[:, 0, :]``,
+    the reference form pinned by tests/retrieval/test_xs_parity.py). A typo
+    must not silently fall back to the other contract, so it raises.
+    """
+    if pooling not in {"mean", "cls"}:
+        raise ValueError(f"unknown pooling {pooling!r} — expected 'mean' or 'cls'")
     sess, tok = sess_fn(), tok_fn()
     out: list[list[float]] = []
     for i in range(0, len(texts), _BATCH):
@@ -195,11 +208,13 @@ def _encode_with(texts: list[str], sess_fn, tok_fn) -> list[list[float]]:
             ids[r, :take] = e.ids[:take]
             mask[r, :take] = e.attention_mask[:take]
         last = sess.run(None, _feed(sess, ids, mask))[0]
-        # ponytail: mean-pool, not CLS — e5 has no CLS pooling convention;
-        # mean over non-pad tokens is the sentence-transformers default.
-        summed = (last * mask[..., None]).sum(axis=1)
-        counts = mask.sum(axis=1, keepdims=True).clip(min=1)
-        emb = summed / counts
+        if pooling == "cls":
+            # [CLS] is token 0 for both models; padding cannot shift it.
+            emb = last[:, 0, :]
+        else:
+            summed = (last * mask[..., None]).sum(axis=1)
+            counts = mask.sum(axis=1, keepdims=True).clip(min=1)
+            emb = summed / counts
         emb = emb / np.linalg.norm(emb, axis=1, keepdims=True).clip(min=1e-12)
         out.extend(emb.astype(float).tolist())
     return out
@@ -214,8 +229,10 @@ def embed_passages(texts: list[str]) -> list[list[float]]:
 
 
 def arctic_embed_queries(texts: list[str]) -> list[list[float]]:
-    return _encode_with([ARCTIC_QUERY_PREFIX + t for t in texts], _asession, _atokenizer)
+    return _encode_with(
+        [ARCTIC_QUERY_PREFIX + t for t in texts], _asession, _atokenizer, pooling="cls"
+    )
 
 
 def arctic_embed_passages(texts: list[str]) -> list[list[float]]:
-    return _encode_with(texts, _asession, _atokenizer)
+    return _encode_with(texts, _asession, _atokenizer, pooling="cls")

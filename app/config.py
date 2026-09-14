@@ -140,16 +140,17 @@ class Settings(BaseSettings):
     #           kept so old deployments boot. Not supported for recall quality.
     # Use jina for embeddings instead of OpenAI
     USE_JINA_EMBEDDINGS: bool = True
-    # Local ONNX MiniLM embeddings (chromadb-bundled, 384-dim, no API key).
-    # Takes precedence over Jina/OpenAI when true — keeps lite mode and
-    # benchmarks fully self-contained. Do not mix backends in one store.
+    # Local ONNX embeddings (384-dim, no API key). Takes precedence over
+    # Jina/OpenAI when true — keeps lite mode and benchmarks self-contained.
+    # Do not mix backends in one store.
     USE_LOCAL_EMBEDDINGS: bool = False
     # Which local model backs USE_LOCAL_EMBEDDINGS: "arctic"
-    # (snowflake-arctic-embed-xs, default — best English bench) or "minilm"
-    # (chroma-bundled, legacy) or "e5" (multilingual, opt-in Vietnamese).
-    # Both 384-dim but semantically incompatible — the dim guard records them
-    # as different backends and refuses to mix them; switching on an
-    # existing store requires reindexing into a fresh collection.
+    # (snowflake-arctic-embed-xs, default — best English bench, CLS pooling) or
+    # "e5" (multilingual, opt-in Vietnamese, mean pooling). Both 384-dim but
+    # semantically incompatible — the dim guard records them as different
+    # backends and refuses to mix them; switching on an existing store
+    # requires reindexing into a fresh collection. Anything else (the old
+    # chroma-bundled "minilm", a typo) is refused at load.
     LOCAL_EMBED_MODEL: str = "arctic"
     # Where the e5 onnx/tokenizer files live (downloaded once on first use).
     # Empty = ~/.cache/orivory/e5; the lite image sets /data/models/e5 so the
@@ -262,6 +263,11 @@ class Settings(BaseSettings):
     def _validate_ai_runtime_settings(self) -> None:
         if self.EMBED_BATCH_SIZE < 1 or self.EMBED_BATCH_SIZE > 2048:
             raise ValueError("EMBED_BATCH_SIZE must be between 1 and 2048")
+        if self.LOCAL_EMBED_MODEL not in {"arctic", "e5"}:
+            # The chromadb-bundled MiniLM branch was removed in P1b: a stale
+            # "minilm" (or any typo) must fail at load instead of silently
+            # embedding with a contract nothing can name or verify.
+            raise ValueError("LOCAL_EMBED_MODEL must be one of: arctic, e5")
         if self.QDRANT_MODE not in {"server", "local"}:
             # A typo'd mode would silently boot a server client against a folder
             # path (or the reverse); refuse instead.

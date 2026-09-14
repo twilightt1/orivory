@@ -444,18 +444,19 @@ def test_memory_payload_carries_embedding_provenance(monkeypatch):
     assert "metadata" not in metadata
 
 
-def test_fingerprint_represents_minilm_and_configured_dimensions(monkeypatch):
+def test_fingerprint_represents_arctic_cls_and_configured_dimensions(monkeypatch):
     from app.config import settings
     from app.retrieval import embedding_fingerprint as fingerprint_module
 
     monkeypatch.setattr(settings, "USE_LOCAL_EMBEDDINGS", True)
-    monkeypatch.setattr(settings, "LOCAL_EMBED_MODEL", "minilm")
-    minilm = fingerprint_module.current_fingerprint()
-    assert minilm["model_id"] == "all-MiniLM-L6-v2"
-    assert minilm["provider"] == "chromadb-onnx"
-    assert minilm["dim"] == 384
-    assert minilm["pooling"] == "mean"
-    assert minilm["artifact_digest"]
+    monkeypatch.setattr(settings, "LOCAL_EMBED_MODEL", "arctic")
+    arctic = fingerprint_module.current_fingerprint()
+    assert arctic == fingerprint_module.ARCTIC_CLS_FINGERPRINT
+    assert arctic["model_id"] == "Snowflake/snowflake-arctic-embed-xs"
+    assert arctic["provider"] == "onnxruntime-cpu"
+    assert arctic["dim"] == 384
+    assert arctic["pooling"] == "cls"
+    assert arctic["artifact_digest"]
 
     monkeypatch.setattr(settings, "USE_LOCAL_EMBEDDINGS", False)
     monkeypatch.setattr(settings, "USE_JINA_EMBEDDINGS", True)

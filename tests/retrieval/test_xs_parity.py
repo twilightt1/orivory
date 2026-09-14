@@ -1,4 +1,4 @@
-"""XS parity gate: ONNX mean currently vs CLS reference (P0, Task 4)."""
+"""XS parity gate: production CLS must equal the CLS reference (P1b Task 4)."""
 
 from __future__ import annotations
 
@@ -47,11 +47,29 @@ def test_query_and_passage_outputs_are_deterministic():
         assert np.array_equal(first, second)
 
 
-def test_mean_vs_cls_documents_difference():
-    """Lock the baseline: current mean must differ from the CLS reference."""
-    for mean, cls in (
-        (e5_local.arctic_embed_queries(CASES), _cls_reference(CASES, query=True)),
-        (e5_local.arctic_embed_passages(CASES), _cls_reference(CASES, query=False)),
-    ):
-        cos = (np.asarray(mean) * np.asarray(cls)).sum(1)
-        assert (cos < 0.99).any(), f"mean≈cls on all cases: {cos}"
+def _mean_of(texts: list[str]) -> list[list[float]]:
+    return e5_local._encode_with(
+        texts, e5_local._asession, e5_local._atokenizer, pooling="mean"
+    )
+
+
+def test_production_arctic_is_the_cls_reference():
+    """Cutover: the batched production path IS the reference (float noise only)."""
+    for query in (True, False):
+        texts = [e5_local.ARCTIC_QUERY_PREFIX + t for t in CASES] if query else CASES
+        embed = e5_local.arctic_embed_queries if query else e5_local.arctic_embed_passages
+        production = np.asarray(embed(CASES))
+        reference = np.asarray(_cls_reference(CASES, query=query))
+        assert np.allclose(production, reference, atol=1e-5), np.abs(
+            production - reference
+        ).max()
+        assert np.allclose(production, _mean_of(texts)) is False
+
+
+def test_legacy_mean_differs_from_production_cls():
+    """The preserved mean contract documents a real, measurable change."""
+    for query in (True, False):
+        texts = [e5_local.ARCTIC_QUERY_PREFIX + t for t in CASES] if query else CASES
+        embed = e5_local.arctic_embed_queries if query else e5_local.arctic_embed_passages
+        cos = (np.asarray(_mean_of(texts)) * np.asarray(embed(CASES))).sum(1)
+        assert float(cos.max()) < 0.99, f"mean≈cls on all cases: {cos}"

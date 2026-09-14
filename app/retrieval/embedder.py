@@ -24,7 +24,6 @@ def __getattr__(name):
 
 _async_client: AsyncOpenAI | None = None
 _sync_client: OpenAI | None = None
-_local_embed_fn = None  # chromadb ONNX MiniLM (USE_LOCAL_EMBEDDINGS + minilm)
 
 # Collection metadata keys recording which embedding backend, dimension and
 # contract a collection was created with. Flipping embedding settings after
@@ -47,9 +46,9 @@ class EmbeddingDimensionMismatch(ValueError):
 def active_backend_name() -> str:
     """Which embedding backend the current settings select."""
     if settings.USE_LOCAL_EMBEDDINGS:
-        return {"arctic": "local-arctic", "e5": "local-e5"}.get(
-            settings.LOCAL_EMBED_MODEL, "local"
-        )
+        # No fallback: LOCAL_EMBED_MODEL is validated at config load, and the
+        # removed MiniLM backend must never be named "local" again.
+        return {"arctic": "local-arctic", "e5": "local-e5"}[settings.LOCAL_EMBED_MODEL]
     if settings.USE_JINA_EMBEDDINGS and settings.JINA_API_KEY:
         return "jina"
     return "openai"
@@ -529,29 +528,25 @@ def _embed_sync_with_jina(texts: list[str]) -> list[list[float]]:
 
 
 def _embed_with_local(texts: list[str], *, query: bool = False) -> list[list[float]]:
-    """Embed fully locally — e5-multilingual (default) or bundled MiniLM.
+    """Embed fully locally — arctic XS (default) or e5-multilingual.
 
-    384-dim vectors either way. e5 applies its required ``query:``/``passage:``
-    prefixes; MiniLM takes raw text. Do NOT mix backends in one store.
+    384-dim vectors either way, but different contracts: arctic pools CLS and
+    prefixes queries only, e5 pools the masked mean and requires both
+    ``query:``/``passage:`` prefixes. Do NOT mix backends in one store — the
+    dim guard records them as different backends and refuses.
+
+    ``LOCAL_EMBED_MODEL`` is validated at config load (arctic | e5), so the
+    removed bundled MiniLM path is not reachable here any more.
     """
-    if settings.LOCAL_EMBED_MODEL == "e5":
-        from app.retrieval import e5_local
+    from app.retrieval import e5_local
 
+    if settings.LOCAL_EMBED_MODEL == "e5":
         if query:
             return e5_local.embed_queries(texts)
         return e5_local.embed_passages(texts)
-    if settings.LOCAL_EMBED_MODEL == "arctic":
-        from app.retrieval import e5_local
-
-        if query:
-            return e5_local.arctic_embed_queries(texts)
-        return e5_local.arctic_embed_passages(texts)
-    global _local_embed_fn
-    if _local_embed_fn is None:
-        import chromadb.utils.embedding_functions as ef
-
-        _local_embed_fn = ef.ONNXMiniLM_L6_V2()
-    return [list(map(float, v)) for v in _local_embed_fn(texts)]
+    if query:
+        return e5_local.arctic_embed_queries(texts)
+    return e5_local.arctic_embed_passages(texts)
 
 
 async def embed_texts(texts: list[str]) -> list[list[float]]:
