@@ -27,12 +27,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.models.memory import Memory
 from app.models.user import User
+from app.retrieval.memory.correction import state_of
+from app.retrieval.memory.outbox import bump_revision, enqueue_upsert, mark_done
 from app.retrieval.memory.retriever import MemoryRetriever
-from app.retrieval.memory.write_back import (
-    index_new_memory,
-    safe_delete_from_chroma,
-    safe_upsert_to_chroma,
-)
+from app.retrieval.memory.visibility import not_dirty_predicate, state_expression
+from app.retrieval.memory.write_back import index_new_memory, safe_upsert_to_chroma
 from app.schemas.Orivory import (
     DigestResponse,
     MemoryCreate,
@@ -42,6 +41,7 @@ from app.schemas.Orivory import (
     RecallRequest,
     RecallResponse,
 )
+from app.services.erasure_service import erase_memories
 from app.utils.dependencies import enforce_llm_quota, get_current_verified_user
 
 log = logging.getLogger(__name__)
@@ -49,8 +49,20 @@ log = logging.getLogger(__name__)
 router = APIRouter(prefix="/memories", tags=["memories"])
 
 
-def _memory_response(memory: Memory) -> MemoryResponse:
-    """Map ORM Memory.extra_metadata to API field `metadata`."""
+def _memory_response(
+    memory: Memory,
+    *,
+    indexing: Literal["ready", "pending"] | None = None,
+    state: str | None = None,
+) -> MemoryResponse:
+    """Map ORM Memory.extra_metadata to API field `metadata`.
+
+    ``indexing`` is set by write paths only (POST/PATCH); read paths leave it
+    None so a response never claims an index state it did not observe.
+
+    ``state`` is the row's lifecycle label; when the caller already selected it
+    in SQL the SQL value is passed through, otherwise ``state_of`` labels here.
+    """
     return MemoryResponse(
         id=memory.id,
         user_id=memory.user_id,
@@ -69,6 +81,9 @@ def _memory_response(memory: Memory) -> MemoryResponse:
         captured_at=memory.captured_at,
         indexed_at=memory.indexed_at,
         updated_at=memory.updated_at,
+        revision=memory.revision or 1,  # unsaved/detached rows carry the column default
+        indexing=indexing,
+        state=state if state is not None else state_of(memory),
         metadata=memory.extra_metadata or {},
     )
 
@@ -112,11 +127,20 @@ async def create_memory(
         extra_metadata=body.metadata,
     )
     db.add(memory)
+    # Durable index intent in the SAME commit as the row: if the process dies
+    # before the vector write, the drain replays it. The write-through below
+    # stays the fast path; the intent is the backstop.
+    bump_revision(memory)
+    await enqueue_upsert(db, memory)
     await db.commit()
     await db.refresh(memory)
     # Post-persist indexing (embed + graph) — best-effort, Postgres is truth.
-    await index_new_memory(memory)
-    return _memory_response(memory)
+    indexed = await index_new_memory(memory)
+    if indexed:
+        # The fast path has this revision in the index: ack the intent it
+        # enqueued so a boot drain does not re-embed it.
+        await mark_done(db, entity_id=memory.id, revision=memory.revision)
+    return _memory_response(memory, indexing="ready" if indexed else "pending")
 
 
 @router.get("", response_model=MemoryListResponse)
@@ -133,9 +157,15 @@ async def list_memories(
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
 ) -> MemoryListResponse:
-    """List memories for the current user with optional filters."""
-    base = select(Memory).where(Memory.user_id == current_user.id)
-    count_base = select(func.count(Memory.id)).where(Memory.user_id == current_user.id)
+    """List memories for the current user with optional filters.
+
+    Dirty rows are never listed (their derived view is stale); superseded rows
+    are listed with ``state="superseded"`` — history stays readable, labeled.
+    """
+    base = select(Memory, state_expression()).where(
+        Memory.user_id == current_user.id, not_dirty_predicate())
+    count_base = select(func.count(Memory.id)).where(
+        Memory.user_id == current_user.id, not_dirty_predicate())
 
     if source_type:
         base = base.where(Memory.source_type == source_type)
@@ -166,10 +196,10 @@ async def list_memories(
     total = (await db.execute(count_base)).scalar_one()
     rows  = (await db.execute(
         base.order_by(*order_by).offset(offset).limit(limit)
-    )).scalars().all()
+    )).all()
 
     return MemoryListResponse(
-        items=[_memory_response(m) for m in rows],
+        items=[_memory_response(m, state=state) for m, state in rows],
         total=total,
         limit=limit,
         offset=offset,
@@ -271,11 +301,20 @@ async def update_memory(
     for field, value in data.items():
         setattr(memory, field, value)
 
+    if data:
+        bump_revision(memory)
+        await enqueue_upsert(db, memory)
     await db.commit()
     await db.refresh(memory)
     # Write-through to ChromaDB (best-effort)
-    await safe_upsert_to_chroma(memory)
-    return _memory_response(memory)
+    indexed = await safe_upsert_to_chroma(memory)
+    if indexed:
+        await mark_done(db, entity_id=memory.id, revision=memory.revision)
+    if not data and not indexed:
+        # A no-op PATCH enqueues no intent, so a failed write-through must not
+        # claim a durable 'pending' backstop that does not exist.
+        return _memory_response(memory, indexing=None)
+    return _memory_response(memory, indexing="ready" if indexed else "pending")
 
 
 @router.delete("/{memory_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -284,13 +323,16 @@ async def delete_memory(
     current_user: Annotated[User, Depends(get_current_verified_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> None:
+    """Delete one owned memory through the durable erasure path.
+
+    Same response shape as before (404 for foreign/missing ids — no existence
+    leak); the erase is one closure transaction that leaves a receipt and a
+    durable delete intent per affected id.
+    """
     memory = await db.get(Memory, memory_id)
     if not memory or memory.user_id != current_user.id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Memory not found.")
-    await db.delete(memory)
-    await db.commit()
-    # Write-through: remove from ChromaDB (best-effort)
-    await safe_delete_from_chroma(memory_id)
+    await erase_memories(db, current_user.id, [memory_id], requested_by="rest_api")
 
 
 # ── Phase 3.7: recall endpoint ──────────────────────────────────────────────
@@ -313,9 +355,10 @@ async def recall_memory(
         4. Hydrate + apply entity boost + time decay.
         5. Return top_k with trace (rewritten query, entities, latency).
 
-    Every step degrades gracefully: an empty ``results`` list plus a
-    ``trace`` describing what was attempted is returned even if LLM,
-    ChromaDB, or the DB read is partially down.
+    Every step degrades gracefully (empty ``results`` plus a ``trace``),
+    with two exceptions: an embedding contract mismatch or an unreachable
+    vector store answer 503 with a typed body (``embedding_contract_mismatch``
+    / ``vector_unavailable``) — never a silent empty recall.
     """
     retriever = MemoryRetriever(
         db=db,

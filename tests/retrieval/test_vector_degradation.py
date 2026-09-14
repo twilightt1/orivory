@@ -7,6 +7,8 @@ Contract:
 - retrieval_agent sets state["vector_unavailable"]=True only when ALL
   vector calls failed AND no vector results came back; BM25 results are
   still used (Postgres-only degradation, never a silent total miss).
+- The personal-memory path (memory.vector_store.search_memories) mirrors
+  the same typed-outage contract; see TestMemorySearchAvailability.
 """
 import pytest
 
@@ -38,4 +40,34 @@ class TestVectorUnavailableSignal:
 
         monkeypatch.setattr(vector_retriever, "_get_async_client", fake_client)
         assert await vector_retriever.search("q", 5, "cid") == []
+
+
+class TestMemorySearchAvailability:
+    """The personal-memory path mirrors the document-chunk outage contract."""
+
+    async def test_memory_search_raises_when_collection_acquisition_fails(self, monkeypatch):
+        from app.retrieval import vector_retriever
+        from app.retrieval.memory import vector_store
+
+        async def boom():
+            raise ConnectionError("refused")
+
+        monkeypatch.setattr(vector_store, "_get_collection", boom)
+        with pytest.raises(vector_retriever.VectorUnavailableError):
+            await vector_store.search_memories([0.1] * 8, user_id="user-1")
+
+    async def test_memory_search_empty_collection_still_returns_empty(self, monkeypatch):
+        from app.retrieval.memory import vector_store
+
+        class FakeCollection:
+            metadata = {}
+
+            async def count(self):
+                return 0
+
+        async def fake_collection():
+            return FakeCollection()
+
+        monkeypatch.setattr(vector_store, "_get_collection", fake_collection)
+        assert await vector_store.search_memories([0.1] * 8, user_id="user-1") == []
 

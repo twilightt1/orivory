@@ -22,6 +22,7 @@ import httpx
 from app.config import settings
 from app.models.memory import Memory
 from app.retrieval.embedder import (
+    EmbeddingDimensionMismatch,
     active_backend_name,
     astamp_collection_dim,
     check_collection_dim,
@@ -34,6 +35,7 @@ from app.retrieval.embedding_fingerprint import (
     current_fingerprint,
     fingerprint_generation,
 )
+from app.retrieval.vector_retriever import VectorUnavailableError
 
 # Lazily imported so this module is importable in test/CLI contexts
 # that don't have ChromaDB running.
@@ -393,32 +395,41 @@ async def get_memory_ids_present(memory_ids: list[str]) -> set[str]:
     return {str(i) for i in (found.get("ids") or [])}
 
 
-async def delete_memory(memory_id: str) -> None:
-    """Remove a memory's vector from the collection (best-effort)."""
+async def delete_memory(memory_id: str) -> bool:
+    """Remove a memory's vector from the collection.
+
+    Returns whether the backend confirmed the delete. A failure is reported
+    (never swallowed) because the durable outbox acks a delete intent ``done``
+    from this result: ``False`` keeps it pending and retried.
+    """
     try:
         collection = await _get_collection()
         await collection.delete(ids=[memory_id])
         log.info("Deleted memory from ChromaDB", extra={"memory_id": memory_id})
+        return True
     except Exception as e:
         log.warning(
             "Failed to delete memory from ChromaDB",
             extra={"memory_id": memory_id, "error": str(e)},
         )
+        return False
 
 
-async def delete_memories(memory_ids: list[str]) -> None:
-    """Remove many memories' vectors from the collection (best-effort)."""
+async def delete_memories(memory_ids: list[str]) -> bool:
+    """Remove many memories' vectors from the collection (see ``delete_memory``)."""
     if not memory_ids:
-        return
+        return True
     try:
         collection = await _get_collection()
         await collection.delete(ids=memory_ids)
         log.info("Deleted memories from ChromaDB", extra={"n": len(memory_ids)})
+        return True
     except Exception as e:
         log.warning(
             "Failed to batch-delete memories from ChromaDB",
             extra={"n": len(memory_ids), "error": str(e)},
         )
+        return False
 
 
 def delete_memories_sync(memory_ids: list[str]) -> None:
@@ -480,15 +491,34 @@ async def search_memories(
 
     Returns a list of dicts:
         {memory_id, content, score, metadata, rank, source="vector"}
+
+    Raises :class:`VectorUnavailableError` when the collection cannot be
+    acquired, or when the ``count``/``query`` calls themselves fail — a
+    vector outage is a readiness signal, never an empty list — and
+    :class:`EmbeddingDimensionMismatch` on a contract mismatch. Only a
+    genuinely empty collection (or a query matching nothing) yields ``[]``.
     """
     user_filter = _build_user_filter(user_id, where)
     try:
         collection = await _get_collection()
     except Exception as e:
+        # An outage is a typed readiness signal, never an empty result: a
+        # silent [] here is a false "no memories matched".
         log.warning("Chroma unavailable for search", extra={"error": str(e)})
-        return []
+        raise VectorUnavailableError(f"ChromaDB unreachable for memory search: {e}") from e
 
-    count = await collection.count()
+    try:
+        count = await collection.count()
+    except EmbeddingDimensionMismatch:
+        # A contract mismatch is never re-typed as an outage.
+        raise
+    except Exception as e:
+        # The store can also die after acquisition; type the failure at the
+        # step it happened so it is never read as an empty (no-match) result.
+        log.warning("Chroma count failed for memory search", extra={"error": str(e)})
+        raise VectorUnavailableError(
+            f"ChromaDB memory search failed at count: {e}"
+        ) from e
     # Fail loud on backend/dim switches; never stamp here (read path). The
     # count must be known first so an unstamped populated collection cannot be
     # mistaken for a new empty collection.
@@ -500,11 +530,19 @@ async def search_memories(
     if count == 0:
         return []
 
-    results = await collection.query(
-        query_embeddings=[query_embedding],
-        n_results=min(top_k, count),
-        where=user_filter,
-    )
+    try:
+        results = await collection.query(
+            query_embeddings=[query_embedding],
+            n_results=min(top_k, count),
+            where=user_filter,
+        )
+    except EmbeddingDimensionMismatch:
+        raise
+    except Exception as e:
+        log.warning("Chroma query failed for memory search", extra={"error": str(e)})
+        raise VectorUnavailableError(
+            f"ChromaDB memory search failed at query: {e}"
+        ) from e
 
     docs = results.get("documents", [[]])[0]
     distances = results.get("distances", [[]])[0]

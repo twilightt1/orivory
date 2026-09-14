@@ -18,6 +18,7 @@ from sqlalchemy import select
 
 from app.database import sync_session
 from app.models.memory import Memory
+from app.retrieval.memory.visibility import current_memory_predicate
 
 log = logging.getLogger(__name__)
 
@@ -29,6 +30,9 @@ def reindex_user_memories_sync(user_id: str, only_missing: bool = True) -> dict:
 
     Returns a summary dict: scanned, already_indexed, reindexed, pages.
     Raises on failure after logging (the admin caller reports ``queued=False``).
+
+    Current rows only: superseded rows are history and dirty rows are stale —
+    neither belongs in the vector index (the predicate applies before paging).
 
     ``only_missing`` is valid only for a collection whose fingerprint and
     contract-generation token match the active runtime. A mismatch aborts
@@ -53,7 +57,7 @@ def reindex_user_memories_sync(user_id: str, only_missing: bool = True) -> dict:
                 rows = (
                     db.execute(
                         select(Memory)
-                        .where(Memory.user_id == user_id)
+                        .where(Memory.user_id == user_id, current_memory_predicate())
                         .order_by(Memory.indexed_at)
                         .offset(offset)
                         .limit(_PAGE_SIZE)

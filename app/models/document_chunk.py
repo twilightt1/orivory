@@ -19,6 +19,8 @@ class DocumentChunk(Base):
     document_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("documents.id", ondelete="CASCADE"), nullable=False, index=True)
     content:     Mapped[str]       = mapped_column(Text, nullable=False)
     chunk_index: Mapped[int]       = mapped_column(Integer(), nullable=False)
+    # Monotonic per-chunk write counter for index-intent idempotency (spec §4.1).
+    revision:    Mapped[int]       = mapped_column(Integer(), default=1, server_default="1", nullable=False)
     chunk_metadata: Mapped[dict]      = mapped_column(JSON, server_default="{}")
     created_at:  Mapped[datetime]  = mapped_column(TIMESTAMP(timezone=True), server_default=func.now())
 

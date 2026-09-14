@@ -18,10 +18,18 @@ the passage rows give fine-grained, citable recall. ``document_chunks`` remains
 the high-fidelity per-conversation citation layer — this is additive.
 
 Linkage is by ``Memory.source_ref == document_id`` (there is no FK from Memory
-to Document). All cleanup paths must therefore delete by that key; see
+to Document). ``source_ref`` is caller-supplied data, so every cleanup /
+projection query is scoped by ``(source_ref, user_id)``: a foreign memory that
+happens to share a ``source_ref`` is never read, deleted or re-embedded. See
 ``delete_document_memories_sync`` and the async variant used by API deletes.
 
-Runs in the **synchronous** Celery ingestion context.
+Every removed/new projection row leaves one durable ``index_outbox`` intent in
+the caller's transaction (spec §5.1), so a crash before the vector write is
+replayable. ``memory_suppressions`` pins a forgotten identity: re-ingest skips
+it instead of resurrecting the memory (spec §5.4/§12.3).
+
+Runs in the **synchronous** Celery ingestion context (the async faces below
+exist for the API delete / forget paths).
 """
 from __future__ import annotations
 
@@ -35,7 +43,13 @@ from sqlalchemy.orm import Session
 
 from app.models.conversation import Conversation
 from app.models.document import Document
-from app.models.memory import Memory
+from app.models.memory import Memory, MemorySuppression
+from app.retrieval.memory.outbox import (
+    bump_revision,
+    enqueue_delete,
+    enqueue_delete_sync,
+    enqueue_upsert_sync,
+)
 from app.utils.chunker import ParentChunk
 
 log = logging.getLogger(__name__)
@@ -74,35 +88,103 @@ def _document_summary(parents: list[ParentChunk]) -> str:
     return head[:_SUMMARY_MAX_CHARS]
 
 
-def delete_document_memories_sync(db: Session, document_id: str) -> list[str]:
-    """Delete all memories derived from a document (sync). Returns deleted ids.
+# ── suppression ledger: a forgotten identity stays forgotten ────────────────
 
-    Deletes by ``source_ref == document_id`` so both the document-level row and
-    its passages are removed regardless of hierarchy. Caller commits.
-    """
-    rows = (
-        db.execute(select(Memory).where(Memory.source_ref == document_id))
-        .scalars()
-        .all()
+
+def _suppression_stmt(user_id, source_ref: str):
+    return select(MemorySuppression.id).where(
+        MemorySuppression.user_id == user_id,
+        MemorySuppression.source_ref == source_ref,
     )
+
+
+def is_suppressed(db: Session, *, user_id, source_ref: str) -> bool:
+    """True when this (user, source_ref) was forgotten and must not come back."""
+    return db.execute(_suppression_stmt(user_id, source_ref)).first() is not None
+
+
+async def is_suppressed_async(db: AsyncSession, *, user_id, source_ref: str) -> bool:
+    """Async face of :func:`is_suppressed`."""
+    return (await db.execute(_suppression_stmt(user_id, source_ref))).first() is not None
+
+
+def suppress_source(db: Session, *, user_id, source_ref: str, reason: str = "forgotten") -> None:
+    """Record that this identity was forgotten (idempotent, caller commits).
+
+    The unique ``(user_id, source_ref)`` keeps exactly one suppression row, so
+    replaying the forget is a no-op instead of an integrity error.
+    """
+    if is_suppressed(db, user_id=user_id, source_ref=source_ref):
+        return
+    db.add(MemorySuppression(id=uuid.uuid4().hex, user_id=user_id,
+                             source_ref=source_ref, reason=reason))
+    # Flush so a replay inside the same transaction sees the row (the session
+    # does not autoflush) instead of racing the unique constraint.
+    db.flush()
+
+
+async def suppress_source_async(db: AsyncSession, *, user_id, source_ref: str,
+                                reason: str = "forgotten") -> None:
+    """Async face of :func:`suppress_source`."""
+    if await is_suppressed_async(db, user_id=user_id, source_ref=source_ref):
+        return
+    db.add(MemorySuppression(id=uuid.uuid4().hex, user_id=user_id,
+                             source_ref=source_ref, reason=reason))
+    await db.flush()
+
+
+# ── projection queries: always scoped to (source_ref, owner) ────────────────
+
+
+def _projection_rows(db, document_id: str, user_id) -> list[Memory]:
+    """This document's projected rows *for one owner* — the tenant boundary."""
+    return list(
+        db.execute(
+            select(Memory).where(
+                Memory.source_ref == document_id,
+                Memory.user_id == user_id,
+            )
+        ).scalars().all()
+    )
+
+
+def delete_document_memories_sync(db: Session, document_id: str, *, user_id) -> list[str]:
+    """Delete one owner's memories derived from a document (sync).
+
+    Deletes by ``(source_ref == document_id, user_id == user_id)`` so both the
+    document-level row and its passages are removed regardless of hierarchy,
+    while a foreign memory sharing the same ``source_ref`` survives. Caller
+    commits.
+    """
+    rows = _projection_rows(db, document_id, user_id)
     ids = [str(m.id) for m in rows]
     for mem in rows:
         db.delete(mem)
     return ids
 
 
-async def delete_document_memories_async(db: AsyncSession, document_id: str) -> list[str]:
+async def delete_document_memories_async(db: AsyncSession, document_id: str, *, user_id) -> list[str]:
     """Async variant of :func:`delete_document_memories_sync`.
 
     Used by the API delete paths (document delete, conversation delete). Deletes
-    the rows in Postgres and returns the ids so the caller can also purge the
-    vector store. Caller commits.
+    the rows in Postgres, enqueues one durable delete intent per row in the SAME
+    transaction, and returns the ids so the caller can also purge the vector
+    store after committing. Caller commits.
     """
     rows = (
-        await db.execute(select(Memory).where(Memory.source_ref == document_id))
+        await db.execute(
+            select(Memory).where(
+                Memory.source_ref == document_id,
+                Memory.user_id == user_id,
+            )
+        )
     ).scalars().all()
     ids = [str(m.id) for m in rows]
     for mem in rows:
+        # Durable intent in the same transaction as the row delete: a crash
+        # before the caller's vector purge is replayable by the drain.
+        await enqueue_delete(db, entity_id=str(mem.id), tenant_id=str(user_id),
+                             revision=int(mem.revision or 1))
         await db.delete(mem)
     return ids
 
@@ -111,14 +193,25 @@ def build_document_memories_sync(
     db: Session,
     document_id: str,
     parents: list[ParentChunk],
+    *,
+    user_id,
 ) -> DocMemoryResult:
     """Create the document + passage memories for one ingested document.
 
-    Idempotent: any memories previously derived from this document are deleted
-    first, so re-ingestion replaces rather than duplicates. The caller is
-    responsible for committing the session and for embedding the returned ids
-    into the vector store.
+    Idempotent: this owner's prior projection of the document is deleted first,
+    so re-ingestion replaces rather than duplicates. Every removed row gets a
+    durable delete intent and every new row a durable upsert intent, all in the
+    caller's transaction — the caller commits the session, then embeds the
+    returned ids into the vector store.
+
+    A suppressed identity (user forgot this source) is skipped outright: no
+    rows, no intent, nothing to re-ingest.
     """
+    if is_suppressed(db, user_id=user_id, source_ref=document_id):
+        log.info("Doc→memory skipped: source suppressed",
+                 extra={"doc_id": document_id, "user_id": str(user_id)})
+        return DocMemoryResult(document_id=document_id, doc_memory_id=None, passage_memory_ids=[])
+
     doc = db.get(Document, document_id)
     if doc is None:
         log.warning("Doc→memory skipped: document not found", extra={"doc_id": document_id})
@@ -128,11 +221,22 @@ def build_document_memories_sync(
     if conversation is None:
         log.warning("Doc→memory skipped: conversation not found", extra={"doc_id": document_id})
         return DocMemoryResult(document_id=document_id, doc_memory_id=None, passage_memory_ids=[])
+    if conversation.user_id != user_id:
+        # The projection is stored under the passed owner, so a mismatched
+        # caller would write (and later erase) another tenant's memories.
+        raise ValueError(
+            f"document {document_id} belongs to a conversation owned by another user; "
+            f"refusing to project memories for {user_id}"
+        )
 
-    user_id = conversation.user_id
-
-    # Idempotency: clear any prior projection of this document.
-    removed_ids = delete_document_memories_sync(db, document_id)
+    # Idempotency: replace this owner's prior projection. A delete intent per
+    # removed row rides the caller's transaction, so the vectors cannot be
+    # stranded by a crash between the SQL commit and the Chroma purge.
+    removed_ids: list[str] = []
+    for mem in _projection_rows(db, document_id, user_id):
+        enqueue_delete_sync(db, entity_id=str(mem.id), tenant_id=str(user_id), revision=mem.revision)
+        db.delete(mem)
+        removed_ids.append(str(mem.id))
 
     base_meta = {
         "document_id": document_id,
@@ -152,9 +256,10 @@ def build_document_memories_sync(
         extra_metadata={**base_meta, "kind": "document"},
     )
     db.add(doc_memory)
+    bump_revision(doc_memory)  # revision 1, explicit before the INSERT
     db.flush()  # need doc_memory.id for passage parent_id
 
-    passage_ids: list[str] = []
+    passages: list[Memory] = []
     for parent in parents:
         passage = Memory(
             id=uuid.uuid4(),
@@ -174,9 +279,14 @@ def build_document_memories_sync(
             },
         )
         db.add(passage)
-        passage_ids.append(str(passage.id))
+        bump_revision(passage)
+        passages.append(passage)
 
     db.flush()
+    passage_ids = [str(p.id) for p in passages]
+    for mem in (doc_memory, *passages):
+        # Durable index intent in the SAME commit as the row (spec §5.1).
+        enqueue_upsert_sync(db, mem)
     log.info(
         "Built document memories",
         extra={"doc_id": document_id, "passages": len(passage_ids)},
@@ -194,5 +304,9 @@ __all__ = [
     "build_document_memories_sync",
     "delete_document_memories_sync",
     "delete_document_memories_async",
+    "is_suppressed",
+    "is_suppressed_async",
+    "suppress_source",
+    "suppress_source_async",
     "DOC_MEMORY_SOURCE_TYPE",
 ]

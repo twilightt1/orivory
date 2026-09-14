@@ -36,7 +36,9 @@ from app.models.memory import Memory
 from app.models.memory_access_log import MemoryAccessLog
 from app.retrieval.embedder import EmbeddingDimensionMismatch
 from app.retrieval.memory.correction import Slot, get_cm, resolve_correction, state_of
-from app.retrieval.memory.write_back import index_new_memory, safe_delete_from_chroma
+from app.retrieval.memory.outbox import mark_done
+from app.retrieval.memory.visibility import not_dirty_predicate
+from app.retrieval.memory.write_back import index_new_memory
 from app.services.erasure_service import erase_memories
 
 log = logging.getLogger(__name__)
@@ -76,6 +78,7 @@ def _memory_brief(memory: Memory) -> dict[str, Any]:
         "tags": list(memory.tags or []),
         "salience": memory.salience,
         "captured_at": _iso(memory.captured_at),
+        "state": state_of(memory),
     }
 
 
@@ -122,7 +125,9 @@ async def _recall_memory_ids(query: str, limit: int) -> list[tuple[UUID, float]]
     MVP ranking is a plain SQL select — the user's memories ordered by
     salience desc, then captured_at desc (``query`` is kept for seam
     compatibility; semantic recall replaces this body later without touching
-    the tool bodies). Tests monkeypatch this and return
+    the tool bodies). Dirty rows are filtered before the LIMIT so they cannot
+    consume capped candidate slots; superseded rows stay eligible (history
+    widening happens at the hydration step). Tests monkeypatch this and return
     ``[(memory_id, score), ...]`` pairs.
     """
     principal = _current_principal()
@@ -132,7 +137,7 @@ async def _recall_memory_ids(query: str, limit: int) -> list[tuple[UUID, float]]
         rows = (
             await db.execute(
                 select(Memory.id, Memory.salience)
-                .where(Memory.user_id == principal.user_id)
+                .where(Memory.user_id == principal.user_id, not_dirty_predicate())
                 .order_by(Memory.salience.desc(), Memory.captured_at.desc())
                 .limit(limit)
             )
@@ -165,11 +170,17 @@ async def search_memory(query: str, limit: int = 8, include_history: bool = Fals
                     select(Memory).where(
                         Memory.id.in_([mid for mid, _ in recalled]),
                         Memory.user_id == principal.user_id,
+                        # Dirty rows are never served, not even in history.
+                        not_dirty_predicate(),
                     )
                 )
             ).scalars().all()
             by_id = {row.id: row for row in rows}
             rows_in_rank = [mem for mem in (by_id.get(mid) for mid, _ in recalled) if mem is not None]
+            # Defence in depth (the query above already filters dirty): this
+            # mirror of state_of is the layer that also catches a hand-written
+            # falsy marker. History widens to superseded, never to dirty.
+            rows_in_rank = [m for m in rows_in_rank if state_of(m) != "dirty"]
             if not include_history:
                 rows_in_rank = [m for m in rows_in_rank if state_of(m) != "superseded"]
             results = [_memory_index_row(m) for m in rows_in_rank]
@@ -270,7 +281,8 @@ async def timeline(memory_id: str, window: int = 4) -> dict[str, Any]:
 
     def _row(m: Memory) -> dict[str, Any]:
         return {"id": str(m.id), "title": m.title,
-                "snippet": (m.content or "")[:160], "captured_at": _iso(m.captured_at)}
+                "snippet": (m.content or "")[:160], "captured_at": _iso(m.captured_at),
+                "state": state_of(m)}
 
     return {
         "anchor": _row(anchor),
@@ -317,7 +329,7 @@ async def list_recent(limit: int = 20) -> dict[str, Any]:
         rows = (
             await db.execute(
                 select(Memory)
-                .where(Memory.user_id == principal.user_id)
+                .where(Memory.user_id == principal.user_id, not_dirty_predicate())
                 .order_by(Memory.captured_at.desc(), Memory.id.desc())
                 .limit(capped)
             )
@@ -357,11 +369,17 @@ async def add_memory(title: str, content: str, tags: list[str] | None = None) ->
             summary=summary_out)
         memory = out["memory"]
     try:
-        await index_new_memory(memory)  # best-effort: embed + graph enqueue
+        indexed = await index_new_memory(memory)  # best-effort: embed + graph enqueue
     except EmbeddingDimensionMismatch:
         raise
     except Exception as exc:
+        indexed = False
         log.warning("MCP add_memory indexing failed for %s: %s", memory.id, exc)
+    if indexed:
+        # Indexed in the fast path: ack the durable intent so a boot drain does
+        # not re-embed this revision.
+        async with _session() as db:
+            await mark_done(db, entity_id=memory.id, revision=memory.revision)
     async with _session() as db:
         db.add(
             _ledger_entry(
@@ -376,7 +394,12 @@ async def add_memory(title: str, content: str, tags: list[str] | None = None) ->
 
 
 async def delete_memory(memory_id: str) -> dict[str, Any]:
-    """Delete one memory owned by the caller (requires ``memory:write``)."""
+    """Delete one memory owned by the caller (requires ``memory:write``).
+
+    Goes through the durable erasure path (``erase_memories``): one closure
+    transaction, a delete intent per affected id, and a receipt. Response shape
+    is unchanged; ``receipt_id`` is additive.
+    """
     principal = _current_principal()
     if principal is None:
         return IDENTITY_ERROR
@@ -393,14 +416,21 @@ async def delete_memory(memory_id: str) -> dict[str, Any]:
             )
         ).scalars().first()
         if row is None:
-            db.add(_ledger_entry(principal, ACTION_DELETE, memory_id=mid, detail={"deleted": False}))
+            # The id rides ``detail``, not the ``memory_id`` column: that column
+            # FKs memories.id (SET NULL) and a dangling reference fails the
+            # INSERT on Postgres.
+            db.add(_ledger_entry(principal, ACTION_DELETE,
+                                 detail={"deleted": False, "memory_id": str(mid)}))
             await db.commit()
             return {"error": "memory not found"}
-        await db.delete(row)
-        await safe_delete_from_chroma(mid)  # best-effort vector cleanup
-        db.add(_ledger_entry(principal, ACTION_DELETE, memory_id=mid, detail={"deleted": True}))
+        receipt = await erase_memories(db, principal.user_id, [mid],
+                                       requested_by=f"agent:{principal.name}")
+        receipt_id = str(receipt.id)
+        db.add(_ledger_entry(principal, ACTION_DELETE,
+                             detail={"deleted": True, "memory_id": str(mid),
+                                     "receipt_id": receipt_id}))
         await db.commit()
-    return {"deleted": True, "id": str(mid)}
+    return {"deleted": True, "id": str(mid), "receipt_id": receipt_id}
 
 
 async def forget_memory(memory_ids: list[str]) -> dict[str, Any]:
@@ -497,11 +527,15 @@ async def correct_memory(memory_id=None, subject="", attribute="", scope="defaul
                     "dirtied": out["dirtied"], "memory_id": str(new.id)}))
         await db.commit()
     try:
-        await index_new_memory(new)
+        indexed = await index_new_memory(new)
     except EmbeddingDimensionMismatch:
         raise
     except Exception as exc:
+        indexed = False
         log.warning("MCP correct_memory indexing failed for %s: %s", new.id, exc)
+    if indexed:
+        async with _session() as db:
+            await mark_done(db, entity_id=new.id, revision=new.revision)
     return {"status": out["status"], "id": str(new.id),
             "superseded": out["superseded"], "dirtied": out["dirtied"],
             **_memory_provenance(new)}

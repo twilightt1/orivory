@@ -73,22 +73,34 @@ memory_ids, *, requested_by)`:
 
 1. **Ownership check** — foreign/missing ids are recorded
    (`not_found_or_foreign`), never deleted.
-2. **Collect cascade targets BEFORE deleting** — descendants via BFS over
-   `parent_id` (user-filtered, depth cap 5, traversal recorded), entity/
-   source link counts.
-3. **Delete** — `db.delete(row)` per target (ORM/DB cascade removes links
-   and children), `safe_delete_from_chroma` for every affected id.
-4. **Verify** — re-query Chroma for all affected ids and re-count residual
-   DB rows; every target carries `vector_residual_checked` and
-   `depth_capped`.
-5. **Receipt** — one `erasure_receipts` row per call:
-   `completed` / `completed_with_residual` / `completed_with_errors`
+2. **Collect the closure BEFORE deleting** — descendants via BFS over
+   `parent_id` (user-filtered, visited set, no silent depth cap; a closure
+   past the `_MAX_CLOSURE_IDS` safety bound refuses the erase with
+   `truncated=True`), the derived-memory set (`DerivedClosureError` is
+   recorded as `derived_closure="unknown"`), entity/source link counts.
+3. **One closure transaction** — the row delete for every affected id, one
+   durable delete intent per id (`index_outbox`, same commit), a suppression
+   row when a forgotten projection's source document still exists, and the
+   user's now-orphaned entities + relations.
+4. **Purge + verify** — `safe_delete_from_chroma` for every affected id,
+   then re-query Chroma and re-count residual DB rows. Each target carries
+   `vector_state`: `verified` / `pending` / `unknown` / `residual` (a failed
+   purge stays `pending` — the intent is what retries it).
+5. **Receipt** — one `erasure_receipts` row per call, with additive
+   `detail.verification` and `detail.index_pending` (omitted when nothing was
+   erased — no erase, no verification claim):
+   `completed_with_errors` > `completed_with_residual` >
+   `completed_unverified` (no positive presence readback; spec §5.4/P1 gate) >
+   `completed` (positively verified) — rollup precedence, highest wins
    (per-target try/except + session rollback so remaining targets still
    process). Receipt-commit failure is the one documented unrecorded mode.
 
+REST `DELETE /memories/{id}` and MCP `delete_memory` both call
+`erase_memories`; document/session/conversation deletes enqueue memory-kind
+delete intents in their own commit and purge vectors after it.
+
 Honest v0 limits: verification is absence-checking (KG-correlation
-re-inference probing is a follow-up); `entities`/`relations` nodes survive
-memory erasure (link counts recorded; pruning is a follow-up).
+re-inference probing is a follow-up).
 
 ## 4. Import paths (`app/ingestion/import_formats.py` + `import_service.py`)
 

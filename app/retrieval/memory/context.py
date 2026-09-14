@@ -12,6 +12,9 @@ Strategy:
 Results are deduplicated by ``memory.id`` and capped at ``cap`` items,
 sorted by ``captured_at`` descending.
 
+Superseded and dirty rows are excluded IN SQL, before the per-query limits —
+a post-hoc filter after the cap lets stale rows crowd out the current slice.
+
 This is the **only** module in the memory retrieval package that
 talks to the relational DB for read. Everything else (scoring, vector
 search, rewriting) is pure or talks to ChromaDB.
@@ -26,6 +29,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.memory import Memory
+from app.retrieval.memory.visibility import current_memory_predicate
 
 log = logging.getLogger(__name__)
 
@@ -56,7 +60,8 @@ async def fetch_personal_context(
     # 1) Pinned memories (cap at `cap` to avoid runaway).
     pinned_q = (
         select(Memory)
-        .where(Memory.user_id == user_id, Memory.pinned.is_(True))
+        .where(Memory.user_id == user_id, Memory.pinned.is_(True),
+               current_memory_predicate())
         .order_by(Memory.captured_at.desc())
         .limit(cap)
     )
@@ -64,7 +69,8 @@ async def fetch_personal_context(
     # 2) Recent-in-window memories (cap at 50 to avoid huge lists).
     recent_q = (
         select(Memory)
-        .where(Memory.user_id == user_id, Memory.captured_at >= cutoff)
+        .where(Memory.user_id == user_id, Memory.captured_at >= cutoff,
+               current_memory_predicate())
         .order_by(Memory.captured_at.desc())
         .limit(50)
     )
@@ -73,7 +79,7 @@ async def fetch_personal_context(
     #    we dedup by id below).
     last_n_q = (
         select(Memory)
-        .where(Memory.user_id == user_id)
+        .where(Memory.user_id == user_id, current_memory_predicate())
         .order_by(Memory.captured_at.desc())
         .limit(recent_limit)
     )

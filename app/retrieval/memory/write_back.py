@@ -51,18 +51,23 @@ async def safe_upsert_to_chroma(memory: Memory) -> bool:
         return False
 
 
-async def safe_delete_from_chroma(memory_id: UUID | str) -> None:
-    """Remove a memory's vector from ChromaDB. Never raises."""
+async def safe_delete_from_chroma(memory_id: UUID | str) -> bool:
+    """Remove a memory's vector from ChromaDB. Never raises.
+
+    Returns whether the backend confirmed the delete, so a caller that owns a
+    durable intent (the outbox drain) can tell a purge from an outage.
+    """
     try:
         from app.retrieval.memory.vector_store import delete_memory
 
-        await delete_memory(str(memory_id))
+        return await delete_memory(str(memory_id))
     except Exception as exc:
         log.warning(
             "ChromaDB delete failed for memory %s: %s",
             memory_id, exc,
             extra={"memory_id": str(memory_id)},
         )
+        return False
 
 
 def safe_enqueue_graph_build(memory_id: UUID | str) -> None:
@@ -84,16 +89,21 @@ def safe_enqueue_graph_build(memory_id: UUID | str) -> None:
         )
 
 
-async def index_new_memory(memory: Memory) -> None:
+async def index_new_memory(memory: Memory) -> bool:
     """Run the full post-persist indexing pipeline for one memory.
 
     Caller must have already committed the row. Embeds synchronously (best
     effort for transient outages) and enqueues graph extraction. Contract
     mismatches propagate as typed integrity failures. Use this from any async
     path that creates or updates a ``Memory``.
+
+    Returns whether the vector write landed: ``False`` means the durable
+    outbox intent enqueued with the row is now the only path to the index
+    (``drain_pending``), which is what ``indexing="pending"`` reports.
     """
-    await safe_upsert_to_chroma(memory)
+    indexed = await safe_upsert_to_chroma(memory)
     safe_enqueue_graph_build(memory.id)
+    return indexed
 
 
 __all__ = [

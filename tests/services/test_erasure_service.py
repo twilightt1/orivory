@@ -17,8 +17,34 @@ from app.services import erasure_service
 from app.services.erasure_service import erase_memories, list_receipts
 
 
+def _compiled(stmt):
+    """Compile for routing: PG first, sqlite for dialect-specific DML.
+
+    ``enqueue_delete`` uses a dialect ``INSERT ... ON CONFLICT`` that only
+    compiles under its own dialect; every other assertion here is PG-shaped.
+    """
+    try:
+        return stmt.compile(dialect=postgresql.dialect())
+    except Exception:
+        from sqlalchemy.dialects import sqlite
+
+        return stmt.compile(dialect=sqlite.dialect())
+
+
 def _sql(stmt) -> str:
-    return str(stmt.compile(dialect=postgresql.dialect()))
+    return str(_compiled(stmt))
+
+
+def _param_values(stmt) -> set:
+    """Flatten compiled params — an ``IN (...)`` list counts as its elements."""
+    values: set = set()
+    for value in _compiled(stmt).params.values():
+        values.update(value if isinstance(value, (list, tuple, set)) else [value])
+    return values
+
+
+class _FakeBind:
+    dialect = type("_Dialect", (), {"name": "sqlite"})()
 
 
 class _FakeScalar:
@@ -75,10 +101,14 @@ class _FakeDB:
     async def get(self, model, pk):
         return self._owned.get(pk)
 
+    def get_bind(self):
+        # The outbox picks its INSERT dialect from the bind; lite runs sqlite.
+        return _FakeBind()
+
     async def execute(self, stmt):
         sql = _sql(stmt).lower()
         self.statements.append(stmt)
-        params = stmt.compile(dialect=postgresql.dialect()).params
+        params = _compiled(stmt).params
         if "erasure_receipts" in sql:
             return _FakeScalar(self._total) if "count(" in sql else _FakeRows(self._rows)
         residual = any(isinstance(v, (list, tuple)) for v in params.values())
@@ -89,11 +119,11 @@ class _FakeDB:
                 return _FakeScalar(self._residual["source_links"] if residual else self._source_links)
             return _FakeScalar(self._residual["children"] if residual else 0)
         parent_id = next((v for v in params.values() if isinstance(v, (list, tuple))), None)
-        if parent_id is not None:  # BFS frontier: children of every id in it
+        if parent_id is not None:  # BFS frontier: (id, revision) rows for children of every id in it
             found = [cid for pid in parent_id for cid in self._child_ids.get(pid, [])]
             if not any("user_id" in key for key in params):  # unfiltered query → cross-user rows leak in
                 found += [cid for pid in parent_id for cid in self._foreign_child_ids.get(pid, [])]
-            return _FakeRows(found)
+            return _FakeRows([(cid, 1) for cid in found])
         return _FakeRows(self._child_ids.get(next(iter(params.values()), None), []))
 
     def add(self, obj):
@@ -122,6 +152,7 @@ def no_chroma(monkeypatch):
 
     async def _fake_delete(memory_id):
         deleted.append(str(memory_id))
+        return True  # the backend confirmed the purge
 
     async def _no_residual(_ids):
         return set()
@@ -137,7 +168,9 @@ async def test_erase_deletes_owned_memory_and_writes_receipt(no_chroma):
 
     receipt = await erase_memories(db, user_id, [mid], requested_by="rest_api")
 
-    assert [d.id for d in db.deleted] == [mid]
+    delete_stmts = [s for s in db.statements if "delete from memories" in _sql(s).lower()]
+    assert len(delete_stmts) == 1  # the whole closure in one statement
+    assert _param_values(delete_stmts[0]) == {mid}
     assert receipt.status == "completed"
     assert receipt.requested_memory_ids == [str(mid)]
     target = receipt.detail["targets"][0]
@@ -162,6 +195,9 @@ async def test_erase_skips_foreign_or_missing_and_still_writes_receipt(no_chroma
     assert receipt.status == "completed"
     assert receipt.detail["targets"] == [{"memory_id": receipt.requested_memory_ids[0], "status": "not_found_or_foreign"}]
     assert receipt.detail["summary"]["erased"] == 0
+    # F2: nothing was erased, so there is no vector verification to claim.
+    assert "verification" not in receipt.detail
+    assert "index_pending" not in receipt.detail
 
 
 async def test_erase_dedups_input_ids(no_chroma):
@@ -223,7 +259,12 @@ async def test_erase_survives_chroma_outage(no_chroma, monkeypatch):
     monkeypatch.setattr(erasure_service, "_chroma_present_ids", _chroma_down)
     receipt = await erase_memories(db, user_id, [mid], requested_by="rest_api")
 
-    assert receipt.status == "completed"  # verification unknown ≠ residual
+    # Spec §5.4 / P1 gate: an unknown residual check must not read as a plain
+    # completion — the status degrades to `completed_unverified` because
+    # nothing was positively verified (this is the corrected meaning, not a
+    # relaxed assertion: `completed` now requires a positive readback).
+    assert receipt.status == "completed_unverified"
+    assert receipt.detail["targets"][0]["vector_state"] == "unknown"
     assert receipt.detail["targets"][0]["vector_residual_checked"] is False
 
 
@@ -233,14 +274,14 @@ async def test_mid_call_error_still_produces_receipt_with_error_target(no_chroma
         first: _memory_row(first, user_id),
         second: _memory_row(second, user_id),
     })
-    real_delete = db.delete
+    real_execute = db.execute
 
-    async def _fail_on_second(obj):
-        if obj.id == second:
+    async def _fail_on_second(stmt):
+        if "delete from memories" in _sql(stmt).lower() and second in _param_values(stmt):
             raise RuntimeError("boom on second target")
-        await real_delete(obj)
+        return await real_execute(stmt)
 
-    db.delete = _fail_on_second
+    db.execute = _fail_on_second
 
     receipt = await erase_memories(db, user_id, [first, second], requested_by="rest_api")
 
@@ -297,32 +338,56 @@ async def test_bfs_skips_foreign_user_descendants(no_chroma):
     assert sorted(target["vectors_deleted"]) == sorted([str(mid), str(child)])
     assert sorted(no_chroma) == sorted([str(mid), str(child)])
     # Compiled-SQL guard: every frontier query carries the user_id condition.
-    bfs_stmts = [s for s in db.statements if "FROM memories" in _sql(s) and "count(" not in _sql(s).lower()]
+    bfs_stmts = [s for s in db.statements
+                 if "memories.parent_id IN" in _sql(s) and "count(" not in _sql(s).lower()]
     assert bfs_stmts, "BFS frontier statement not captured"
     for stmt in bfs_stmts:
-        assert any("user_id" in key for key in stmt.compile(dialect=postgresql.dialect()).params)
+        assert any("user_id" in key for key in _compiled(stmt).params)
     assert receipt.status == "completed"
 
 
-async def test_depth_cap_flags_residual_status(no_chroma):
-    """A 6-level chain vs the 5-level BFS cap: the traversal is truncated, the
-    per-target detail flags it, and the receipt status is completed_with_residual."""
+async def test_closure_over_safety_bound_is_refused_not_capped(no_chroma, monkeypatch):
+    """A closure bigger than ``_MAX_CLOSURE_IDS`` is refused — the target is an
+    error with ``truncated=True`` and nothing is deleted, so a partial closure
+    can never be reported as a completed erasure (`_MAX_BFS_DEPTH` is gone: the
+    walk enumerates the whole closure)."""
+    monkeypatch.setattr(erasure_service, "_MAX_CLOSURE_IDS", 5)
     user_id, mid = uuid.uuid4(), uuid.uuid4()
-    chain = [uuid.uuid4() for _ in range(6)]  # mid → c1 → … → c6 (6 edges, cap 5)
+    chain = [uuid.uuid4() for _ in range(7)]
     child_ids = {mid: [chain[0]]}
-    child_ids.update({chain[i]: [chain[i + 1]] for i in range(5)})
+    child_ids.update({chain[i]: [chain[i + 1]] for i in range(6)})
     db = _FakeDB(owned={mid: _memory_row(mid, user_id)}, child_ids=child_ids)
 
     receipt = await erase_memories(db, user_id, [mid], requested_by="rest_api")
 
     target = receipt.detail["targets"][0]
-    assert target["traversal_depth"] == 5
-    assert target["depth_capped"] is True
-    assert target["vectors_unverified_depth_cap"] == 1  # 6th level stays untracked
-    assert target["affected_memory_ids"] == [str(c) for c in chain[:5]]
-    assert target["vector_residual"] == []  # verified absence stays its own field
-    assert receipt.status == "completed_with_residual"
-    assert receipt.detail["summary"]["residual_vectors"] == 0
+    assert target["status"] == "error"
+    assert target["truncated"] is True
+    assert "closure exceeds" in target["error"]
+    assert receipt.status == "completed_with_errors"
+    assert db.deleted == []  # nothing executed: no partial erase
+    assert "index_outbox" not in " ".join(_sql(s) for s in db.statements)
+
+
+async def test_erase_enqueues_one_delete_intent_per_affected_id(no_chroma):
+    """The closure transaction carries a delete intent for the target AND every
+    descendant — the durable record that the vectors still have to go."""
+    user_id, mid, child, grandchild = uuid.uuid4(), uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    db = _FakeDB(owned={mid: _memory_row(mid, user_id)},
+                 child_ids={mid: [child], child: [grandchild]})
+
+    receipt = await erase_memories(db, user_id, [mid], requested_by="rest_api")
+
+    inserts = [s for s in db.statements if "insert into index_outbox" in _sql(s).lower()]
+    assert len(inserts) == 3, "one delete intent per affected id"
+    for stmt in inserts:
+        params = _compiled(stmt).params
+        assert params["operation"] == "delete"
+        assert params["revision"] == 1  # each row's current revision
+        assert params["tenant_id"] == user_id.hex
+    assert {params["entity_id"] for params in (_compiled(s).params for s in inserts)} == {
+        mid.hex, child.hex, grandchild.hex}
+    assert receipt.detail["targets"][0]["status"] == "deleted"
 
 
 @pytest.mark.asyncio

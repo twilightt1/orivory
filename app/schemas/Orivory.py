@@ -71,6 +71,18 @@ class MemoryResponse(BaseModel):
     captured_at: datetime
     indexed_at:  datetime
     updated_at:  datetime
+    # Monotonic per-entity write counter (spec §4.1): bumped with every
+    # content/metadata write that is enqueued to the index outbox.
+    revision:    int
+    # Write responses only (POST/PATCH): "pending" = the write's durable index
+    # intent is still queued (the immediate best-effort embed did not land);
+    # "ready" = it landed. None on read paths — a response that did not
+    # observe an index state makes no claim about one.
+    indexing:    Literal["ready", "pending"] | None = None
+    # Lifecycle state, mirroring correction.state_of (spec §4.2): a superseded
+    # row stays readable but never reads as current; dirty rows are not served
+    # by list views at all.
+    state:       Literal["current", "superseded", "dirty", "needs-check"]
     metadata:    dict
 
     model_config = ConfigDict(from_attributes=True)

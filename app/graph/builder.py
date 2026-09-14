@@ -414,6 +414,9 @@ def _merge_relation_metadata(existing: dict | None, extracted: ExtractedRelation
 
 
 def _mark_processed(memory: Memory, entity_result, relation_result) -> None:
+    # Metadata-only write, and it runs AFTER the memory's index intent has
+    # been drained: bumping ``revision``/enqueuing here would loop
+    # drain -> upsert -> graph -> enqueue forever. Leave both untouched.
     metadata = dict(memory.extra_metadata or {})
     metadata[GRAPH_EXTRACTED_AT_KEY] = datetime.now(UTC).isoformat()
     metadata["graph_entity_count"] = len(entity_result.entities)

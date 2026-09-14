@@ -24,9 +24,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.ingestion.connectors.registry import get_connector_for_source
+from app.ingestion.document_memory import is_suppressed_async
 from app.ingestion.types import ConnectorItem, ItemError, SyncResult
 from app.models.memory import Memory
 from app.models.source import MemorySource, Source
+from app.retrieval.memory.outbox import bump_revision, enqueue_upsert, mark_done
 
 log = logging.getLogger(__name__)
 
@@ -115,15 +117,16 @@ class SourceSyncService:
         finalized = await self._finalize(source, result)
         commit_failed = any((err.message or "").startswith("Commit failed") for err in finalized.errors)
         if index_memory_ids and not commit_failed:
-            await self._index_memories(index_memory_ids)
+            await self._index_memories(index_memory_ids, user_id=source.user_id)
         return finalized
 
-    async def _index_memories(self, memory_ids: list[str]) -> None:
+    async def _index_memories(self, memory_ids: list[str], *, user_id) -> None:
         """Embed + enqueue graph extraction for committed memories.
 
-        Best-effort: the memories are already durable in Postgres, so an
-        embedding/enqueue failure is logged and replayable via the reindex
-        task rather than failing the sync.
+        Best-effort: the memories are already durable in Postgres (with their
+        index intents), so an embedding/enqueue failure is logged and replayable
+        via the reindex task rather than failing the sync. Scoped to the source
+        owner so a foreign id can never be embedded through this sync.
         """
         from app.retrieval.memory.write_back import (
             safe_enqueue_graph_build,
@@ -131,10 +134,18 @@ class SourceSyncService:
         )
 
         rows = (
-            await self.db.execute(select(Memory).where(Memory.id.in_(memory_ids)))
+            await self.db.execute(
+                select(Memory).where(
+                    Memory.id.in_(memory_ids),
+                    Memory.user_id == user_id,
+                )
+            )
         ).scalars().all()
         for memory in rows:
-            await safe_upsert_to_chroma(memory)
+            if await safe_upsert_to_chroma(memory):
+                # Indexed now: ack the intent this batch committed, so a boot
+                # drain does not re-embed it.
+                await mark_done(self.db, entity_id=memory.id, revision=memory.revision)
             safe_enqueue_graph_build(memory.id)
 
     # ── internals ────────────────────────────────────────────────────────────
@@ -143,7 +154,16 @@ class SourceSyncService:
         """
         Create or update a Memory + MemorySource pair for one item.
         Returns (outcome, memory_id), where outcome is 'added' | 'updated' | 'skipped'.
+
+        A suppressed identity is skipped outright: re-sync must never resurrect
+        a memory the user forgot (spec §5.4). Every created/updated row gets a
+        durable index intent in the batch transaction (spec §5.1).
         """
+        if item.source_ref and await is_suppressed_async(
+            self.db, user_id=source.user_id, source_ref=item.source_ref
+        ):
+            return "skipped", None
+
         # Find an existing memory linked to this (source, ref).
         # Eager-load the memory relationship — lazy loading on AsyncSession
         # raises MissingGreenlet.
@@ -171,6 +191,8 @@ class SourceSyncService:
             memory.extra_metadata = {**(memory.extra_metadata or {}), **item.metadata}
             existing_link.item_excerpt = item.source_excerpt
             existing_link.item_url = item.source_url
+            bump_revision(memory)
+            await enqueue_upsert(self.db, memory)
             return "updated", str(memory.id)
 
         # Create new memory
@@ -187,7 +209,9 @@ class SourceSyncService:
             extra_metadata=item.metadata,
         )
         self.db.add(memory)
+        bump_revision(memory)  # revision 1, explicit before the INSERT
         await db_flush(self.db)
+        await enqueue_upsert(self.db, memory)
 
         link = MemorySource(
             memory_id=memory.id,
@@ -197,6 +221,10 @@ class SourceSyncService:
             item_excerpt=item.source_excerpt,
         )
         self.db.add(link)
+        # Flush so the next item's (source, ref) lookup sees this row: the
+        # batch runs on an autoflush=False session and a repeated ref in one
+        # fetch must update this row, not create a duplicate.
+        await db_flush(self.db)
         return "added", str(memory.id)
 
     async def _finalize(self, source: Source, result: SyncResult) -> SyncResult:

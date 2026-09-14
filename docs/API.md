@@ -1061,6 +1061,8 @@ List memories with filtering and semantic search.
 }
 ```
 
+> **Note — `total` counts visible rows only:** dirty (stale-derived) memories are excluded from the page and from the total; superseded rows stay listed, labeled `state: "superseded"`.
+
 ---
 
 ### GET /api/v1/memories/{id}
@@ -2851,9 +2853,12 @@ curl -s -X POST https://api.orivory.io/api/v1/erasure-receipts \
 
 | Status                    | Meaning                                                              |
 |---------------------------|----------------------------------------------------------------------|
-| `completed`               | Every target erased and verified clean — no residual vectors or rows |
+| `completed`               | Every target erased and positively verified — absence readback confirmed for every deleted target |
+| `completed_unverified`    | Erasure succeeded and found no residual, but no positive presence readback (a target is `pending` or `unknown`); spec §5.4 / P1 gate: `completed` is never stored without one |
 | `completed_with_residual` | Erasure succeeded, but the verification pass found leftover vectors or DB rows |
 | `completed_with_errors`   | At least one target's erasure raised; the error is recorded per-target and the remaining targets were still erased |
+
+Rollup precedence: `completed_with_errors` > `completed_with_residual` > `completed_unverified` > `completed`. `detail.verification`/`detail.index_pending` are omitted when the call erased nothing (a forget that deleted nothing verified nothing).
 
 `vector_residual_checked: false` means the Chroma re-query was unavailable during verification (the DB delete still succeeded — Postgres is the source of truth). A `false` flag alone does not imply residual data.
 

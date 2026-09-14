@@ -1,3 +1,8 @@
+import logging
+import os
+import shutil
+import sqlite3
+import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 from functools import lru_cache
@@ -10,8 +15,14 @@ from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from app.config import settings
 
+log = logging.getLogger(__name__)
+
 IS_SQLITE = settings.DATABASE_URL.startswith("sqlite")
-SQLITE_SCHEMA_VERSION = 1
+SQLITE_SCHEMA_VERSION = 2
+
+# Objects added by the v1 -> v2 ladder; excluded from the v1 shape check.
+V2_TABLES = ("index_outbox", "index_generations", "memory_suppressions")
+V2_COLUMNS = {"memories": "revision", "document_chunks": "revision"}
 
 
 def _make_engine():
@@ -68,35 +79,127 @@ class Base(DeclarativeBase):
     pass
 
 
-def _adoptable_sqlite_schema(sync_conn) -> bool:
-    """True when an unversioned SQLite schema matches the model metadata.
+def _upgradable_v1_schema(sync_conn) -> bool:
+    """True when an unversioned SQLite schema matches the v1 shape.
 
-    Pre-versioning installs (<= v1.1.0) built the full schema with
-    ``create_all`` and left ``PRAGMA user_version`` at 0. Such a DB is
-    schema-identical to version 1 by construction, so startup may adopt it
-    by stamping the version. Divergence (missing table/column) is not a
-    match and must fail closed.
+    Pre-versioning installs (<= v1.1.0) built the full v1 schema with
+    ``create_all`` and left ``PRAGMA user_version`` at 0. v1 is the model
+    metadata minus the v2 additions (revision columns + index_outbox /
+    index_generations / memory_suppressions), so such a DB is adoptable and
+    then upgraded by the ladder. Any missing v1 table or column is divergence
+    and must fail closed.
     """
     insp = sa_inspect(sync_conn)
     existing = set(insp.get_table_names())
     for table in Base.metadata.sorted_tables:
+        if table.name in V2_TABLES:
+            continue
         if table.name not in existing:
             return False
+        v2_column = V2_COLUMNS.get(table.name)
         have = {col["name"] for col in insp.get_columns(table.name)}
-        if {col.name for col in table.columns} - have:
+        if {col.name for col in table.columns if col.name != v2_column} - have:
             return False
     return True
 
 
+def _sqlite_path() -> str:
+    """File path of the canonical SQLite database behind the module engine."""
+    path = engine.url.database
+    if not path:
+        raise RuntimeError("SQLite DATABASE_URL has no file path")
+    return path
+
+
+def _backup_before_ddl(db_path: str) -> str:
+    """Consistent pre-DDL backup (VACUUM INTO includes committed WAL frames).
+
+    Resumable: a crash between the backup and the version stamp leaves a
+    complete backup behind, so a later attempt reuses it instead of refusing
+    (the ladder is idempotent and safe to re-run). Only an empty or unreadable
+    backup file is an error — never silently reuse a truncated one.
+    """
+    dest = f"{db_path}.pre-v2.bak"
+    if os.path.exists(dest):
+        if os.path.getsize(dest) == 0 or not os.access(dest, os.R_OK):
+            raise RuntimeError(f"existing migration backup {dest} is empty or unreadable")
+        log.warning("reusing pre-migration backup %s from an interrupted upgrade", dest)
+        return dest
+    size = os.path.getsize(db_path)
+    if shutil.disk_usage(os.path.dirname(db_path) or ".").free < size * 2:
+        raise RuntimeError("insufficient free disk for pre-migration backup")
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        conn.execute("VACUUM INTO ?", (dest,))
+    finally:
+        conn.close()
+    return dest
+
+
+def _upgrade_v1_to_v2(sync_conn) -> None:
+    """v1 -> v2 DDL: revision counters + durable index-intent tables.
+
+    Idempotent: a current-model install that was never stamped (user_version 0)
+    passes the shape check with the v2 objects already in place, so each step
+    inspects before touching the schema.
+    """
+    from app import models  # noqa: F401 — register every v2 table on Base
+
+    insp = sa_inspect(sync_conn)
+    for table_name, column in V2_COLUMNS.items():
+        have = {col["name"] for col in insp.get_columns(table_name)}
+        if column not in have:
+            # DDL mirrors the model's server_default="1" (SQLAlchemy renders
+            # DEFAULT '1'); SQLite's INTEGER affinity stores both as 1.
+            sync_conn.exec_driver_sql(
+                f"ALTER TABLE {table_name} ADD COLUMN {column} INTEGER NOT NULL DEFAULT '1'"
+            )
+    Base.metadata.create_all(sync_conn, tables=[Base.metadata.tables[name] for name in V2_TABLES])
+
+
+def _check_sqlite_foreign_keys(sync_conn) -> None:
+    violations = sync_conn.exec_driver_sql("PRAGMA foreign_key_check").fetchall()
+    if violations:
+        raise RuntimeError(
+            f"SQLite foreign_key_check found violations after schema migration: {violations[:5]}"
+        )
+
+
+def _seed_transitional_generation(sync_conn) -> None:
+    """INSERT-IF-ABSENT: the vector generation this install currently serves.
+
+    P1a keeps Chroma (``vector_store.COLLECTION_NAME`` + the active embedding
+    fingerprint) as that generation. The ``fingerprint`` column stores the
+    64-char ``fingerprint_generation`` token (the same family the vector payload
+    stamps as ``orivory_embed_generation``), not the long canonical contract
+    string — it must fit ``String(128)`` on Postgres. The P1b cutover replaces
+    this row with the real one. Idempotent, so it also repairs an install
+    missing the row.
+    """
+    from app.retrieval.embedding_fingerprint import current_fingerprint, fingerprint_generation
+    from app.retrieval.memory.vector_store import COLLECTION_NAME
+
+    sync_conn.exec_driver_sql(
+        "INSERT INTO index_generations (id, kind, generation, fingerprint, is_active, created_at)"
+        " SELECT ?, 'memory', ?, ?, 1, CURRENT_TIMESTAMP"
+        " WHERE NOT EXISTS (SELECT 1 FROM index_generations"
+        "                   WHERE kind = 'memory' AND generation = ?)",
+        (uuid.uuid4().hex, COLLECTION_NAME, fingerprint_generation(current_fingerprint()),
+         COLLECTION_NAME),
+    )
+
+
 async def bootstrap_sqlite() -> None:
-    """Create a fresh, versioned SQLite schema for lite mode.
+    """Create or upgrade the canonical SQLite schema for lite mode.
 
     Full-stack (Postgres) deployments use Alembic migrations instead —
     `docker compose up migrate` / `alembic upgrade head`. SQLite deployments
-    are created fresh from the model metadata. An existing unversioned
-    schema is adopted as version 1 only when it matches the metadata exactly
-    (schema-identical, no migration needed); any divergence fails closed —
-    ``create_all`` is never used as an existing-schema migration mechanism.
+    are created fresh from the model metadata. An existing install goes
+    through the versioned ``user_version`` ladder: an unversioned v1-shape
+    schema is adopted and upgraded v1 -> v2 (backup before DDL, foreign-key +
+    integrity checks after); divergence fails closed — ``create_all`` is never
+    used as an existing-schema migration mechanism.
     """
     if not IS_SQLITE:
         raise RuntimeError("bootstrap_sqlite() is only for SQLite deployments")
@@ -105,7 +208,7 @@ async def bootstrap_sqlite() -> None:
     async with engine.begin() as conn:
         version = int((await conn.execute(text("PRAGMA user_version"))).scalar_one())
         tables = await conn.run_sync(lambda sync_conn: set(sa_inspect(sync_conn).get_table_names()))
-        if version not in (0, SQLITE_SCHEMA_VERSION):
+        if version not in (0, 1, SQLITE_SCHEMA_VERSION):
             raise RuntimeError(
                 f"unsupported SQLite schema version {version}; expected "
                 f"{SQLITE_SCHEMA_VERSION}"
@@ -113,10 +216,7 @@ async def bootstrap_sqlite() -> None:
         if version == 0:
             if not tables:
                 await conn.run_sync(Base.metadata.create_all)
-                await conn.execute(text(f"PRAGMA user_version = {SQLITE_SCHEMA_VERSION}"))
-            elif await conn.run_sync(_adoptable_sqlite_schema):
-                await conn.execute(text(f"PRAGMA user_version = {SQLITE_SCHEMA_VERSION}"))
-            else:
+            elif not await conn.run_sync(_upgradable_v1_schema):
                 raise RuntimeError(
                     "existing SQLite schema does not match SQLITE_SCHEMA_VERSION "
                     f"{SQLITE_SCHEMA_VERSION}; requires a versioned SQLite migration"
@@ -125,6 +225,17 @@ async def bootstrap_sqlite() -> None:
             raise RuntimeError(
                 "SQLite schema version is marked active but required tables are missing"
             )
+        if version in (0, 1) and tables:
+            _backup_before_ddl(_sqlite_path())
+            await conn.run_sync(_upgrade_v1_to_v2)
+            await conn.run_sync(_check_sqlite_foreign_keys)
+        await conn.execute(text(f"PRAGMA user_version = {SQLITE_SCHEMA_VERSION}"))
+        integrity = await conn.run_sync(
+            lambda sync_conn: sync_conn.exec_driver_sql("PRAGMA integrity_check").fetchone()
+        )
+        if integrity is None or integrity[0] != "ok":
+            raise RuntimeError("SQLite integrity_check failed after schema migration")
+        await conn.run_sync(_seed_transitional_generation)
 
 
 async def get_db():
