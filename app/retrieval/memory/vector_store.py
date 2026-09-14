@@ -22,6 +22,7 @@ import httpx
 from app.config import settings
 from app.models.memory import Memory
 from app.retrieval.embedder import (
+    EmbeddingDimensionMismatch,
     active_backend_name,
     astamp_collection_dim,
     check_collection_dim,
@@ -492,8 +493,10 @@ async def search_memories(
         {memory_id, content, score, metadata, rank, source="vector"}
 
     Raises :class:`VectorUnavailableError` when the collection cannot be
-    acquired (a vector outage is a readiness signal, never an empty list)
-    and :class:`EmbeddingDimensionMismatch` on a contract mismatch.
+    acquired, or when the ``count``/``query`` calls themselves fail — a
+    vector outage is a readiness signal, never an empty list — and
+    :class:`EmbeddingDimensionMismatch` on a contract mismatch. Only a
+    genuinely empty collection (or a query matching nothing) yields ``[]``.
     """
     user_filter = _build_user_filter(user_id, where)
     try:
@@ -504,7 +507,18 @@ async def search_memories(
         log.warning("Chroma unavailable for search", extra={"error": str(e)})
         raise VectorUnavailableError(f"ChromaDB unreachable for memory search: {e}") from e
 
-    count = await collection.count()
+    try:
+        count = await collection.count()
+    except EmbeddingDimensionMismatch:
+        # A contract mismatch is never re-typed as an outage.
+        raise
+    except Exception as e:
+        # The store can also die after acquisition; type the failure at the
+        # step it happened so it is never read as an empty (no-match) result.
+        log.warning("Chroma count failed for memory search", extra={"error": str(e)})
+        raise VectorUnavailableError(
+            f"ChromaDB memory search failed at count: {e}"
+        ) from e
     # Fail loud on backend/dim switches; never stamp here (read path). The
     # count must be known first so an unstamped populated collection cannot be
     # mistaken for a new empty collection.
@@ -516,11 +530,19 @@ async def search_memories(
     if count == 0:
         return []
 
-    results = await collection.query(
-        query_embeddings=[query_embedding],
-        n_results=min(top_k, count),
-        where=user_filter,
-    )
+    try:
+        results = await collection.query(
+            query_embeddings=[query_embedding],
+            n_results=min(top_k, count),
+            where=user_filter,
+        )
+    except EmbeddingDimensionMismatch:
+        raise
+    except Exception as e:
+        log.warning("Chroma query failed for memory search", extra={"error": str(e)})
+        raise VectorUnavailableError(
+            f"ChromaDB memory search failed at query: {e}"
+        ) from e
 
     docs = results.get("documents", [[]])[0]
     distances = results.get("distances", [[]])[0]

@@ -2,7 +2,8 @@
 
 Pinned contract (P1a):
 - memory ``search_memories`` raises ``VectorUnavailableError`` when the
-  collection cannot be acquired (Chroma down) — never ``[]``, so "cannot
+  collection cannot be acquired **or when the count/query calls themselves
+  fail** (Chroma dying after acquisition) — never ``[]``, so "cannot
   answer" is never served as a false no-match.
 - ``recall`` lets the typed errors escape (generic failures still degrade to
   an empty response with a trace).
@@ -22,7 +23,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from app.database import Base, get_db
 from app.main import app
-from app.retrieval.embedder import EmbeddingDimensionMismatch
+from app.retrieval.embedder import EmbeddingDimensionMismatch, active_backend_name
+from app.retrieval.embedding_fingerprint import (
+    canonical_fingerprint,
+    current_fingerprint,
+    fingerprint_generation,
+)
 from app.retrieval.memory import retriever as retriever_module
 from app.retrieval.memory import vector_store
 from app.retrieval.vector_retriever import VectorUnavailableError
@@ -117,3 +123,89 @@ async def test_search_raises_when_collection_unavailable(monkeypatch):
     monkeypatch.setattr(vector_store, "_get_collection", unavailable)
     with pytest.raises(VectorUnavailableError):
         await vector_store.search_memories([0.1] * 8, user_id=str(uuid.uuid4()))
+
+
+def _current_contract_metadata() -> dict:
+    """Collection metadata that satisfies the real embedding-contract guard."""
+    canonical = canonical_fingerprint(current_fingerprint())
+    return {
+        "orivory_embed_backend": active_backend_name(),
+        "orivory_embed_dim": int(current_fingerprint()["dim"]),
+        "orivory_embed_fingerprint": canonical,
+        "orivory_embed_generation": fingerprint_generation(canonical),
+    }
+
+
+async def test_search_raises_when_count_fails_after_acquisition(monkeypatch):
+    """Chroma dying between acquire and count must not read as no-match."""
+    class DyingCollection:
+        metadata: dict = {}
+
+        async def count(self):
+            raise ConnectionError("store died after acquisition")
+
+    async def dying_collection():
+        return DyingCollection()
+
+    monkeypatch.setattr(vector_store, "_get_collection", dying_collection)
+    with pytest.raises(VectorUnavailableError) as excinfo:
+        await vector_store.search_memories([0.1] * 8, user_id="user-1")
+    assert "count" in str(excinfo.value)
+
+
+async def test_search_raises_when_query_fails_after_count(monkeypatch):
+    """A query failure is typed even when count() and the contract guard pass."""
+    meta = _current_contract_metadata()
+
+    class DyingCollection:
+        metadata = meta
+
+        async def count(self):
+            return 4
+
+        async def query(self, **_kwargs):
+            raise ConnectionError("store died mid-query")
+
+    async def dying_collection():
+        return DyingCollection()
+
+    monkeypatch.setattr(vector_store, "_get_collection", dying_collection)
+    with pytest.raises(VectorUnavailableError) as excinfo:
+        await vector_store.search_memories(
+            [0.1] * meta["orivory_embed_dim"], user_id="user-1"
+        )
+    assert "query" in str(excinfo.value)
+
+
+async def test_search_keeps_contract_mismatch_typed(monkeypatch):
+    """A stale collection contract stays EmbeddingDimensionMismatch, never the
+    availability error the count/query guards raise."""
+    meta = _current_contract_metadata()
+    meta["orivory_embed_dim"] = int(meta["orivory_embed_dim"]) + 1
+
+    class MismatchedCollection:
+        metadata = meta
+
+        async def count(self):
+            return 4
+
+    async def mismatched_collection():
+        return MismatchedCollection()
+
+    monkeypatch.setattr(vector_store, "_get_collection", mismatched_collection)
+    with pytest.raises(EmbeddingDimensionMismatch):
+        await vector_store.search_memories([0.1] * 8, user_id="user-1")
+
+
+async def test_search_mismatch_raised_by_count_is_not_retyped(monkeypatch):
+    """Ordering pin: EmbeddingDimensionMismatch passes the count guard unchanged."""
+    class MismatchRaisingCollection:
+        async def count(self):
+            raise EmbeddingDimensionMismatch("contract mismatch mid-count")
+
+    async def mismatch_raising_collection():
+        return MismatchRaisingCollection()
+
+    monkeypatch.setattr(vector_store, "_get_collection", mismatch_raising_collection)
+    with pytest.raises(EmbeddingDimensionMismatch):
+        await vector_store.search_memories([0.1] * 8, user_id="user-1")
