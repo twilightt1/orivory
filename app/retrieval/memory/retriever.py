@@ -31,7 +31,7 @@ from sqlalchemy.orm import selectinload
 from app.config import settings
 from app.models.entity import MemoryEntity
 from app.models.memory import Memory
-from app.retrieval.embedder import embed_query
+from app.retrieval.embedder import EmbeddingDimensionMismatch, embed_query
 from app.retrieval.memory.context import fetch_personal_context
 from app.retrieval.memory.correction import needs_rewrite as _needs_rewrite
 from app.retrieval.memory.correction import state_of as _state_of
@@ -102,6 +102,11 @@ class MemoryRetriever:
             t_context = time.perf_counter()
             try:
                 context = await fetch_personal_context(self.db, self.user_id)
+                context = [
+                    memory
+                    for memory in context
+                    if _state_of(memory) not in ("superseded", "dirty")
+                ]
             except Exception as e:
                 log.warning("fetch_personal_context failed", extra={"error": str(e)})
             finally:
@@ -158,6 +163,10 @@ class MemoryRetriever:
                 user_id=str(self.user_id),
                 top_k=top_k * self.rerank_factor,
             )
+        except EmbeddingDimensionMismatch:
+            # A contract mismatch is a readiness/data-integrity failure, not
+            # an ordinary no-match result.
+            raise
         except Exception as e:
             log.error("search_memories failed", extra={"error": str(e)})
         finally:
@@ -165,14 +174,50 @@ class MemoryRetriever:
 
         num_candidates = len(candidates)
 
-        # 4b) Semantic rerank (Jina cross-encoder, opt-in): reorder the
-        # candidate pool by true query↔document relevance before the
-        # modifier pass. The vector cosine is an approximation; the
-        # cross-encoder reads query + document together and is materially
-        # better at "which of these 45 actually answers the question" —
-        # the exact failure mode the benchmark runs measured. Fallback to
-        # the vector order on any reranker failure (never block recall).
-        if self.semantic_rerank and num_candidates > 1:
+        # 5) Hydrate and authorize from SQL before any candidate text can be
+        # sent to a remote reranker. Vector payload content is stale/untrusted.
+        t_hydrate = time.perf_counter()
+        try:
+            memory_ids: list[UUID] = []
+            for cand in candidates:
+                try:
+                    memory_ids.append(UUID(str(cand["memory_id"])))
+                except (AttributeError, TypeError, ValueError):
+                    log.debug("Skipping malformed vector candidate")
+            if memory_ids:
+                hydrated = await self._hydrate(memory_ids)
+            else:
+                hydrated = {}
+        finally:
+            stage_ms["hydrate_ms"] = (time.perf_counter() - t_hydrate) * 1000.0
+
+        # Hide superseded + derived-dirty candidates and replace vector text
+        # with the current SQL-owned document before rerank.
+        t_eligibility = time.perf_counter()
+        try:
+            visible = []
+            for cand in candidates:
+                mid = str(cand.get("memory_id", ""))
+                mem = hydrated.get(mid)
+                if mem is None:
+                    continue
+                if _state_of(mem) in ("superseded", "dirty"):
+                    continue
+                authorized = dict(cand)
+                authorized["memory_id"] = mid
+                authorized["content"] = (
+                    f"Title: {mem.title}\n{mem.content}" if mem.title else mem.content
+                )
+                visible.append(authorized)
+            candidates = visible
+        finally:
+            stage_ms["eligibility"] = (time.perf_counter() - t_eligibility) * 1000.0
+
+        # 5b) Semantic rerank (Jina cross-encoder, opt-in): the input is now
+        # SQL-authorized current content. Fallback to vector order on an
+        # ordinary reranker failure; contract failures already propagated.
+        if self.semantic_rerank and len(candidates) > 1:
+            fallback_candidates = candidates
             t_rerank = time.perf_counter()
             try:
                 from app.retrieval.reranker import rerank
@@ -181,41 +226,60 @@ class MemoryRetriever:
                     rewritten if not llm_fallback else query,
                     candidates,
                 )
-                if reranked:
-                    candidates = reranked
             except Exception as e:
                 log.warning(
                     "semantic rerank failed — using vector order",
                     extra={"error": str(e)},
                 )
+                candidates = fallback_candidates
+            else:
+                # Rerankers should return their input IDs. Ignore malformed or
+                # newly invented IDs rather than letting the network response
+                # widen the SQL authorization set.
+                safe_reranked = []
+                for cand in reranked or []:
+                    if not isinstance(cand, dict):
+                        continue
+                    mid = str(cand.get("memory_id", ""))
+                    try:
+                        UUID(mid)
+                    except (ValueError, AttributeError):
+                        continue
+                    if mid in hydrated:
+                        safe_reranked.append(cand)
+                if safe_reranked:
+                    # Re-check ownership/state and refresh content after the
+                    # network round in case SQL changed while scoring ran.
+                    candidates = safe_reranked
+                    t_revalidate = time.perf_counter()
+                    refreshed = await self._hydrate(
+                        [UUID(str(c["memory_id"])) for c in candidates]
+                    )
+                    stage_ms["hydrate_ms"] += (
+                        time.perf_counter() - t_revalidate
+                    ) * 1000.0
+                    t_reeligibility = time.perf_counter()
+                    current = []
+                    for cand in candidates:
+                        mid = str(cand.get("memory_id", ""))
+                        mem = refreshed.get(mid)
+                        if mem is None or _state_of(mem) in ("superseded", "dirty"):
+                            continue
+                        current_cand = dict(cand)
+                        current_cand["memory_id"] = mid
+                        current_cand["content"] = (
+                            f"Title: {mem.title}\n{mem.content}" if mem.title else mem.content
+                        )
+                        current.append(current_cand)
+                    candidates = current
+                    hydrated = refreshed
+                    stage_ms["eligibility"] += (
+                        time.perf_counter() - t_reeligibility
+                    ) * 1000.0
+                else:
+                    candidates = fallback_candidates
             finally:
                 stage_ms["rerank"] = (time.perf_counter() - t_rerank) * 1000.0
-
-        # 5) Hydrate from Postgres (with entity_links)
-        t_hydrate = time.perf_counter()
-        try:
-            if candidates:
-                memory_ids = [UUID(c["memory_id"]) for c in candidates]
-                hydrated = await self._hydrate(memory_ids)
-            else:
-                hydrated = {}
-        finally:
-            stage_ms["hydrate_ms"] = (time.perf_counter() - t_hydrate) * 1000.0
-
-        # 5b) Hide superseded + derived-dirty candidates (never in Chroma metadata)
-        t_eligibility = time.perf_counter()
-        try:
-            visible = []
-            for cand in candidates:
-                mem = hydrated.get(cand["memory_id"])
-                if mem is None:
-                    continue
-                if _state_of(mem) in ("superseded", "dirty"):
-                    continue
-                visible.append(cand)
-            candidates = visible
-        finally:
-            stage_ms["eligibility"] = (time.perf_counter() - t_eligibility) * 1000.0
 
         # 6) Score: entity_boost + time_decay
         scored: list[tuple[Memory, float, list[str]]] = []
@@ -242,9 +306,11 @@ class MemoryRetriever:
                 # decay(0.97) × rerank(0.2) = 0.19 — the cross-encoder's
                 # decision was overwritten by age. Salience/recency now break
                 # near-ties instead of dominating.
-                base_score = float(cand.get("rerank_score") or cand["score"])
+                rerank_score = cand.get("rerank_score")
+                has_rerank_score = rerank_score is not None
+                base_score = float(rerank_score if has_rerank_score else cand["score"])
 
-                if "rerank_score" in cand:
+                if has_rerank_score:
                     # modifier nudge: +7.5% if fresh-ish salient, −7.5% if not
                     salience_mult = 0.925 + 0.15 * float(memory.salience or 0.5)
                     captured = memory.captured_at

@@ -17,7 +17,8 @@ log = structlog.get_logger()
 async def lifespan(app: FastAPI):
     log.info("Starting RAG backend", environment=settings.ENVIRONMENT, lite=settings.LITE_MODE)
     if settings.DATABASE_URL.startswith("sqlite"):
-        # Lite mode: create tables from model metadata (Postgres uses Alembic).
+        # Lite mode: versioned fresh-install bootstrap; an existing unversioned
+        # SQLite schema fails closed until a reviewed migration is applied.
         from app.database import bootstrap_sqlite
         await bootstrap_sqlite()
         log.info("SQLite schema bootstrapped")

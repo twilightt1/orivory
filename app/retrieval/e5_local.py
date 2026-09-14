@@ -15,6 +15,7 @@ of silently mixing MiniLM and e5 vectors.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import urllib.request
 from pathlib import Path
@@ -25,25 +26,29 @@ log = logging.getLogger(__name__)
 
 MODEL_URL = (
     "https://huggingface.co/Xenova/multilingual-e5-small"
-    "/resolve/main/onnx/model_quantized.onnx"
+    "/resolve/761b726dd34fb83930e26aab4e9ac3899aa1fa78/onnx/model_quantized.onnx"
 )
 TOKENIZER_URL = (
     "https://huggingface.co/Xenova/multilingual-e5-small"
-    "/resolve/main/tokenizer.json"
+    "/resolve/761b726dd34fb83930e26aab4e9ac3899aa1fa78/tokenizer.json"
 )
 MODEL_FILE = "model_quantized.onnx"
 TOKENIZER_FILE = "tokenizer.json"
+MODEL_SHA256 = "f80102d3f2a1229f387d3c81909990d8945513e347b0eab049f7de3c6f98c193"
+TOKENIZER_SHA256 = "0b44a9d7b51c3c62626640cda0e2c2f70fdacdc25bbbd68038369d14ebdf4c39"
 
 ARCTIC_MODEL_URL = (
     "https://huggingface.co/Snowflake/snowflake-arctic-embed-xs"
-    "/resolve/main/onnx/model.onnx"
+    "/resolve/d8c86521100d3556476a063fc2342036d45c106f/onnx/model.onnx"
 )
 ARCTIC_TOKENIZER_URL = (
     "https://huggingface.co/Snowflake/snowflake-arctic-embed-xs"
-    "/resolve/main/tokenizer.json"
+    "/resolve/d8c86521100d3556476a063fc2342036d45c106f/tokenizer.json"
 )
 ARCTIC_MODEL_FILE = "arctic_model.onnx"
 ARCTIC_TOKENIZER_FILE = "arctic_tokenizer.json"
+ARCTIC_MODEL_SHA256 = "cf2698d30ff05da02c70a088313bad56e5c2f401d734cb24a8390d446111936c"
+ARCTIC_TOKENIZER_SHA256 = "91f1def9b9391fdabe028cd3f3fcc4efd34e5d1f08c3bf2de513ebb5911a1854"
 ARCTIC_QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
 
 QUERY_PREFIX = "query: "
@@ -67,10 +72,21 @@ def model_dir() -> Path:
     return Path.home() / ".cache" / "orivory" / "e5"
 
 
-def _download(url: str, dest: Path) -> None:
+def _digest(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for block in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _download(url: str, dest: Path, expected_sha256: str) -> None:
     tmp = dest.with_suffix(dest.suffix + ".part")
     log.warning("Downloading embedding model %s (~%s)", dest.name, url)
     urllib.request.urlretrieve(url, tmp)
+    if _digest(tmp) != expected_sha256:
+        tmp.unlink(missing_ok=True)
+        raise ValueError(f"Downloaded {dest.name} failed SHA256 verification")
     tmp.rename(dest)
 
 
@@ -78,10 +94,12 @@ def ensure_files() -> tuple[Path, Path]:
     d = model_dir()
     d.mkdir(parents=True, exist_ok=True)
     model, tok = d / MODEL_FILE, d / TOKENIZER_FILE
-    if not model.exists():
-        _download(MODEL_URL, model)
-    if not tok.exists():
-        _download(TOKENIZER_URL, tok)
+    if not model.exists() or _digest(model) != MODEL_SHA256:
+        model.unlink(missing_ok=True)
+        _download(MODEL_URL, model, MODEL_SHA256)
+    if not tok.exists() or _digest(tok) != TOKENIZER_SHA256:
+        tok.unlink(missing_ok=True)
+        _download(TOKENIZER_URL, tok, TOKENIZER_SHA256)
     return model, tok
 
 
@@ -135,10 +153,12 @@ def ensure_arctic_files() -> tuple[Path, Path]:
     d = model_dir()
     d.mkdir(parents=True, exist_ok=True)
     model, tok = d / ARCTIC_MODEL_FILE, d / ARCTIC_TOKENIZER_FILE
-    if not model.exists():
-        _download(ARCTIC_MODEL_URL, model)
-    if not tok.exists():
-        _download(ARCTIC_TOKENIZER_URL, tok)
+    if not model.exists() or _digest(model) != ARCTIC_MODEL_SHA256:
+        model.unlink(missing_ok=True)
+        _download(ARCTIC_MODEL_URL, model, ARCTIC_MODEL_SHA256)
+    if not tok.exists() or _digest(tok) != ARCTIC_TOKENIZER_SHA256:
+        tok.unlink(missing_ok=True)
+        _download(ARCTIC_TOKENIZER_URL, tok, ARCTIC_TOKENIZER_SHA256)
     return model, tok
 
 

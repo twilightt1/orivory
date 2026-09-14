@@ -29,7 +29,13 @@ def reindex_user_memories_sync(user_id: str, only_missing: bool = True) -> dict:
 
     Returns a summary dict: scanned, already_indexed, reindexed, pages.
     Raises on failure after logging (the admin caller reports ``queued=False``).
+
+    ``only_missing`` is valid only for a collection whose fingerprint and
+    contract-generation token match the active runtime. A mismatch aborts
+    rather than mixing users into a partially rebuilt shared collection; a
+    fresh active-generation pointer is a later migration phase.
     """
+    from app.retrieval.embedder import EmbeddingDimensionMismatch
     from app.retrieval.memory.vector_store import (
         get_existing_memory_ids_sync,
         upsert_memories_sync,
@@ -63,7 +69,14 @@ def reindex_user_memories_sync(user_id: str, only_missing: bool = True) -> dict:
 
                 to_index = rows
                 if only_missing:
-                    existing = get_existing_memory_ids_sync([str(m.id) for m in rows])
+                    try:
+                        existing = get_existing_memory_ids_sync([str(m.id) for m in rows])
+                    except EmbeddingDimensionMismatch as exc:
+                        raise EmbeddingDimensionMismatch(
+                            "only_missing reindex requires a matching fingerprint and "
+                            "contract generation; rebuild the relevant data in a fresh "
+                            "collection"
+                        ) from exc
                     already_indexed += len(existing)
                     to_index = [m for m in rows if str(m.id) not in existing]
 

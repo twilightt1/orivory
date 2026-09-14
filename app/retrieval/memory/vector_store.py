@@ -22,11 +22,17 @@ import httpx
 from app.config import settings
 from app.models.memory import Memory
 from app.retrieval.embedder import (
+    active_backend_name,
     astamp_collection_dim,
     check_collection_dim,
     embed_texts,
     embed_texts_sync,
     stamp_collection_dim,
+)
+from app.retrieval.embedding_fingerprint import (
+    canonical_fingerprint,
+    current_fingerprint,
+    fingerprint_generation,
 )
 
 # Lazily imported so this module is importable in test/CLI contexts
@@ -37,6 +43,13 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 COLLECTION_NAME = "Orivory_memories"
+
+_ALLOWED_MEMORY_FILTER_FIELDS = frozenset({
+    "source_type", "captured_at", "salience", "pinned", "tags",
+})
+_ALLOWED_MEMORY_FILTER_OPERATORS = frozenset({
+    "$eq", "$ne", "$gt", "$gte", "$lt", "$lte", "$in", "$nin", "$contains",
+})
 
 _async_client: chromadb.AsyncHttpClient | None = None
 _sync_client: chromadb.HttpClient | None = None
@@ -210,12 +223,16 @@ def _memory_to_document(memory: Memory) -> str:
     return "\n".join(parts)
 
 
-def _memory_to_metadata(memory: Memory) -> dict[str, Any]:
+def _memory_to_metadata(memory: Memory, *, embedding_dim: int | None = None) -> dict[str, Any]:
     """Build the metadata dict stored alongside the vector.
 
-    All values must be scalar or list-of-str (ChromaDB constraint).
+    All values must be scalar or list-of-str (ChromaDB constraint). The
+    provenance fields are allowlisted contract data; user ``extra_metadata``
+    is intentionally not copied into the vector ACL/payload.
     """
     captured_iso = memory.captured_at.isoformat() if memory.captured_at else None
+    fingerprint = current_fingerprint()
+    canonical = canonical_fingerprint(fingerprint)
     metadata: dict[str, Any] = {
         "user_id":     str(memory.user_id),
         "memory_id":   str(memory.id),
@@ -223,7 +240,22 @@ def _memory_to_metadata(memory: Memory) -> dict[str, Any]:
         "captured_at": captured_iso,
         "salience":    float(memory.salience),
         "pinned":      bool(memory.pinned),
+        "orivory_embed_backend": active_backend_name(),
+        "orivory_embed_dim": int(embedding_dim if embedding_dim is not None else fingerprint["dim"]),
+        "orivory_embed_fingerprint": canonical,
+        "orivory_embed_generation": fingerprint_generation(canonical),
     }
+    model_revision = fingerprint.get("model_revision") or fingerprint.get("revision")
+    metadata["orivory_embed_model_revision"] = (
+        model_revision if isinstance(model_revision, str) and model_revision else "unavailable"
+    )
+    memory_revision = getattr(memory, "revision", None)
+    if isinstance(memory_revision, (int, float, str)) and not isinstance(memory_revision, bool):
+        metadata["orivory_memory_revision"] = memory_revision
+    else:
+        # Memory has no canonical revision column yet; make that limitation
+        # visible to backfill/audit tooling instead of guessing from a clock.
+        metadata["orivory_memory_revision"] = "unavailable"
     # ChromaDB rejects empty-list metadata values ("Expected metadata list
     # value ... to be non-empty"), which silently broke the doc→memory
     # projection for every untagged memory. Only store `tags` when non-empty.
@@ -244,8 +276,8 @@ async def upsert_memory(memory: Memory) -> None:
     """
     collection = await _get_collection()
     document = _memory_to_document(memory)
-    metadata = _memory_to_metadata(memory)
     embedding = (await embed_texts([document]))[0]
+    metadata = _memory_to_metadata(memory, embedding_dim=len(embedding))
     await astamp_collection_dim(collection, len(embedding))
     await collection.upsert(
         ids=[str(memory.id)],
@@ -267,8 +299,8 @@ def upsert_memory_sync(memory: Memory) -> None:
         metadata={"hnsw:space": "cosine"},
     )
     document = _memory_to_document(memory)
-    metadata = _memory_to_metadata(memory)
     embedding = embed_texts_sync([document])[0]
+    metadata = _memory_to_metadata(memory, embedding_dim=len(embedding))
     stamp_collection_dim(collection, len(embedding))
     collection.upsert(
         ids=[str(memory.id)],
@@ -297,9 +329,12 @@ def upsert_memories_sync(memories: list[Memory]) -> int:
         metadata={"hnsw:space": "cosine"},
     )
     documents = [_memory_to_document(m) for m in memories]
-    metadatas = [_memory_to_metadata(m) for m in memories]
     ids = [str(m.id) for m in memories]
     embeddings = embed_texts_sync(documents)
+    metadatas = [
+        _memory_to_metadata(m, embedding_dim=len(embeddings[i]))
+        for i, m in enumerate(memories)
+    ]
     stamp_collection_dim(collection, len(embeddings[0]))
     collection.upsert(
         ids=ids,
@@ -314,7 +349,9 @@ def get_existing_memory_ids_sync(memory_ids: list[str]) -> set[str]:
     """Return the subset of ``memory_ids`` already present in the collection.
 
     Used by the reindex task to compute which memories are missing their
-    vector without re-embedding everything.
+    vector without re-embedding everything. Presence is only trusted when
+    the collection contract (including its derived generation token) matches
+    the active embedding contract.
     """
     if not memory_ids:
         return set()
@@ -322,6 +359,13 @@ def get_existing_memory_ids_sync(memory_ids: list[str]) -> set[str]:
     collection = cli.get_or_create_collection(
         COLLECTION_NAME,
         metadata={"hnsw:space": "cosine"},
+    )
+    count = collection.count()
+    check_collection_dim(
+        collection,
+        int(current_fingerprint()["dim"]),
+        backend=active_backend_name(),
+        collection_is_empty=int(count) == 0,
     )
     found = collection.get(ids=memory_ids, include=[])
     return set(found.get("ids", []) or [])
@@ -338,6 +382,13 @@ async def get_memory_ids_present(memory_ids: list[str]) -> set[str]:
     if not memory_ids:
         return set()
     collection = await _get_collection()
+    count = await collection.count()
+    check_collection_dim(
+        collection,
+        int(current_fingerprint()["dim"]),
+        backend=active_backend_name(),
+        collection_is_empty=count == 0,
+    )
     found = await collection.get(ids=memory_ids, include=[])
     return {str(i) for i in (found.get("ids") or [])}
 
@@ -389,6 +440,35 @@ def delete_memories_sync(memory_ids: list[str]) -> None:
         )
 
 
+def _build_user_filter(user_id: str, where: dict[str, Any] | None) -> dict[str, Any]:
+    """Build an immutable tenant clause plus validated caller filters."""
+    principal_clause = {"user_id": {"$eq": user_id}}
+    if where is None:
+        return principal_clause
+    if not isinstance(where, dict):
+        raise ValueError("memory filters must be an object")
+    if not where:
+        return principal_clause
+
+    clauses: list[dict[str, Any]] = [principal_clause]
+    for key, value in where.items():
+        if key == "user_id":
+            raise ValueError("user_id is controlled by the authenticated principal")
+        if key not in _ALLOWED_MEMORY_FILTER_FIELDS:
+            raise ValueError(f"unsupported memory filter: {key}")
+        if isinstance(value, dict):
+            if len(value) != 1:
+                raise ValueError(f"memory filter {key} must contain one operator")
+            operator, operand = next(iter(value.items()))
+            if operator not in _ALLOWED_MEMORY_FILTER_OPERATORS:
+                raise ValueError(f"unsupported memory filter operator: {operator}")
+            value = {operator: operand}
+        else:
+            value = {"$eq": value}
+        clauses.append({key: value})
+    return {"$and": clauses}
+
+
 async def search_memories(
     query_embedding: list[float],
     *,
@@ -401,22 +481,24 @@ async def search_memories(
     Returns a list of dicts:
         {memory_id, content, score, metadata, rank, source="vector"}
     """
+    user_filter = _build_user_filter(user_id, where)
     try:
         collection = await _get_collection()
     except Exception as e:
         log.warning("Chroma unavailable for search", extra={"error": str(e)})
         return []
 
-    # Fail loud on backend/dim switches; never stamp here (read path).
-    check_collection_dim(collection, len(query_embedding))
-
     count = await collection.count()
+    # Fail loud on backend/dim switches; never stamp here (read path). The
+    # count must be known first so an unstamped populated collection cannot be
+    # mistaken for a new empty collection.
+    check_collection_dim(
+        collection,
+        len(query_embedding),
+        collection_is_empty=count == 0,
+    )
     if count == 0:
         return []
-
-    user_filter: dict[str, Any] = {"user_id": {"$eq": user_id}}
-    if where:
-        user_filter.update(where)
 
     results = await collection.query(
         query_embeddings=[query_embedding],

@@ -160,8 +160,13 @@ async def search(
     embed_input = hyde_text if hyde_text else query
     embedding   = await embed_query(embed_input)
 
-    # Fail loud on backend/dim switches; never stamp here (read path).
-    check_collection_dim(collection, len(embedding))
+    # Fail loud on backend/dim switches; never stamp here (read path). The
+    # count lets the guard quarantine an unstamped populated collection.
+    check_collection_dim(
+        collection,
+        len(embedding),
+        collection_is_empty=count == 0,
+    )
 
     results = await collection.query(
         query_embeddings=[embedding],

@@ -29,6 +29,7 @@ from app.ingestion.import_formats import (
     parse_import,
 )
 from app.models.memory import Memory
+from app.retrieval.embedder import EmbeddingDimensionMismatch
 from app.retrieval.memory.write_back import index_new_memory
 from app.schemas.Orivory import ImportSummary
 
@@ -48,8 +49,9 @@ async def run_import(
     Raises ``ImportFormatError`` for undecodable JSON or an undetectable
     format; per-item problems are isolated into the ``failed`` counter
     instead of failing the whole run (house pattern: SourceSyncService).
-    Indexing failures are counted, never raised — Postgres is the truth,
-    the reindex task replays misses later.
+    Indexing failures are counted for ordinary transient outages; a typed
+    embedding contract failure is raised so the caller cannot miss a data
+    integrity/readiness blocker.
     """
     try:
         parsed = json.loads(raw_data.decode("utf-8"))
@@ -130,6 +132,8 @@ async def run_import(
         for memory in created_rows:
             try:
                 await index_new_memory(memory)
+            except EmbeddingDimensionMismatch:
+                raise
             except Exception as exc:
                 index_failures += 1
                 log.warning(

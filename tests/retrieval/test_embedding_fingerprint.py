@@ -5,12 +5,21 @@ from app.retrieval import embedding_fingerprint as fp
 
 FINGERPRINT_KEYS = {
     "model_id",
+    "model_revision",
+    "revision",
+    "artifact_digest",
+    "tokenizer_digest",
+    "graph_outputs",
     "pooling",
     "query_prefix",
     "passage_prefix",
     "max_tokens",
+    "truncation",
+    "padding",
     "normalize",
     "dim",
+    "precision",
+    "provider",
     "doc_format",
 }
 
@@ -23,6 +32,7 @@ def test_current_fingerprint_preserves_arctic_legacy_contract(monkeypatch):
 
     assert set(fingerprint) == FINGERPRINT_KEYS
     assert fingerprint == fp.LEGACY_MEAN_FINGERPRINT
+    assert fingerprint["model_revision"] == fp.ARCTIC_MODEL_REVISION
 
 
 @pytest.mark.parametrize(
@@ -37,12 +47,21 @@ def test_current_fingerprint_preserves_arctic_legacy_contract(monkeypatch):
             },
             {
                 "model_id": "Xenova/multilingual-e5-small",
+                "model_revision": fp.E5_MODEL_REVISION,
+                "revision": fp.E5_MODEL_REVISION,
+                "artifact_digest": fp.E5_ARTIFACT_SHA256,
+                "tokenizer_digest": fp.E5_TOKENIZER_SHA256,
+                "graph_outputs": ["last_hidden_state"],
                 "pooling": "mean",
                 "query_prefix": "query: ",
                 "passage_prefix": "passage: ",
                 "max_tokens": 512,
+                "truncation": "head",
+                "padding": "batch-longest-zero",
                 "normalize": True,
                 "dim": 384,
+                "precision": "float32",
+                "provider": "onnxruntime-cpu",
                 "doc_format": "title-content-v1",
             },
         ),
@@ -55,12 +74,21 @@ def test_current_fingerprint_preserves_arctic_legacy_contract(monkeypatch):
             },
             {
                 "model_id": "jina-embeddings-v4-text-small",
+                "model_revision": None,
+                "revision": None,
+                "artifact_digest": None,
+                "tokenizer_digest": None,
+                "graph_outputs": ["embedding"],
                 "pooling": "api",
                 "query_prefix": "",
                 "passage_prefix": "",
-                "max_tokens": 512,
-                "normalize": True,
+                "max_tokens": None,
+                "truncation": "provider-defined",
+                "padding": "provider-defined",
+                "normalize": None,
                 "dim": 1024,
+                "precision": "float32",
+                "provider": "jina-api",
                 "doc_format": "title-content-v1",
             },
         ),
@@ -72,12 +100,21 @@ def test_current_fingerprint_preserves_arctic_legacy_contract(monkeypatch):
             },
             {
                 "model_id": "text-embedding-3-large",
+                "model_revision": None,
+                "revision": None,
+                "artifact_digest": None,
+                "tokenizer_digest": None,
+                "graph_outputs": ["embedding"],
                 "pooling": "api",
                 "query_prefix": "",
                 "passage_prefix": "",
-                "max_tokens": 512,
-                "normalize": True,
+                "max_tokens": None,
+                "truncation": "provider-defined",
+                "padding": "provider-defined",
+                "normalize": None,
                 "dim": 1536,
+                "precision": "float32",
+                "provider": "openai-compatible-api",
                 "doc_format": "title-content-v1",
             },
         ),
@@ -93,6 +130,30 @@ def test_current_fingerprint_uses_active_embedding_contract(
 
     assert set(fingerprint) == FINGERPRINT_KEYS
     assert fingerprint == expected
+
+
+def test_current_fingerprint_represents_minilm(monkeypatch):
+    monkeypatch.setattr(settings, "USE_LOCAL_EMBEDDINGS", True)
+    monkeypatch.setattr(settings, "LOCAL_EMBED_MODEL", "minilm")
+
+    fingerprint = fp.current_fingerprint()
+
+    assert fingerprint["model_id"] == "all-MiniLM-L6-v2"
+    assert fingerprint["provider"] == "chromadb-onnx"
+    assert fingerprint["dim"] == 384
+    assert fingerprint["artifact_digest"] == fp.MINILM_ARTIFACT_SHA256
+
+
+def test_current_fingerprint_uses_configured_dimensions(monkeypatch):
+    monkeypatch.setattr(settings, "USE_LOCAL_EMBEDDINGS", False)
+    monkeypatch.setattr(settings, "USE_JINA_EMBEDDINGS", True)
+    monkeypatch.setattr(settings, "JINA_API_KEY", "jina-test-key")
+    monkeypatch.setattr(settings, "JINA_EMBED_DIMENSIONS", 768)
+    assert fp.current_fingerprint()["dim"] == 768
+
+    monkeypatch.setattr(settings, "USE_JINA_EMBEDDINGS", False)
+    monkeypatch.setattr(settings, "EMBED_DIMENSIONS", 3072)
+    assert fp.current_fingerprint()["dim"] == 3072
 
 
 def test_cache_key_changes_with_pooling():

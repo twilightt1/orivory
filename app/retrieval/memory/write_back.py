@@ -22,17 +22,26 @@ import logging
 from uuid import UUID
 
 from app.models.memory import Memory
+from app.retrieval.embedder import EmbeddingDimensionMismatch
 
 log = logging.getLogger(__name__)
 
 
 async def safe_upsert_to_chroma(memory: Memory) -> bool:
-    """Embed a memory into ChromaDB. Returns True on success, never raises."""
+    """Embed a memory into ChromaDB.
+
+    Transient vector outages return ``False`` for compatibility. Contract
+    mismatches are typed integrity failures and are deliberately propagated.
+    """
     try:
         from app.retrieval.memory.vector_store import upsert_memory
 
         await upsert_memory(memory)
         return True
+    except EmbeddingDimensionMismatch:
+        # A contract mismatch is not a transient best-effort outage: letting
+        # it become ``False`` hides an unsafe collection from its caller.
+        raise
     except Exception as exc:
         log.warning(
             "ChromaDB upsert failed for memory %s: %s",
@@ -79,8 +88,9 @@ async def index_new_memory(memory: Memory) -> None:
     """Run the full post-persist indexing pipeline for one memory.
 
     Caller must have already committed the row. Embeds synchronously (best
-    effort) and enqueues graph extraction. Use this from any async path that
-    creates or updates a ``Memory``.
+    effort for transient outages) and enqueues graph extraction. Contract
+    mismatches propagate as typed integrity failures. Use this from any async
+    path that creates or updates a ``Memory``.
     """
     await safe_upsert_to_chroma(memory)
     safe_enqueue_graph_build(memory.id)

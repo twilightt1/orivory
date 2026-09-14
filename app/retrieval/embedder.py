@@ -1,10 +1,14 @@
-import json
+import inspect
 import logging
 
 from openai import AsyncOpenAI, OpenAI
 
 from app.config import settings
-from app.retrieval.embedding_fingerprint import current_fingerprint
+from app.retrieval.embedding_fingerprint import (
+    canonical_fingerprint,
+    current_fingerprint,
+    fingerprint_generation,
+)
 
 log = logging.getLogger(__name__)
 
@@ -28,6 +32,7 @@ _local_embed_fn = None  # chromadb ONNX MiniLM (USE_LOCAL_EMBEDDINGS + minilm)
 EMBED_BACKEND_META_KEY = "orivory_embed_backend"
 EMBED_DIM_META_KEY = "orivory_embed_dim"
 EMBED_FINGERPRINT_META_KEY = "orivory_embed_fingerprint"
+EMBED_GENERATION_META_KEY = "orivory_embed_generation"
 
 
 class EmbeddingDimensionMismatch(ValueError):
@@ -54,19 +59,10 @@ def _canonical_fingerprint(fingerprint: str | dict | None) -> str:
     """Return the scalar representation stored in collection metadata."""
     if fingerprint is None:
         fingerprint = current_fingerprint()
-    if isinstance(fingerprint, str):
-        return fingerprint
-    if isinstance(fingerprint, dict):
-        try:
-            return json.dumps(
-                fingerprint,
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-            )
-        except (TypeError, ValueError) as exc:
-            raise EmbeddingDimensionMismatch("invalid embedding fingerprint") from exc
-    raise EmbeddingDimensionMismatch("embedding fingerprint must be a string or dict")
+    try:
+        return canonical_fingerprint(fingerprint)
+    except ValueError as exc:
+        raise EmbeddingDimensionMismatch(str(exc)) from exc
 
 
 def check_collection_dim(
@@ -75,13 +71,19 @@ def check_collection_dim(
     *,
     backend: str | None = None,
     fingerprint: str | dict | None = None,
+    collection_is_empty: bool | None = None,
 ) -> dict | None:
     """Verify an embedding fits the collection's recorded contract.
 
     Returns a replacement metadata dict to stamp when the collection carries
-    no embedding stamp yet, None when the stamp matches, and raises
-    :class:`EmbeddingDimensionMismatch` on an unknown or mismatched contract.
-    The active embedding fingerprint is used when callers omit one.
+    no embedding stamp yet *and is empty*, None when the stamp matches, and
+    raises :class:`EmbeddingDimensionMismatch` on an unknown or mismatched
+    contract. The active embedding fingerprint is used when callers omit one.
+
+    ``collection_is_empty`` is supplied by async callers after awaiting the
+    collection count. Synchronous collections are inspected directly when
+    possible; callers that cannot prove a new collection is empty must use the
+    stamp helpers, which fail closed.
     """
     backend = backend or active_backend_name()
     expected_fingerprint = _canonical_fingerprint(fingerprint)
@@ -90,6 +92,32 @@ def check_collection_dim(
     inner = getattr(collection, "_inner", collection)
     if type(inner).__name__ in {"MagicMock", "AsyncMock", "Mock"}:
         return None
+    if collection_is_empty is None:
+        count_method = getattr(inner, "count", None)
+        if callable(count_method) and not inspect.iscoroutinefunction(count_method):
+            try:
+                count = count_method()
+            except Exception as exc:
+                raise EmbeddingDimensionMismatch(
+                    "unable to verify collection population — quarantine/rebuild"
+                ) from exc
+            if inspect.isawaitable(count):
+                close = getattr(count, "close", None)
+                if callable(close):
+                    close()
+                raise EmbeddingDimensionMismatch(
+                    "async collection population must be checked by an async guard"
+                )
+            try:
+                collection_is_empty = int(count) == 0
+            except (TypeError, ValueError) as exc:
+                raise EmbeddingDimensionMismatch(
+                    "invalid collection count — quarantine/rebuild"
+                ) from exc
+        elif callable(count_method):
+            raise EmbeddingDimensionMismatch(
+                "async collection population must be checked by an async guard"
+            )
     try:
         meta = inner.metadata
     except Exception as exc:
@@ -105,12 +133,19 @@ def check_collection_dim(
     has_dim = EMBED_DIM_META_KEY in meta
     has_backend = EMBED_BACKEND_META_KEY in meta
     has_fingerprint = EMBED_FINGERPRINT_META_KEY in meta
-    if not has_dim and not has_backend and not has_fingerprint:
+    has_generation = EMBED_GENERATION_META_KEY in meta
+    if not any((has_dim, has_backend, has_fingerprint, has_generation)):
+        if collection_is_empty is False:
+            raise EmbeddingDimensionMismatch(
+                "populated collection has no verifiable embedding contract — "
+                "quarantine/rebuild"
+            )
         return {
             **meta,
             EMBED_BACKEND_META_KEY: backend,
             EMBED_DIM_META_KEY: embedding_dim,
             EMBED_FINGERPRINT_META_KEY: expected_fingerprint,
+            EMBED_GENERATION_META_KEY: fingerprint_generation(expected_fingerprint),
         }
     if not has_dim or not has_backend or not has_fingerprint:
         raise EmbeddingDimensionMismatch(
@@ -131,6 +166,14 @@ def check_collection_dim(
             f"{recorded_fingerprint!r} vs {expected_fingerprint!r} — "
             "fresh reindex required"
         )
+    recorded_generation = meta.get(EMBED_GENERATION_META_KEY)
+    if recorded_generation is not None and (
+        not isinstance(recorded_generation, str)
+        or recorded_generation != fingerprint_generation(recorded_fingerprint)
+    ):
+        raise EmbeddingDimensionMismatch(
+            "embedding contract generation mismatch — fresh reindex required"
+        )
     try:
         same_dim = int(recorded_dim) == int(embedding_dim)
     except (TypeError, ValueError):
@@ -146,41 +189,139 @@ def check_collection_dim(
     return None
 
 
-def stamp_collection_dim(collection, embedding_dim: int, *, backend: str | None = None) -> None:
+def stamp_collection_dim(
+    collection,
+    embedding_dim: int,
+    *,
+    backend: str | None = None,
+    fingerprint: str | dict | None = None,
+) -> None:
     """Check the dim guard and stamp an unstamped collection (sync caller).
 
     Raises :class:`EmbeddingDimensionMismatch` on an unknown or mismatched
-    contract. Collection ``modify`` failures remain best-effort for the
-    existing write-path behavior.
+    contract. A populated collection without a contract and metadata-write
+    failures both fail closed before any vector upsert.
     """
-    stamp = check_collection_dim(collection, embedding_dim, backend=backend)
+    stamp = check_collection_dim(
+        collection,
+        embedding_dim,
+        backend=backend,
+        fingerprint=fingerprint,
+    )
     if stamp is None:
         return
     inner = getattr(collection, "_inner", collection)
     if type(inner).__name__ in ("MagicMock", "AsyncMock", "Mock"):
         return
+    count_method = getattr(inner, "count", None)
+    if not callable(count_method) or inspect.iscoroutinefunction(count_method):
+        raise EmbeddingDimensionMismatch(
+            "unable to verify collection is empty before stamping — quarantine/rebuild"
+        )
     try:
-        inner.modify(metadata=stamp)
-    except Exception:
+        count = count_method()
+        if inspect.isawaitable(count):
+            raise EmbeddingDimensionMismatch(
+                "synchronous collection returned an awaitable count"
+            )
+        if int(count) != 0:
+            raise EmbeddingDimensionMismatch(
+                "populated collection has no verifiable embedding contract — "
+                "quarantine/rebuild"
+            )
+        # Chroma treats ``hnsw:space`` as immutable collection configuration;
+        # sending it back through ``modify`` is rejected even when unchanged.
+        result = inner.modify(
+            metadata={key: value for key, value in stamp.items() if not key.startswith("hnsw:")}
+        )
+        if inspect.isawaitable(result):
+            raise EmbeddingDimensionMismatch(
+                "synchronous collection returned an awaitable metadata write"
+            )
+        observed = inner.metadata
+        if not isinstance(observed, dict) or any(
+            observed.get(key) != stamp[key]
+            for key in (
+                EMBED_BACKEND_META_KEY,
+                EMBED_DIM_META_KEY,
+                EMBED_FINGERPRINT_META_KEY,
+                EMBED_GENERATION_META_KEY,
+            )
+        ):
+            raise EmbeddingDimensionMismatch(
+                "embedding contract metadata write could not be verified — vector write blocked"
+            )
+    except EmbeddingDimensionMismatch:
+        raise
+    except Exception as exc:
         log.warning("Could not stamp collection embedding dim", exc_info=True)
+        raise EmbeddingDimensionMismatch(
+            "failed to persist embedding contract metadata — vector write blocked"
+        ) from exc
 
 
-async def astamp_collection_dim(collection, embedding_dim: int, *, backend: str | None = None) -> None:
+async def astamp_collection_dim(
+    collection,
+    embedding_dim: int,
+    *,
+    backend: str | None = None,
+    fingerprint: str | dict | None = None,
+) -> None:
     """Async variant of :func:`stamp_collection_dim`."""
-    import inspect
-
-    stamp = check_collection_dim(collection, embedding_dim, backend=backend)
-    if stamp is None:
-        return
     inner = getattr(collection, "_inner", collection)
     if type(inner).__name__ in ("MagicMock", "AsyncMock", "Mock"):
         return
+    count_method = getattr(inner, "count", None)
+    if not callable(count_method):
+        raise EmbeddingDimensionMismatch(
+            "unable to verify collection is empty before stamping — quarantine/rebuild"
+        )
     try:
-        res = inner.modify(metadata=stamp)
+        count = count_method()
+        if inspect.isawaitable(count):
+            count = await count
+        collection_is_empty = int(count) == 0
+        stamp = check_collection_dim(
+            collection,
+            embedding_dim,
+            backend=backend,
+            fingerprint=fingerprint,
+            collection_is_empty=collection_is_empty,
+        )
+        if stamp is None:
+            return
+        if not collection_is_empty:
+            raise EmbeddingDimensionMismatch(
+                "populated collection has no verifiable embedding contract — "
+                "quarantine/rebuild"
+            )
+        # Chroma treats ``hnsw:space`` as immutable collection configuration;
+        # sending it back through ``modify`` is rejected even when unchanged.
+        res = inner.modify(
+            metadata={key: value for key, value in stamp.items() if not key.startswith("hnsw:")}
+        )
         if inspect.isawaitable(res):
             await res
-    except Exception:
+        observed = inner.metadata
+        if not isinstance(observed, dict) or any(
+            observed.get(key) != stamp[key]
+            for key in (
+                EMBED_BACKEND_META_KEY,
+                EMBED_DIM_META_KEY,
+                EMBED_FINGERPRINT_META_KEY,
+                EMBED_GENERATION_META_KEY,
+            )
+        ):
+            raise EmbeddingDimensionMismatch(
+                "embedding contract metadata write could not be verified — vector write blocked"
+            )
+    except EmbeddingDimensionMismatch:
+        raise
+    except Exception as exc:
         log.warning("Could not stamp collection embedding dim", exc_info=True)
+        raise EmbeddingDimensionMismatch(
+            "failed to persist embedding contract metadata — vector write blocked"
+        ) from exc
 
 
 def _get_async_client() -> AsyncOpenAI:
