@@ -13,13 +13,14 @@ from app.models.entity import (
 )
 from app.models.erasure_receipt import ErasureReceipt
 from app.models.feedback import Feedback
+from app.models.index_outbox import IndexGeneration, IndexOutbox
 from app.models.insight import (
     InsightCard,
     InsightStatusEnum,
     InsightSurpriseLevelEnum,
     InsightTypeEnum,
 )
-from app.models.memory import Memory
+from app.models.memory import Memory, MemorySuppression
 from app.models.memory_access_log import MemoryAccessLog
 from app.models.message import Message
 from app.models.password_reset_session import PasswordResetSession
@@ -59,6 +60,7 @@ __all__ = [
     "SystemSetting",
     # Orivory — second brain
     "Memory",
+    "MemorySuppression",
     "Entity",
     "Relation",
     "MemoryEntity",
@@ -88,4 +90,7 @@ __all__ = [
     "AgentClient",
     "MemoryAccessLog",
     "ErasureReceipt",
+    # Durable index intent + generation manifest (P1a)
+    "IndexOutbox",
+    "IndexGeneration",
 ]

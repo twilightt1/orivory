@@ -32,6 +32,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
     func,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -68,6 +69,9 @@ class Memory(Base):
     salience:      Mapped[float]      = mapped_column(Float, server_default="0.5", nullable=False)
     pinned:        Mapped[bool]        = mapped_column(Boolean(), default=False, nullable=False)
     is_shared:     Mapped[bool]        = mapped_column(Boolean(), default=False, nullable=False)  # Public share
+    # Monotonic per-entity write counter driving index-intent idempotency
+    # (spec §4.1 — never `updated_at`).
+    revision:      Mapped[int]        = mapped_column(Integer, default=1, server_default="1", nullable=False)
 
     # Usage feedback (P2.1): bumped when a memory is recalled & used in an
     # answer; decayed periodically when untouched. Drives the salience loop.
@@ -96,4 +100,25 @@ class Memory(Base):
     )
 
 
-__all__ = ["Memory"]
+class MemorySuppression(Base):
+    """Suppression ledger: a forgotten source-derived identity (spec §5.4/§12.3).
+
+    Reingesting the same source must not resurrect a memory the user chose to
+    forget; the ledger records that decision per (user, source identity).
+    """
+    __tablename__ = "memory_suppressions"
+    __table_args__ = (
+        UniqueConstraint("user_id", "source_ref", name="uq_memory_suppression"),
+    )
+
+    id:         Mapped[str]       = mapped_column(String(32), primary_key=True,
+                                                  default=lambda: uuid.uuid4().hex)
+    user_id:    Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("users.id", ondelete="CASCADE"),
+                                                  nullable=False)
+    source_ref: Mapped[str]       = mapped_column(String(500), nullable=False)
+    reason:     Mapped[str]       = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime]  = mapped_column(TIMESTAMP(timezone=True), server_default=func.now(),
+                                                  nullable=False)
+
+
+__all__ = ["Memory", "MemorySuppression"]

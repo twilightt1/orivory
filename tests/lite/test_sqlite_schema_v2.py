@@ -1,0 +1,261 @@
+"""SQLite schema v2: revisions + outbox/generation tables via versioned ladder.
+
+Real SQLite files, no mocks: a synthetic v1 install (full v1 schema,
+``user_version`` 0 or 1) is migrated by ``bootstrap_sqlite`` and the result is
+re-read from the file — schema, backfilled data, pre-DDL backup, seeded
+transitional generation row.
+"""
+from __future__ import annotations
+
+import sqlite3
+import uuid
+from pathlib import Path
+
+import pytest
+import pytest_asyncio
+from sqlalchemy import event, text
+from sqlalchemy import inspect as sa_inspect
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.pool import NullPool
+
+from app import database, models  # noqa: F401 — register every model on Base
+from app.database import Base
+from app.retrieval.embedding_fingerprint import canonical_fingerprint, current_fingerprint
+from app.retrieval.memory.vector_store import COLLECTION_NAME
+
+V2_TABLES = {"index_outbox", "index_generations", "memory_suppressions"}
+V2_COLUMNS = {"memories": "revision", "document_chunks": "revision"}
+
+
+async def _engine(tmp_path: Path, name: str):
+    eng = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / name}", poolclass=NullPool)
+    event.listen(eng.sync_engine, "connect", database._configure_sqlite_connection)
+    return eng
+
+
+def _columns_of(sync_conn, table: str) -> set[str]:
+    return {c["name"] for c in sa_inspect(sync_conn).get_columns(table)}
+
+
+def _table_info(sync_conn, table: str) -> set[tuple]:
+    """Per-column schema of a table (PRAGMA table_info, order-insensitive)."""
+    rows = sync_conn.exec_driver_sql(f"PRAGMA table_info({table})").fetchall()
+    return {(r[1], r[2], r[3], r[4], r[5]) for r in rows}
+
+
+async def _strip_v2_objects(conn) -> None:
+    """Downgrade a create_all schema to the v1 shape (pre-P1a install)."""
+    existing = set(await conn.run_sync(lambda c: sa_inspect(c).get_table_names()))
+    for table, column in V2_COLUMNS.items():
+        if column in await conn.run_sync(_columns_of, table):
+            await conn.execute(text(f"ALTER TABLE {table} DROP COLUMN {column}"))
+    for table in sorted(V2_TABLES & existing):
+        await conn.execute(text(f"DROP TABLE {table}"))
+
+
+async def _seed_v1_rows(conn) -> None:
+    """Pre-upgrade v1 data: one user, conversation, document, chunk, memory."""
+    ids = {name: uuid.uuid4().hex for name in
+           ("user", "conversation", "document", "chunk", "memory")}
+    await conn.execute(text(
+        "INSERT INTO users (id, email, onboarding_done, is_verified, is_active, is_deleted)"
+        " VALUES (:id, :email, 0, 1, 1, 0)"
+    ), {"id": ids["user"], "email": f"{ids['user']}@test.invalid"})
+    await conn.execute(text(
+        "INSERT INTO conversations (id, user_id, document_count) VALUES (:id, :uid, 1)"
+    ), {"id": ids["conversation"], "uid": ids["user"]})
+    await conn.execute(text(
+        "INSERT INTO documents (id, conversation_id, filename, file_path, chunk_count)"
+        " VALUES (:id, :cid, 'v1.txt', '/tmp/v1.txt', 1)"
+    ), {"id": ids["document"], "cid": ids["conversation"]})
+    await conn.execute(text(
+        "INSERT INTO document_chunks (id, document_id, content, chunk_index)"
+        " VALUES (:id, :did, 'v1 chunk text', 0)"
+    ), {"id": ids["chunk"], "did": ids["document"]})
+    await conn.execute(text(
+        "INSERT INTO memories (id, user_id, content, tags, pinned, is_shared, recall_count)"
+        " VALUES (:id, :uid, 'v1 memory text', '[]', 0, 0, 0)"
+    ), {"id": ids["memory"], "uid": ids["user"]})
+
+
+@pytest_asyncio.fixture
+async def v1_db(tmp_path: Path, monkeypatch):
+    """A version-1 install: full v1 schema + rows, stamped ``user_version = 1``."""
+    eng = await _engine(tmp_path, "v1.sqlite")
+    monkeypatch.setattr(database, "engine", eng)
+    monkeypatch.setattr(database, "IS_SQLITE", True)
+    async with eng.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+        await _strip_v2_objects(conn)
+        await _seed_v1_rows(conn)
+        await conn.execute(text("PRAGMA user_version = 1"))
+    yield eng, tmp_path
+    await eng.dispose()
+
+
+async def _schema(conn) -> tuple[int, set[str]]:
+    version = int((await conn.execute(text("PRAGMA user_version"))).scalar_one())
+    tables = {r[0] for r in (await conn.execute(
+        text("SELECT name FROM sqlite_master WHERE type='table'"))).all()}
+    return version, tables
+
+
+async def test_v1_install_is_upgraded_to_v2_and_backed_up(v1_db):
+    eng, tmp_path = v1_db
+    await database.bootstrap_sqlite()
+
+    async with eng.connect() as conn:
+        version, tables = await _schema(conn)
+        memories = (await conn.execute(text("SELECT content, revision FROM memories"))).all()
+        chunks = (await conn.execute(text("SELECT content, revision FROM document_chunks"))).all()
+        generations = (await conn.execute(text(
+            "SELECT kind, generation, fingerprint, is_active FROM index_generations"))).all()
+        fk_violations = (await conn.execute(text("PRAGMA foreign_key_check"))).all()
+        integrity = (await conn.execute(text("PRAGMA integrity_check"))).scalar_one()
+
+    assert version == 2
+    assert V2_TABLES <= tables
+    assert [tuple(row) for row in memories] == [("v1 memory text", 1)]  # existing rows: revision 1
+    assert [tuple(row) for row in chunks] == [("v1 chunk text", 1)]
+    assert fk_violations == []
+    assert integrity == "ok"
+    assert [(r[0], r[1], r[3]) for r in generations] == [("memory", COLLECTION_NAME, 1)]
+    assert generations[0][2] == canonical_fingerprint(current_fingerprint())
+
+    # Backup must exist and predate the v2 DDL.
+    backups = list(Path(tmp_path).glob("*.pre-v2.bak"))
+    assert len(backups) == 1, "exactly one pre-DDL backup is required"
+    backup = sqlite3.connect(backups[0])
+    try:
+        backup_tables = {r[0] for r in backup.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        backup_memory_cols = {r[1] for r in backup.execute("PRAGMA table_info(memories)")}
+        backup_rows = backup.execute("SELECT content FROM memories").fetchall()
+    finally:
+        backup.close()
+    assert not V2_TABLES & backup_tables, "backup must be pre-DDL (no v2 tables)"
+    assert "revision" not in backup_memory_cols, "backup must be pre-DDL (no revision column)"
+    assert backup_rows == [("v1 memory text",)]
+
+
+async def test_unversioned_v1_shape_is_adopted_then_upgraded(tmp_path, monkeypatch):
+    """The user's real case: full v1 install (27 tables) at ``user_version = 0``."""
+    eng = await _engine(tmp_path, "legacy.sqlite")
+    monkeypatch.setattr(database, "engine", eng)
+    monkeypatch.setattr(database, "IS_SQLITE", True)
+    expected_v1_tables = {t.name for t in Base.metadata.sorted_tables} - V2_TABLES
+    try:
+        async with eng.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+            await _strip_v2_objects(conn)
+            await _seed_v1_rows(conn)
+            version, tables = await _schema(conn)
+        assert version == 0
+        assert tables == expected_v1_tables, "fixture must be a full v1 install"
+
+        await database.bootstrap_sqlite()
+
+        async with eng.connect() as conn:
+            version, tables = await _schema(conn)
+            memories = (await conn.execute(text("SELECT content, revision FROM memories"))).all()
+        assert version == 2
+        assert V2_TABLES <= tables
+        assert [tuple(row) for row in memories] == [("v1 memory text", 1)]
+        assert list(Path(tmp_path).glob("*.pre-v2.bak"))
+    finally:
+        await eng.dispose()
+
+
+async def test_upgraded_schema_matches_a_fresh_install(v1_db, tmp_path):
+    """The ladder must land the same per-column schema create_all produces."""
+    eng, _ = v1_db
+    await database.bootstrap_sqlite()
+    upgraded = {}
+    async with eng.connect() as conn:
+        for table in (*V2_COLUMNS, *V2_TABLES):
+            upgraded[table] = await conn.run_sync(_table_info, table)
+
+    fresh_eng = await _engine(tmp_path, "reference.sqlite")
+    try:
+        async with fresh_eng.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        async with fresh_eng.connect() as conn:
+            for table in (*V2_COLUMNS, *V2_TABLES):
+                assert upgraded[table] == await conn.run_sync(_table_info, table), (
+                    f"{table}: ladder schema differs from create_all schema"
+                )
+    finally:
+        await fresh_eng.dispose()
+
+
+async def test_divergent_schema_still_fails_closed(tmp_path, monkeypatch):
+    eng = await _engine(tmp_path, "divergent.sqlite")
+    monkeypatch.setattr(database, "engine", eng)
+    monkeypatch.setattr(database, "IS_SQLITE", True)
+    try:
+        async with eng.begin() as conn:
+            await conn.execute(text("CREATE TABLE legacy_marker (id INTEGER PRIMARY KEY)"))
+        with pytest.raises(RuntimeError, match=r"does not match|requires a versioned"):
+            await database.bootstrap_sqlite()
+        async with eng.connect() as conn:
+            version, tables = await _schema(conn)
+        assert version == 0  # untouched, not silently stamped
+        assert "index_outbox" not in tables
+    finally:
+        await eng.dispose()
+
+
+async def test_bootstrap_is_idempotent_and_seeds_one_generation_row(tmp_path, monkeypatch):
+    eng = await _engine(tmp_path, "fresh.sqlite")
+    monkeypatch.setattr(database, "engine", eng)
+    monkeypatch.setattr(database, "IS_SQLITE", True)
+    try:
+        await database.bootstrap_sqlite()
+        await database.bootstrap_sqlite()  # rerun on a v2 install: no-op
+
+        async with eng.connect() as conn:
+            version, tables = await _schema(conn)
+            generations = (await conn.execute(text(
+                "SELECT kind, generation, fingerprint, is_active FROM index_generations"))).all()
+        assert version == database.SQLITE_SCHEMA_VERSION == 2
+        assert V2_TABLES <= tables
+        assert len(generations) == 1, "seed must be INSERT-IF-ABSENT"
+        assert generations[0][0] == "memory"
+        assert generations[0][1] == COLLECTION_NAME
+        assert generations[0][2] == canonical_fingerprint(current_fingerprint())
+        assert generations[0][3] == 1
+        assert not list(Path(tmp_path).glob("*.pre-v2.bak")), "no DDL on fresh install, no backup"
+    finally:
+        await eng.dispose()
+
+
+async def test_upgraded_tables_enforce_outbox_and_generation_uniques(v1_db):
+    from app.models.index_outbox import IndexGeneration, IndexOutbox
+
+    eng, _ = v1_db
+    await database.bootstrap_sqlite()
+
+    first = IndexOutbox(
+        kind="memory", entity_id=uuid.uuid4().hex, tenant_id=uuid.uuid4().hex,
+        revision=1, operation="upsert", target_generation="gen-1",
+    )
+    async with AsyncSession(eng, expire_on_commit=False) as db:
+        db.add(first)
+        await db.commit()
+        db.add(IndexOutbox(
+            kind=first.kind, entity_id=first.entity_id, tenant_id=first.tenant_id,
+            revision=first.revision, operation=first.operation,
+            target_generation=first.target_generation,
+        ))
+        with pytest.raises(IntegrityError):
+            await db.commit()
+        await db.rollback()
+
+        db.add(IndexGeneration(id=uuid.uuid4().hex, kind="memory", generation="gen-dup",
+                               fingerprint="fp"))
+        await db.commit()
+        db.add(IndexGeneration(id=uuid.uuid4().hex, kind="memory", generation="gen-dup",
+                               fingerprint="fp"))
+        with pytest.raises(IntegrityError):
+            await db.commit()
