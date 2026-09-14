@@ -44,6 +44,7 @@ if IS_SQLITE:
         cursor = dbapi_connection.cursor()
         cursor.execute("PRAGMA foreign_keys=ON")
         cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA busy_timeout=5000")
         cursor.close()
 
 
@@ -97,7 +98,22 @@ def get_sync_engine() -> Engine:
     """Return the process-wide synchronous engine, creating it on first use."""
     from sqlalchemy import create_engine
 
-    sync_url = settings.DATABASE_URL.replace("+asyncpg", "+psycopg2")
+    url = settings.DATABASE_URL
+    if url.startswith("sqlite"):
+        sync_url = url.replace("+aiosqlite", "")
+        eng = create_engine(sync_url, connect_args={"check_same_thread": False})
+
+        @event.listens_for(eng, "connect")
+        def _enable_sync_sqlite_pragmas(dbapi_connection, _record):
+            cursor = dbapi_connection.cursor()
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA busy_timeout=5000")
+            cursor.close()
+
+        return eng
+
+    sync_url = url.replace("+asyncpg", "+psycopg2")
     return create_engine(
         sync_url,
         pool_pre_ping=True,
