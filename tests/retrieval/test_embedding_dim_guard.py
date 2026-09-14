@@ -60,6 +60,46 @@ def test_unstamped_collection_returns_stamp():
     assert stamp["hnsw:space"] == "cosine"  # existing keys preserved
 
 
+@pytest.mark.parametrize(
+    "partial_metadata",
+    [
+        {embedder.EMBED_FINGERPRINT_META_KEY: "fingerprint-only"},
+        {embedder.EMBED_BACKEND_META_KEY: "jina"},
+        {embedder.EMBED_DIM_META_KEY: 1024},
+    ],
+)
+def test_partial_embedding_metadata_fails_closed(partial_metadata):
+    with pytest.raises(EmbeddingDimensionMismatch, match="incomplete"):
+        check_collection_dim(
+            _collection(partial_metadata),
+            1024,
+            backend="jina",
+            fingerprint="jina-test-contract",
+        )
+
+
+def test_empty_metadata_remains_stampable():
+    stamp = check_collection_dim(
+        _collection({}),
+        1024,
+        backend="jina",
+        fingerprint="jina-test-contract",
+    )
+    assert stamp is not None
+    assert stamp[embedder.EMBED_FINGERPRINT_META_KEY] == "jina-test-contract"
+
+
+def test_default_active_dict_fingerprint_is_canonicalized(monkeypatch):
+    monkeypatch.setattr(
+        embedder,
+        "current_fingerprint",
+        lambda: {"z": 1, "a": "active-contract"},
+    )
+    stamp = check_collection_dim(_collection({}), 1024, backend="jina")
+    assert stamp is not None
+    assert stamp[embedder.EMBED_FINGERPRINT_META_KEY] == '{"a":"active-contract","z":1}'
+
+
 def test_matching_stamp_passes_silently():
     coll = _collection(
         {

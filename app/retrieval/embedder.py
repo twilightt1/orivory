@@ -104,14 +104,15 @@ def check_collection_dim(
 
     has_dim = EMBED_DIM_META_KEY in meta
     has_backend = EMBED_BACKEND_META_KEY in meta
-    if not has_dim and not has_backend:
+    has_fingerprint = EMBED_FINGERPRINT_META_KEY in meta
+    if not has_dim and not has_backend and not has_fingerprint:
         return {
             **meta,
             EMBED_BACKEND_META_KEY: backend,
             EMBED_DIM_META_KEY: embedding_dim,
             EMBED_FINGERPRINT_META_KEY: expected_fingerprint,
         }
-    if not has_dim or not has_backend:
+    if not has_dim or not has_backend or not has_fingerprint:
         raise EmbeddingDimensionMismatch(
             "incomplete collection embedding metadata — quarantine/rebuild"
         )
