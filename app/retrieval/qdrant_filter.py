@@ -54,7 +54,7 @@ def build_filter(user_id: str, where: dict[str, Any] | None = None) -> qm.Filter
 
 
 def build_chunk_filter(
-    user_id: str | None,
+    user_id: str,
     conversation_id: str,
     *,
     document_id: str | None = None,
@@ -63,15 +63,22 @@ def build_chunk_filter(
 
     Chunks live in ONE collection per generation and are scoped by payload, so
     the tenant clause is what keeps a conversation id — or a document id — from
-    reaching another owner's points. ``user_id`` is the authenticated
-    principal; ``None`` is the legacy call form, where the conversation scope
-    alone is the boundary (an API-face caller must pass it). ``document_id``
-    narrows to one document's points (deletes), never widens anything.
+    reaching another owner's points. ``user_id`` is the authenticated principal
+    and is NOT optional: conversation scope alone is not a tenant boundary
+    (two tenants can name the same conversation id), so a missing or empty
+    tenant is refused here rather than translated into a wider filter.
+    ``document_id`` narrows to one document's points (deletes), never widens
+    anything.
     """
-    must: list[Any] = []
-    if user_id is not None:
-        must.append(_match("user_id", "$eq", user_id))
-    must.append(_match("conversation_id", "$eq", conversation_id))
+    if user_id is None or not str(user_id).strip():
+        raise ValueError(
+            "chunk filters need a tenant: user_id is the security boundary, "
+            "conversation scope alone is not"
+        )
+    must: list[Any] = [
+        _match("user_id", "$eq", user_id),
+        _match("conversation_id", "$eq", conversation_id),
+    ]
     if document_id is not None:
         must.append(_match("document_id", "$eq", document_id))
     return qm.Filter(must=must)

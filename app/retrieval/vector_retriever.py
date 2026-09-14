@@ -73,7 +73,7 @@ def _chunk_payload(chunk: DocumentChunk, *, user_id: str) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "kind": KIND_CHUNK,
         "user_id": str(user_id),
-        "conversation_id": str(metadata.get("conversation_id", "")),
+        "conversation_id": _chunk_conversation_id(chunk, metadata),
         "document_id": str(chunk.document_id),
         "chunk_id": str(chunk.id),
         "revision": int(chunk.revision or 1),
@@ -85,6 +85,25 @@ def _chunk_payload(chunk: DocumentChunk, *, user_id: str) -> dict[str, Any]:
     if parent_id:
         payload["parent_id"] = str(parent_id)
     return payload
+
+
+def _chunk_conversation_id(chunk: DocumentChunk, metadata: dict[str, Any]) -> str:
+    """The conversation the point is scoped to: the metadata, else the row.
+
+    ``""`` is not a valid scope — a point written with an empty
+    ``conversation_id`` is unreachable by every conversation-scoped filter and
+    delete, i.e. an orphan no erasure can name. Fall back to the document row;
+    if that is absent too, refuse loudly instead of indexing an unowned point.
+    """
+    conversation_id = metadata.get("conversation_id")
+    if not conversation_id:
+        conversation_id = getattr(chunk.document, "conversation_id", None)
+    if not conversation_id:
+        raise ValueError(
+            f"chunk {chunk.id} has no conversation_id (neither chunk_metadata "
+            "nor its document row): refusing to index an unowned point"
+        )
+    return str(conversation_id)
 
 
 def _point(chunk: DocumentChunk, vector: list[float], *, user_id: str) -> qm.PointStruct:
@@ -303,7 +322,7 @@ async def search(
     conversation_id: str,
     hyde_text: str | None = None,
     *,
-    user_id: str | None = None,
+    user_id: str,
 ) -> list[dict]:
     """Semantic search over the active chunk generation.
 
@@ -313,7 +332,8 @@ async def search(
     ``score`` is the cosine SIMILARITY the store reports (never ``1 - dist``),
     and the list is sorted by ``(-score, child_id)`` so equal scores have a
     stable order. Scope is the conversation — plus the tenant clause when
-    ``user_id`` is given (the API face must pass it).
+    the REQUIRED ``user_id`` (conversation scope alone is not a tenant
+    boundary, so there is no unscoped call form).
 
     Raises :class:`VectorUnavailableError` when the generation cannot be
     acquired or the count/query calls themselves fail — a vector outage is a

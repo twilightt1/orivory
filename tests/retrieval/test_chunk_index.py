@@ -298,6 +298,40 @@ async def test_upsert_skips_an_empty_batch(env, world):
     assert vector_retriever.upsert_chunks_sync([], user_id=str(world.user_id)) == 0
 
 
+async def test_payload_falls_back_to_the_document_conversation_id(env, world):
+    """M2: metadata without a conversation_id is scoped by the document row."""
+    chunk = _chunk(world, content="no metadata conv")
+    chunk.chunk_metadata.pop("conversation_id")
+    chunk.document = Document(
+        id=world.document_id,
+        conversation_id=world.conversation_id,
+        filename="f.pdf",
+        file_path="uploads/f.pdf",
+    )
+
+    await vector_retriever.upsert_chunks([chunk], user_id=str(world.user_id))
+
+    assert _points([chunk.id])[str(chunk.id)]["conversation_id"] == str(world.conversation_id)
+    # The point is reachable by the conversation-scoped filter/delete (the whole
+    # point of M2: "" made it unreachable by every one of them).
+    hits = await vector_retriever.search(
+        "no metadata conv", 5, str(world.conversation_id), user_id=str(world.user_id)
+    )
+    assert [hit["child_id"] for hit in hits] == [str(chunk.id)]
+
+
+async def test_payload_refuses_a_chunk_with_no_conversation_scope(env, world):
+    """M2: no metadata and no document row → never index an ownerless point."""
+    chunk = _chunk(world, content="ownerless")
+    chunk.chunk_metadata.pop("conversation_id")
+    chunk.document = None  # nothing to fall back to either
+
+    with pytest.raises(ValueError, match="conversation_id"):
+        await vector_retriever.upsert_chunks([chunk], user_id=str(world.user_id))
+
+    assert _points([chunk.id]) == {}
+
+
 # ── search: the pinned shape, scoped by tenant + conversation ───────────────
 
 
@@ -364,6 +398,12 @@ async def test_search_of_a_conversation_with_no_points_is_empty(env, world):
     ) == []
 
 
+def test_search_requires_a_tenant():
+    """I1: keyword-only and defaultless — no caller can drop the boundary."""
+    with pytest.raises(TypeError):
+        vector_retriever.search("q", 5, "cid")
+
+
 def test_build_chunk_filter_pins_the_tenant_then_the_conversation():
     chunk_filter = build_chunk_filter("owner", "conv", document_id="doc")
 
@@ -373,6 +413,16 @@ def test_build_chunk_filter_pins_the_tenant_then_the_conversation():
     assert chunk_filter.must[0].match.value == "owner"
     assert chunk_filter.must[1].match.value == "conv"
     assert chunk_filter.must[2].match.value == "doc"
+    assert [condition.key for condition in build_chunk_filter("owner", "conv").must] == [
+        "user_id", "conversation_id"
+    ]
+
+
+def test_build_chunk_filter_refuses_a_missing_or_empty_tenant():
+    """I1: the tenant clause is mandatory, never omitted for a wider filter."""
+    for missing in (None, "", "   "):
+        with pytest.raises(ValueError, match="tenant"):
+            build_chunk_filter(missing, "conv")
 
 
 # ── document / conversation deletes: filtered, tenant-scoped, verified ──────
@@ -442,19 +492,33 @@ async def test_a_foreign_tenant_cannot_delete_by_document(env, world):
 # ── intents: enqueued with the rows, quarantined ids never inserted ─────────
 
 
-async def test_chunk_intents_roll_back_with_the_rows(env, world):
+def test_chunk_intents_roll_back_with_the_rows(env, world):
     chunk = _chunk(world)
-    async with env() as db:
+    with sync_session() as db:
         db.add(chunk)
-        await outbox.enqueue_chunk_upsert(
+        outbox.enqueue_chunk_upsert_sync(
             db, chunk_id=chunk.id, tenant_id=world.user_id, revision=1,
             conversation_id=world.conversation_id,
         )
-        await db.rollback()
+        db.rollback()
 
-    assert await _intents() == []
-    async with env() as db:
-        assert await db.get(DocumentChunk, chunk.id) is None
+    with sync_session() as db:
+        assert db.execute(select(IndexOutbox)).scalars().all() == []
+        assert db.get(DocumentChunk, chunk.id) is None
+
+
+def test_chunk_upsert_intent_refuses_a_non_positive_revision(env, world):
+    """M1: a revision-0 upsert would dedupe onto an earlier one (lost write)."""
+    chunk = _chunk(world)
+    with sync_session() as db:
+        with pytest.raises(ValueError, match="revision"):
+            outbox.enqueue_chunk_upsert_sync(
+                db, chunk_id=chunk.id, tenant_id=world.user_id, revision=0,
+                conversation_id=world.conversation_id,
+            )
+
+    with sync_session() as db:
+        assert db.execute(select(IndexOutbox)).scalars().all() == []
 
 
 async def test_malformed_chunk_ids_are_quarantined_not_fixed(env, world):

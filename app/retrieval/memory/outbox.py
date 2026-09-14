@@ -288,6 +288,15 @@ def _quarantine_log(quarantined: list[str], *, context: str) -> None:
 
 def _chunk_upsert_values(*, entity_id: str, tenant_id: str, revision: int,
                          target_generation: str) -> dict[str, Any]:
+    if int(revision) <= 0:
+        # Same law as the memory twin (:func:`_upsert_values`): never guess or
+        # default this write's revision. A zero would dedupe onto an earlier
+        # revision-0 intent (the unique key drops it) or be acked stale by the
+        # drain — a silently lost index write either way.
+        raise ValueError(
+            f"chunk {entity_id} has no revision to enqueue: pass the SQL row's "
+            "revision (> 0) in the same transaction as the write"
+        )
     return {
         "kind": KIND_CHUNK,
         "entity_id": entity_id,
@@ -316,31 +325,17 @@ def _chunk_delete_values(*, entity_id: str, tenant_id: str, target_generation: s
     }
 
 
-async def enqueue_chunk_upsert(
-    db: AsyncSession, *, chunk_id: Any, tenant_id: Any, revision: int, conversation_id: Any
-) -> list[str]:
-    """Record the durable upsert intent for one chunk in ``db``'s transaction.
-
-    ``conversation_id`` only names the write in the quarantine report; the
-    intent's own columns (identity, tenant, revision, generation) are what the
-    drain reads back. Returns the quarantined ids (empty when the id is valid).
-    """
-    chunk_ids, quarantined = _chunk_entity_ids([chunk_id])
-    if quarantined:
-        _quarantine_log(quarantined, context=f"upsert conversation:{conversation_id}")
-        return quarantined
-    values = _chunk_upsert_values(
-        entity_id=chunk_ids[0], tenant_id=_entity_id(tenant_id), revision=revision,
-        target_generation=await _target_generation(db, KIND_CHUNK),
-    )
-    await db.execute(_intent_stmt(values, db))
-    return []
-
-
 def enqueue_chunk_upsert_sync(
     db: Session, *, chunk_id: Any, tenant_id: Any, revision: int, conversation_id: Any
 ) -> list[str]:
-    """Synchronous variant of :func:`enqueue_chunk_upsert` (ingestion face)."""
+    """Record the durable upsert intent for one chunk in ``db``'s transaction.
+
+    The ingestion face is the ONLY caller (ingestion is sync); there is no
+    async twin to leave dangling. ``conversation_id`` only names the write in
+    the quarantine report; the intent's own columns (identity, tenant,
+    revision, generation) are what the drain reads back. Returns the
+    quarantined ids (empty when the id is valid).
+    """
     chunk_ids, quarantined = _chunk_entity_ids([chunk_id])
     if quarantined:
         _quarantine_log(quarantined, context=f"upsert conversation:{conversation_id}")
@@ -570,6 +565,10 @@ async def _apply_chunk_intent(db: AsyncSession, row: IndexOutbox) -> str:
     """
     entity_id = uuid.UUID(row.entity_id)
     chunk = await db.get(DocumentChunk, entity_id)
+    # Invariant: this revision-0 delete bypass is safe ONLY while chunk ids are
+    # never reused. A future in-place chunk writer MUST bump ``revision`` AND
+    # enqueue its upsert in the same transaction — otherwise a stale delete at
+    # revision 0 removes the fresh point and acks itself.
     if chunk is None or row.operation == OPERATION_DELETE:
         await _delete_chunk_vector_or_fail([str(entity_id)])
         return "applied"
@@ -624,7 +623,6 @@ __all__ = [
     "drain_pending",
     "enqueue_chunk_delete",
     "enqueue_chunk_delete_sync",
-    "enqueue_chunk_upsert",
     "enqueue_chunk_upsert_sync",
     "enqueue_delete",
     "enqueue_delete_sync",
