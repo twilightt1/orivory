@@ -87,8 +87,11 @@ memory_ids, *, requested_by)`:
    `vector_state`: `verified` / `pending` / `unknown` / `residual` (a failed
    purge stays `pending` — the intent is what retries it).
 5. **Receipt** — one `erasure_receipts` row per call, with additive
-   `detail.verification` and `detail.index_pending`:
-   `completed` / `completed_with_residual` / `completed_with_errors`
+   `detail.verification` and `detail.index_pending` (omitted when nothing was
+   erased — no erase, no verification claim):
+   `completed_unverified` (no positive presence readback; spec §5.4/P1 gate)
+   / `completed` (positively verified) / `completed_with_residual` /
+   `completed_with_errors` — that precedence order
    (per-target try/except + session rollback so remaining targets still
    process). Receipt-commit failure is the one documented unrecorded mode.
 

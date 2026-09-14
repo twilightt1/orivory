@@ -208,6 +208,7 @@ async def test_chroma_outage_reports_pending_vectors(db, chroma_down):
     assert target["status"] == "deleted"
     assert target["vector_state"] == "pending"  # the durable delete intent owns it now
     assert target["vector_residual_checked"] is False
+    assert receipt.status == "completed_unverified"  # spec §5.4 / P1 gate: no positive readback
     assert receipt.detail["verification"] == "pending"
     assert receipt.detail["index_pending"] == 1
 
@@ -232,6 +233,7 @@ async def test_verify_unknown_is_not_reported_as_verified(db, monkeypatch):
     target = receipt.detail["targets"][0]
     assert target["vector_state"] == "unknown"
     assert target["vector_state"] != "verified"
+    assert receipt.status == "completed_unverified"  # spec §5.4 / P1 gate
     assert receipt.detail["verification"] == "unknown"
 
 

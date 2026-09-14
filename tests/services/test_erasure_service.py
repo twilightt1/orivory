@@ -195,6 +195,9 @@ async def test_erase_skips_foreign_or_missing_and_still_writes_receipt(no_chroma
     assert receipt.status == "completed"
     assert receipt.detail["targets"] == [{"memory_id": receipt.requested_memory_ids[0], "status": "not_found_or_foreign"}]
     assert receipt.detail["summary"]["erased"] == 0
+    # F2: nothing was erased, so there is no vector verification to claim.
+    assert "verification" not in receipt.detail
+    assert "index_pending" not in receipt.detail
 
 
 async def test_erase_dedups_input_ids(no_chroma):
@@ -256,7 +259,12 @@ async def test_erase_survives_chroma_outage(no_chroma, monkeypatch):
     monkeypatch.setattr(erasure_service, "_chroma_present_ids", _chroma_down)
     receipt = await erase_memories(db, user_id, [mid], requested_by="rest_api")
 
-    assert receipt.status == "completed"  # verification unknown ≠ residual
+    # Spec §5.4 / P1 gate: an unknown residual check must not read as a plain
+    # completion — the status degrades to `completed_unverified` because
+    # nothing was positively verified (this is the corrected meaning, not a
+    # relaxed assertion: `completed` now requires a positive readback).
+    assert receipt.status == "completed_unverified"
+    assert receipt.detail["targets"][0]["vector_state"] == "unknown"
     assert receipt.detail["targets"][0]["vector_residual_checked"] is False
 
 

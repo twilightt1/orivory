@@ -20,8 +20,14 @@ Receipt ``status`` — precedence in this order:
 - ``completed_with_residual``: no errors, but verification found residual
   vectors or DB rows, or a target's derived-memory closure came back
   ``unknown`` (something may survive, so a clean completion is not claimed).
-- ``completed``: every target erased; see the additive ``verification`` field
-  for whether the vector side was positively verified.
+- ``completed_unverified``: no errors and no known residual, but the vector
+  side was not positively verified (a target is ``pending`` or ``unknown``).
+  Spec §5.4 / the P1 gate: ``completed`` must not be reported when the
+  residual check failed or the traversal did not finish.
+- ``completed``: every target erased AND the vector side positively verified
+  (absence readback confirmed for every deleted target); see the additive
+  ``verification`` field. A call that erased nothing carries no
+  ``verification``/``index_pending`` rollup at all — it verified nothing.
 
 Per target, ``vector_state`` distinguishes what was actually confirmed:
 
@@ -70,6 +76,7 @@ from app.retrieval.memory.write_back import safe_delete_from_chroma
 log = logging.getLogger(__name__)
 
 ERASURE_STATUS_COMPLETED = "completed"
+ERASURE_STATUS_UNVERIFIED = "completed_unverified"
 ERASURE_STATUS_RESIDUAL = "completed_with_residual"
 ERASURE_STATUS_ERRORS = "completed_with_errors"
 NOT_FOUND_OR_FOREIGN = "not_found_or_foreign"
@@ -394,32 +401,42 @@ async def erase_memories(
         status = ERASURE_STATUS_ERRORS
     elif residual_vectors or residual_rows or any_closure_unknown:
         status = ERASURE_STATUS_RESIDUAL
+    elif vector_states - {VECTOR_STATE_VERIFIED}:
+        # Spec §5.4 / P1 gate: `completed` is only stored after a POSITIVE
+        # presence readback. A pending purge or an unknown verification
+        # (Chroma unreachable) reports `completed_unverified` instead.
+        status = ERASURE_STATUS_UNVERIFIED
     else:
         status = ERASURE_STATUS_COMPLETED
 
-    verification = next((s for s in _VECTOR_STATE_PRECEDENCE if s in vector_states),
-                        VECTOR_STATE_VERIFIED)
+    detail: dict[str, Any] = {
+        "requested_by": requested_by,
+        "targets": targets,
+        "summary": {
+            "requested": len(unique_ids),
+            "erased": len(erased),
+            "skipped": len(unique_ids) - len(erased),
+            "errors": sum(1 for t in targets if t["status"] == "error"),
+            "residual_vectors": residual_vectors,
+            "residual_rows": residual_rows,
+        },
+    }
+    if erased:
+        # Additive: what the index side still owes for this call, and the
+        # worst vector state any deleted target could confirm. Omitted when
+        # nothing was erased — a forget that deleted nothing verified nothing,
+        # so it must not read as a positive verification.
+        detail["verification"] = next(
+            (s for s in _VECTOR_STATE_PRECEDENCE if s in vector_states),
+            VECTOR_STATE_VERIFIED,
+        )
+        detail["index_pending"] = sum(int(t.get("index_pending", 0)) for t in erased)
 
     receipt = ErasureReceipt(
         user_id=user_id,
         requested_memory_ids=[str(m) for m in unique_ids],
         status=status,
-        detail={
-            "requested_by": requested_by,
-            # Additive: what the index side still owes for this call, and the
-            # worst vector state any deleted target could confirm.
-            "verification": verification,
-            "index_pending": sum(int(t.get("index_pending", 0)) for t in erased),
-            "targets": targets,
-            "summary": {
-                "requested": len(unique_ids),
-                "erased": len(erased),
-                "skipped": len(unique_ids) - len(erased),
-                "errors": sum(1 for t in targets if t["status"] == "error"),
-                "residual_vectors": residual_vectors,
-                "residual_rows": residual_rows,
-            },
-        },
+        detail=detail,
     )
     db.add(receipt)
     await db.commit()
@@ -456,6 +473,7 @@ __all__ = [
     "ERASURE_STATUS_COMPLETED",
     "ERASURE_STATUS_ERRORS",
     "ERASURE_STATUS_RESIDUAL",
+    "ERASURE_STATUS_UNVERIFIED",
     "NOT_FOUND_OR_FOREIGN",
     "VECTOR_STATE_PENDING",
     "VECTOR_STATE_RESIDUAL",
