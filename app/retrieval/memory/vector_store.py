@@ -77,9 +77,11 @@ def _memory_to_metadata(memory: Memory, *, embedding_dim: int | None = None) -> 
     ``revision`` names ARE those keys, and a second alias would be a second
     source of truth for one value.
 
-    An absent value is OMITTED, never null — Qdrant rejects null payload
-    values, and an absent key is exactly "unknown" to a filter. The user's
-    ``extra_metadata`` is deliberately not copied into the index payload.
+    An absent value is OMITTED, never null: omitting empty optional fields
+    keeps include/filter semantics clean (a filter on a missing key simply
+    does not match, which is exactly "unknown"), and the payload never carries
+    a null for a consumer to re-interpret. The user's ``extra_metadata`` is
+    deliberately not copied into the index payload.
     """
     # Local import: correction -> outbox -> this module is a real cycle.
     from app.retrieval.memory.correction import state_of
@@ -370,8 +372,11 @@ async def search_memories(
     """
     user_filter = build_filter(user_id, where)
     try:
+        # The read path opens the generation at the CONTRACT dim (the active
+        # fingerprint), never the query's: a wrong-dim query must fail the
+        # guard below, not create the generation it is then checked against.
         client, generation, manifest_fingerprint = await _open_collection(
-            len(query_embedding)
+            int(current_fingerprint()["dim"])
         )
     except Exception as e:
         # An outage is a typed readiness signal, never an empty result: a

@@ -207,6 +207,31 @@ async def test_server_mode_uses_async_and_sync_clients(monkeypatch):
     await vector_backend.close_clients()  # no server needed: nothing connected
 
 
+async def test_server_mode_clients_carry_a_bounded_request_timeout(monkeypatch):
+    """A hung Qdrant server must fail a caller, not hold it: both server-mode
+    clients are built with the module's bounded request timeout."""
+    monkeypatch.setattr(settings, "QDRANT_MODE", "server")
+    seen: dict[str, dict] = {}
+
+    def _sync(**kwargs):
+        seen["sync"] = kwargs
+        return QdrantClient(**kwargs, check_compatibility=False)
+
+    def _async(**kwargs):
+        seen["async"] = kwargs
+        return AsyncQdrantClient(**kwargs, check_compatibility=False)
+
+    monkeypatch.setattr(vector_backend, "QdrantClient", _sync)
+    monkeypatch.setattr(vector_backend, "AsyncQdrantClient", _async)
+
+    vector_backend.get_sync_client()
+    vector_backend.get_async_client()
+
+    assert seen["sync"]["timeout"] == vector_backend.SERVER_REQUEST_TIMEOUT
+    assert seen["async"]["timeout"] == vector_backend.SERVER_REQUEST_TIMEOUT
+    await vector_backend.close_clients()  # no server needed: nothing connected
+
+
 async def test_close_clients_releases_lock(local):
     folder = str(local)
     vector_backend.get_sync_client()

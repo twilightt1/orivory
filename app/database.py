@@ -169,7 +169,7 @@ def _check_sqlite_foreign_keys(sync_conn) -> None:
 def _seed_transitional_generation(sync_conn) -> None:
     """INSERT-IF-ABSENT: the vector generation this install currently serves.
 
-    P1a keeps Chroma (``vector_store.COLLECTION_NAME`` + the active embedding
+    P1b keeps Qdrant (``vector_store.COLLECTION_NAME`` + the active embedding
     fingerprint) as that generation. The ``fingerprint`` column stores the
     64-char ``fingerprint_generation`` token (the same family the vector payload
     stamps as ``orivory_embed_generation``), not the long canonical contract

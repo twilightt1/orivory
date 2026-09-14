@@ -368,6 +368,22 @@ async def test_search_on_an_empty_generation_is_empty(env, owner):
     ) == []
 
 
+async def test_wrong_dim_query_does_not_bake_its_dim_into_the_generation(env, owner):
+    """The read path opens the generation at the CONTRACT dim (the fingerprint),
+    never the query's: a wrong-dim query fails the guard instead of creating a
+    generation sized to itself."""
+    with pytest.raises(EmbeddingDimensionMismatch):
+        await vector_store.search_memories(
+            [0.1] * (DIM - 3), user_id=str(owner), top_k=5
+        )
+
+    generation = await _active_name()
+    assert vector_backend.collection_info("memory", generation) == {
+        "dim": DIM,
+        "distance": "Cosine",
+    }
+
+
 # ── filter parity ───────────────────────────────────────────────────────────
 
 
@@ -644,6 +660,23 @@ class _RecorderClient:
         self._schema[field_name] = field_schema
 
 
+class _IndexRecorder:
+    """The REAL embedded client behind one recorded seam: the real client's
+    ``payload_schema`` is where a vacuous check hid, so local mode is pinned
+    by counting the calls it must never make."""
+
+    def __init__(self, inner) -> None:
+        self._inner = inner
+        self.index_calls: list[dict] = []
+
+    def create_payload_index(self, **kwargs):
+        self.index_calls.append(kwargs)
+        return self._inner.create_payload_index(**kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
 def test_payload_indexes_are_created_in_server_mode(monkeypatch):
     client = _RecorderClient()
     monkeypatch.setattr(vector_backend, "is_local_mode", lambda: False)
@@ -688,16 +721,19 @@ def test_other_kinds_have_no_payload_indexes(monkeypatch):
 
 async def test_local_mode_creates_no_payload_indexes(monkeypatch, tmp_path):
     """Embedded Qdrant ignores payload indexes (and warns loudly): lite mode
-    never asks for one."""
+    never asks for one. The assertion counts calls on a REAL client, so it
+    fails if the local branch ever called ``create_payload_index``."""
     folder = tmp_path / "qdrant"
     folder.mkdir()
     monkeypatch.setattr(settings, "QDRANT_MODE", "local")
     monkeypatch.setattr(settings, "QDRANT_LOCAL_PATH", str(folder))
-    client = vector_backend.get_sync_client()
+    recorder = _IndexRecorder(vector_backend.get_sync_client())
+    monkeypatch.setattr(vector_backend, "get_sync_client", lambda: recorder)
 
     try:
         vector_backend.ensure_collection("memory", OTHER_GENERATION, dim=DIM)
-        assert client.get_collection(OTHER_GENERATION).payload_schema in ({}, None)
+        assert recorder.index_calls == []
+        assert recorder.get_collection(OTHER_GENERATION).payload_schema in ({}, None)
     finally:
         await vector_backend.close_clients()
 

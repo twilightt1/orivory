@@ -29,6 +29,12 @@ from app.config import settings
 
 _LOCAL_THREAD_PREFIX = "qdrant-local"
 
+# Request timeout for the SERVER-mode clients, in seconds: a hung server must
+# fail a caller, never hold it (reads re-raise, writes stay pending in the
+# outbox — but the latency stays bounded). One shared constant, not a setting.
+# int: the client's signature is `int | None` and it ceils the value anyway.
+SERVER_REQUEST_TIMEOUT = 5
+
 # Per-kind payload indexes (spec §4.2): the fields a filter reads must be
 # indexed or every search is a full scan. SERVER mode only — the embedded
 # store ignores payload indexes and warns on each request, and lite mode
@@ -132,7 +138,9 @@ def get_sync_client() -> QdrantClient | _LocalSyncProxy:
             _sync_client = _LocalSyncProxy(_owner_local_client())
         else:
             _sync_client = QdrantClient(
-                url=settings.QDRANT_URL, api_key=settings.QDRANT_API_KEY or None
+                url=settings.QDRANT_URL,
+                api_key=settings.QDRANT_API_KEY or None,
+                timeout=SERVER_REQUEST_TIMEOUT,
             )
     return _sync_client
 
@@ -145,7 +153,9 @@ def get_async_client() -> AsyncQdrantClient | _SyncAsAsync:
             _async_client = _SyncAsAsync(_owner_local_client())
         else:
             _async_client = AsyncQdrantClient(
-                url=settings.QDRANT_URL, api_key=settings.QDRANT_API_KEY or None
+                url=settings.QDRANT_URL,
+                api_key=settings.QDRANT_API_KEY or None,
+                timeout=SERVER_REQUEST_TIMEOUT,
             )
     return _async_client
 
