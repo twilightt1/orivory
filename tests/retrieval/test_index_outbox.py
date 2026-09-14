@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import NullPool
 
+import app.main as main
 from app import database
 from app.database import Base, sync_session
 from app.models.index_outbox import IndexGeneration, IndexOutbox
@@ -43,10 +44,12 @@ def _sync_engine(url: str):
     return eng
 
 
-@pytest_asyncio.fixture
-async def db(tmp_path, monkeypatch):
-    """A private per-test SQLite file — nothing here can reach an ambient DB."""
-    url = f"sqlite+aiosqlite:///{tmp_path / OUTBOX_DB}"
+def _open_engines(url: str, monkeypatch):
+    """Fresh async+sync engines for ``url``, bound as the app's own.
+
+    Called by the fixture and by the restart test — a restart is exactly this:
+    new engines over the same committed SQLite file.
+    """
     eng = create_async_engine(url, poolclass=NullPool)
     event.listen(eng.sync_engine, "connect", database._configure_sqlite_connection)
     sessions = async_sessionmaker(eng, class_=AsyncSession, expire_on_commit=False, autoflush=False)
@@ -59,6 +62,14 @@ async def db(tmp_path, monkeypatch):
         database, "_get_sync_sessionmaker",
         lambda: sessionmaker(bind=sync_eng, expire_on_commit=False, autoflush=False),
     )
+    return eng, sync_eng, sessions
+
+
+@pytest_asyncio.fixture
+async def db(tmp_path, monkeypatch):
+    """A private per-test SQLite file — nothing here can reach an ambient DB."""
+    url = f"sqlite+aiosqlite:///{tmp_path / OUTBOX_DB}"
+    eng, sync_eng, sessions = _open_engines(url, monkeypatch)
     async with eng.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     async with sessions() as session:
@@ -364,6 +375,43 @@ async def test_drain_retries_transient_failure_with_backoff(db, owner, monkeypat
     assert row.status == "done" and row.attempts == 1  # attempts kept for the audit trail
 
 
+async def test_backoff_grows_and_is_capped(db, owner, monkeypatch):
+    """attempts increments per failure; the wait grows and saturates at 3600s."""
+    async def chroma_down(_memory):
+        raise RuntimeError("chroma is down")
+
+    monkeypatch.setattr(outbox, "upsert_memory", chroma_down)
+
+    memory = _memory(owner)
+    db.add(memory)
+    outbox.bump_revision(memory)
+    await outbox.enqueue_upsert(db, memory)
+    await db.commit()
+
+    deltas: list[float] = []
+    for attempt in range(1, 9):
+        async with database.AsyncSessionLocal() as session:  # make the intent due again
+            row = (await session.execute(
+                select(IndexOutbox).order_by(IndexOutbox.seq))).scalars().one()
+            row.next_attempt_at = datetime.now(UTC) - timedelta(seconds=1)
+            await session.commit()
+        before = datetime.now(UTC).replace(tzinfo=None)  # SQLite round-trips naive datetimes
+        assert (await outbox.drain_pending())["failed"] == 1
+        row = (await _outbox_rows())[0]
+        assert row.attempts == attempt  # exactly one increment per failed attempt
+        assert row.status == "pending" and row.next_attempt_at is not None
+        deltas.append((row.next_attempt_at - before).total_seconds())
+
+    assert deltas[:6] == pytest.approx([60, 120, 240, 480, 960, 1920], abs=2)
+    assert deltas[6:] == pytest.approx([3600, 3600], abs=2)  # 60*2**6 = 3840 -> capped
+    # Non-decreasing (measured against a clock captured just before each drain,
+    # so equal capped waits still carry sub-millisecond jitter).
+    assert deltas == pytest.approx(sorted(deltas), abs=0.01)
+
+    # The capped intent is still not due: the cap is a wait, not a terminal state.
+    assert (await outbox.drain_pending())["claimed"] == 0
+
+
 async def test_drain_batch_size_bounds_one_run(db, owner, monkeypatch):
     applied: list[str] = []
 
@@ -384,6 +432,165 @@ async def test_drain_batch_size_bounds_one_run(db, owner, monkeypatch):
     assert len(applied) == 2
     second = await outbox.drain_pending(batch_size=2)
     assert second["claimed"] == 1
+
+
+# ── startup drain (T5): restart replay, bounded batches, never a boot blocker ─
+
+
+class _LogCapture:
+    """Records ``main.log`` calls (level, event, kwargs) for the wiring asserts."""
+
+    def __init__(self) -> None:
+        self.events: list[tuple[str, str, dict]] = []
+
+    def info(self, event: str, **kw) -> None:
+        self.events.append(("info", event, kw))
+
+    def warning(self, event: str, **kw) -> None:
+        self.events.append(("warning", event, kw))
+
+    def reports(self) -> list[dict]:
+        return [kw for _level, event, kw in self.events if event == "Index outbox startup drain"]
+
+
+def _pin_this_files_url(monkeypatch, tmp_path) -> None:
+    """``main`` reads the URL at call time; pin it to the test's own SQLite file."""
+    monkeypatch.setattr(main.settings, "DATABASE_URL", f"sqlite+aiosqlite:///{tmp_path / OUTBOX_DB}")
+
+
+async def test_pending_intent_survives_a_restart_and_is_applied_on_the_next_boot(
+    db, owner, monkeypatch, tmp_path
+):
+    """Crash between commit and index: the intent survives; the next drain heals it."""
+    from app.api.v1 import memories as memories_api
+    from app.schemas.Orivory import MemoryCreate
+
+    async def chroma_down(_memory):
+        return False  # write-through failed: the durable intent is all that remains
+
+    monkeypatch.setattr(memories_api, "index_new_memory", chroma_down)
+    response = await memories_api.create_memory(
+        MemoryCreate(content="survives"), SimpleNamespace(id=owner), db
+    )
+    assert response.indexing == "pending"
+    assert [row.status for row in await _outbox_rows()] == ["pending"]
+
+    # Process dies here: its pool goes away, only the committed SQLite file stays.
+    await database.engine.dispose()
+    eng, sync_eng, _sessions = _open_engines(
+        f"sqlite+aiosqlite:///{tmp_path / OUTBOX_DB}", monkeypatch
+    )
+    indexed: list[tuple[str, str, int]] = []
+
+    async def upsert_ok(memory):
+        indexed.append((str(memory.id), memory.content, memory.revision))
+
+    monkeypatch.setattr(outbox, "upsert_memory", upsert_ok)
+    try:
+        report = await outbox.drain_pending()
+
+        assert report == {"claimed": 1, "applied": 1, "skipped": 0, "blocked": 0, "failed": 0}
+        assert indexed == [(str(response.id), "survives", 1)]  # exactly one vector write
+        assert [row.status for row in await _outbox_rows()] == ["done"]
+    finally:
+        await eng.dispose()
+        sync_eng.dispose()
+
+
+async def test_startup_drain_is_bounded_to_two_batches(db, owner, monkeypatch, tmp_path):
+    """At most 2 x 50 intents per boot: the rest stays pending for the next start."""
+    indexed: list[str] = []
+
+    async def upsert_ok(memory):
+        indexed.append(str(memory.id))
+
+    monkeypatch.setattr(outbox, "upsert_memory", upsert_ok)
+    for i in range(120):
+        memory = _memory(owner, content=f"v{i}")
+        db.add(memory)
+        outbox.bump_revision(memory)
+        await outbox.enqueue_upsert(db, memory)
+    await db.commit()
+
+    _pin_this_files_url(monkeypatch, tmp_path)
+    captured = _LogCapture()
+    monkeypatch.setattr(main, "log", captured)
+
+    await main._drain_index_outbox_on_startup()
+
+    assert len(indexed) == 100  # a third batch would have claimed the last 20
+    statuses = [row.status for row in await _outbox_rows()]
+    assert statuses.count("done") == 100 and statuses.count("pending") == 20
+    assert [report["claimed"] for report in captured.reports()] == [50, 50]
+
+
+async def test_startup_drain_keeps_intents_pending_when_chroma_is_down(
+    db, owner, monkeypatch, tmp_path
+):
+    """The ruling: a vector outage at boot leaves the intent pending, never blocks boot."""
+    async def chroma_down(_memory):
+        raise RuntimeError("chroma connection refused")
+
+    monkeypatch.setattr(outbox, "upsert_memory", chroma_down)
+
+    memory = _memory(owner)
+    db.add(memory)
+    outbox.bump_revision(memory)
+    await outbox.enqueue_upsert(db, memory)
+    await db.commit()
+
+    _pin_this_files_url(monkeypatch, tmp_path)
+    captured = _LogCapture()
+    monkeypatch.setattr(main, "log", captured)
+
+    await main._drain_index_outbox_on_startup()  # must return, not raise
+
+    row = (await _outbox_rows())[0]
+    assert row.status == "pending" and row.attempts == 1
+    assert row.next_attempt_at is not None and "chroma connection refused" in row.last_error
+    assert [report["failed"] for report in captured.reports()] == [1]  # the report was logged
+
+
+async def test_startup_drain_failure_is_logged_not_raised(db, owner, monkeypatch, tmp_path):
+    """Even a drain-level failure is a warning: the app must still boot."""
+    from sqlalchemy import text
+
+    memory = _memory(owner)
+    db.add(memory)
+    outbox.bump_revision(memory)
+    await outbox.enqueue_upsert(db, memory)
+    await db.commit()
+    await db.execute(text("DROP TABLE index_outbox"))  # the drain's SELECT can only fail
+    await db.commit()
+
+    _pin_this_files_url(monkeypatch, tmp_path)
+    captured = _LogCapture()
+    monkeypatch.setattr(main, "log", captured)
+
+    await main._drain_index_outbox_on_startup()
+
+    level, event, kw = captured.events[0]
+    assert (level, event) == ("warning", "Index outbox startup drain failed")
+    assert kw["error"]
+
+
+async def test_startup_drain_is_a_noop_outside_sqlite_deployments(db, owner, monkeypatch):
+    """Mirrors the bootstrap_sqlite guard: a Postgres boot does not drain here."""
+    memory = _memory(owner)
+    db.add(memory)
+    outbox.bump_revision(memory)
+    await outbox.enqueue_upsert(db, memory)
+    await db.commit()
+
+    monkeypatch.setattr(main.settings, "DATABASE_URL", "postgresql+asyncpg://user:pw@db/orivory")
+    captured = _LogCapture()
+    monkeypatch.setattr(main, "log", captured)
+
+    await main._drain_index_outbox_on_startup()
+
+    assert captured.events == []
+    row = (await _outbox_rows())[0]
+    assert row.status == "pending" and row.attempts == 0  # untouched: it never ran
 
 
 # ── graph metadata writes stay out of the revision/outbox loop ───────────────

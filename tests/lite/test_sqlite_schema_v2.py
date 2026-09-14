@@ -13,10 +13,10 @@ from pathlib import Path
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import String, event, text
+from sqlalchemy import String, event, select, text
 from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
 from app import database, models  # noqa: F401 — register every model on Base
@@ -310,3 +310,61 @@ async def test_empty_existing_backup_still_refuses(v1_db):
     (tmp_path / "v1.sqlite.pre-v2.bak").write_bytes(b"")
     with pytest.raises(RuntimeError, match="empty or unreadable"):
         await database.bootstrap_sqlite()
+
+
+# ── T5: the boot hook drains the outbox on a real v2 install ─────────────────
+
+
+async def test_app_boot_drains_the_outbox_and_survives_a_chroma_outage(tmp_path, monkeypatch):
+    """The lifespan replays pending intents after the bootstrap; Chroma down ≠ no boot."""
+    from app.main import app as fastapi_app
+    from app.main import lifespan
+    from app.models.index_outbox import IndexOutbox
+    from app.models.memory import Memory
+    from app.models.user import User
+    from app.retrieval.memory import outbox
+
+    eng = await _engine(tmp_path, "boot.sqlite")
+    sessions = async_sessionmaker(eng, class_=AsyncSession, expire_on_commit=False, autoflush=False)
+    monkeypatch.setattr(database, "engine", eng)
+    monkeypatch.setattr(database, "IS_SQLITE", True)
+    monkeypatch.setattr(database, "AsyncSessionLocal", sessions)
+    monkeypatch.setattr(outbox, "AsyncSessionLocal", sessions)
+
+    async def offline_storage():
+        return None
+
+    import app.storage
+
+    monkeypatch.setattr(app.storage, "ensure_bucket", offline_storage)  # storage is not the contract here
+
+    try:
+        await database.bootstrap_sqlite()  # the real ladder: fresh v2 install
+        owner = uuid.uuid4()
+        async with sessions() as db:
+            db.add(User(id=owner, email=f"{owner.hex}@test.invalid", hashed_password="x",
+                        display_name="Owner", is_verified=True, is_active=True))
+            memory = Memory(user_id=owner, content="heal me", tags=[])
+            db.add(memory)
+            outbox.bump_revision(memory)
+            await outbox.enqueue_upsert(db, memory)
+            await db.commit()
+            memory_id = memory.id
+
+        async def chroma_down(_memory):
+            raise RuntimeError("chroma connection refused")
+
+        monkeypatch.setattr(outbox, "upsert_memory", chroma_down)
+
+        booted = False
+        async with lifespan(fastapi_app):
+            booted = True  # the app reached readiness despite the vector outage
+
+        assert booted
+        async with sessions() as db:
+            row = (await db.execute(select(IndexOutbox))).scalars().one()
+        assert row.entity_id == memory_id.hex
+        assert (row.status, row.attempts) == ("pending", 1)  # stays pending with backoff
+        assert "chroma connection refused" in row.last_error
+    finally:
+        await eng.dispose()

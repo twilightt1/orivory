@@ -12,6 +12,35 @@ from app.middleware.logging_middleware import LoggingMiddleware
 
 log = structlog.get_logger()
 
+# A boot replays at most this many drain batches of 50 intents. A crash-time
+# backlog heals over a few starts without delaying readiness; anything left
+# stays pending in SQLite for the next boot (a background loop is P3's, and is
+# deliberately absent here).
+_STARTUP_DRAIN_BATCHES = 2
+_STARTUP_DRAIN_BATCH_SIZE = 50
+
+
+async def _drain_index_outbox_on_startup() -> None:
+    """Replay pending index intents at boot — SQLite deployments only.
+
+    Mirrors the ``bootstrap_sqlite`` guard. Bounded and failure-tolerant: a
+    vector outage (or any drain-level error) must never keep the app from
+    booting, so it is logged and the intents stay pending with backoff for the
+    next start. The report of every batch is logged for observability.
+    """
+    if not settings.DATABASE_URL.startswith("sqlite"):
+        return
+    from app.retrieval.memory.outbox import drain_pending
+
+    try:
+        for _ in range(_STARTUP_DRAIN_BATCHES):
+            report = await drain_pending(batch_size=_STARTUP_DRAIN_BATCH_SIZE)
+            log.info("Index outbox startup drain", **report)
+            if report.get("claimed", 0) < _STARTUP_DRAIN_BATCH_SIZE:
+                break  # nothing left: a second batch would claim zero
+    except Exception as e:
+        log.warning("Index outbox startup drain failed", error=str(e))
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -22,6 +51,7 @@ async def lifespan(app: FastAPI):
         from app.database import bootstrap_sqlite
         await bootstrap_sqlite()
         log.info("SQLite schema bootstrapped")
+    await _drain_index_outbox_on_startup()
     try:
         from app.storage import ensure_bucket
         await ensure_bucket()
