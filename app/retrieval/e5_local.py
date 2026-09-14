@@ -209,6 +209,11 @@ def _encode_with(
             mask[r, :take] = e.attention_mask[:take]
         last = sess.run(None, _feed(sess, ids, mask))[0]
         if pooling == "cls":
+            if last.ndim != 3:
+                # A 2-D export (already pooled) would mis-slice silently.
+                raise ValueError(
+                    f"CLS pooling requires token embeddings (ndim=3); got shape {last.shape}"
+                )
             # [CLS] is token 0 for both models; padding cannot shift it.
             emb = last[:, 0, :]
         else:

@@ -196,6 +196,8 @@ def generation_name(kind: str, fingerprint: str | dict[str, Any] | None = None) 
     to a usable name. The migration/cutover tool names the NEW generation with
     this helper; the runtime fallbacks in ``app.retrieval.memory.outbox`` keep
     their old spellings for un-migrated databases.
+    ``None`` means "the active contract"; a falsy-but-explicit fingerprint
+    (``{}`` / ``""``) is a caller bug, never a synonym for ``None``.
     """
     try:
         family = _GENERATION_FAMILIES[kind]
@@ -203,8 +205,15 @@ def generation_name(kind: str, fingerprint: str | dict[str, Any] | None = None) 
         raise ValueError(
             f"unknown index kind {kind!r} — expected one of {sorted(_GENERATION_FAMILIES)}"
         ) from None
-    fp = fingerprint or current_fingerprint()
-    return f"{family}__{fingerprint_generation(fp)[:8]}"
+    if fingerprint is None:
+        fingerprint = current_fingerprint()
+    if not fingerprint:
+        # Rollback (T6) and ablation (T8) name generations they built: silently
+        # naming the ACTIVE one would point them at the wrong vectors.
+        raise ValueError(
+            f"empty embedding fingerprint {fingerprint!r} — pass None to name the active generation"
+        )
+    return f"{family}__{fingerprint_generation(fingerprint)[:8]}"
 
 
 def cache_key(fingerprint: dict, kind: str, text: str) -> str:

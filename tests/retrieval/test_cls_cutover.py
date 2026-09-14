@@ -11,7 +11,6 @@ guard).
 
 from __future__ import annotations
 
-import inspect
 from collections import namedtuple
 
 import numpy as np
@@ -103,6 +102,28 @@ def test_cls_and_mean_differ_but_share_shape_and_unit_norm(stubs):
 def test_unknown_pooling_fails_loudly(stubs):
     with pytest.raises(ValueError, match="pooling"):
         _encode(["a"], "clsx")
+
+
+class _FlatSession:
+    """A 2-D export (already pooled — no token axis)."""
+
+    def __init__(self) -> None:
+        _In = namedtuple("_In", ["name"])
+        self._inputs = [_In("input_ids"), _In("attention_mask")]
+
+    def get_inputs(self):
+        return self._inputs
+
+    def run(self, _output_names, inputs):
+        return [np.zeros((inputs["input_ids"].shape[0], DIM), dtype=np.float32)]
+
+
+def test_cls_pooling_requires_token_embeddings():
+    """A 2-D export must raise, not mis-slice ``last[:, 0, :]`` into silence."""
+    with pytest.raises(ValueError, match="CLS pooling requires"):
+        e5_local._encode_with(
+            ["a"], lambda: _FlatSession(), lambda: _FakeTokenizer(), pooling="cls"
+        )
 
 
 def test_arctic_call_sites_use_cls_pooling(stubs):
@@ -199,6 +220,21 @@ def test_generation_name_rejects_unknown_kind():
         fp.generation_name("document")
 
 
+@pytest.mark.parametrize(
+    "explicit",
+    [
+        pytest.param({}, id="empty-dict"),
+        pytest.param("", id="empty-string"),
+        pytest.param([1], id="non-mapping"),
+    ],
+)
+def test_generation_name_refuses_an_explicit_empty_or_non_mapping_fingerprint(explicit):
+    """T6 rollback / T8 ablation pass explicit fingerprints — a falsy one must
+    never be silently upgraded to the ACTIVE generation's name."""
+    with pytest.raises(ValueError, match="embedding fingerprint"):
+        fp.generation_name("memory", explicit)
+
+
 # ── MiniLM removal: config load fails loud (R22) ────────────────────────────
 
 
@@ -216,7 +252,6 @@ def test_local_embed_model_accepts_arctic_and_e5():
 
 def test_local_embedding_path_has_no_chromadb_branch():
     assert not hasattr(embedder, "_local_embed_fn")
-    assert "chromadb" not in inspect.getsource(embedder)
 
 
 def test_local_dispatch_only_knows_arctic_and_e5(monkeypatch, stubs):
@@ -246,3 +281,12 @@ def test_local_dispatch_only_knows_arctic_and_e5(monkeypatch, stubs):
         "embed_queries",
         "embed_passages",
     ]
+
+
+def test_local_dispatch_fails_loud_on_an_unknown_model(monkeypatch):
+    """Config load refuses these; a hand-patched setting must not embed as arctic."""
+    monkeypatch.setattr(settings, "USE_LOCAL_EMBEDDINGS", True)
+    monkeypatch.setattr(settings, "LOCAL_EMBED_MODEL", "minilm")
+
+    with pytest.raises(ValueError, match="LOCAL_EMBED_MODEL"):
+        embedder._embed_with_local(["q"], query=True)

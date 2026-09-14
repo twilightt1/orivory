@@ -540,10 +540,16 @@ def _embed_with_local(texts: list[str], *, query: bool = False) -> list[list[flo
     """
     from app.retrieval import e5_local
 
-    if settings.LOCAL_EMBED_MODEL == "e5":
+    model = settings.LOCAL_EMBED_MODEL
+    if model == "e5":
         if query:
             return e5_local.embed_queries(texts)
         return e5_local.embed_passages(texts)
+    if model != "arctic":
+        # Config load refuses anything but arctic|e5; a hand-patched settings
+        # object must not silently embed as arctic either (same fence as
+        # ``active_backend_name``).
+        raise ValueError(f"unknown LOCAL_EMBED_MODEL {model!r} — expected 'arctic' or 'e5'")
     if query:
         return e5_local.arctic_embed_queries(texts)
     return e5_local.arctic_embed_passages(texts)

@@ -63,7 +63,7 @@ def test_production_arctic_is_the_cls_reference():
         assert np.allclose(production, reference, atol=1e-5), np.abs(
             production - reference
         ).max()
-        assert np.allclose(production, _mean_of(texts)) is False
+        assert not np.allclose(production, _mean_of(texts))
 
 
 def test_legacy_mean_differs_from_production_cls():
