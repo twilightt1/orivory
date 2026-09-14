@@ -62,7 +62,7 @@ class IndexGeneration(Base):
     id: Mapped[str] = mapped_column(String(32), primary_key=True)   # uuid4 hex
     kind: Mapped[str] = mapped_column(String(16))
     generation: Mapped[str] = mapped_column(String(64))             # physical collection name
-    fingerprint: Mapped[str] = mapped_column(String(128))
+    fingerprint: Mapped[str] = mapped_column(String(128))  # fingerprint_generation() token, 64 hex
     is_active: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(UTC))

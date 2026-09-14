@@ -1,3 +1,4 @@
+import logging
 import os
 import shutil
 import sqlite3
@@ -13,6 +14,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from app.config import settings
+
+log = logging.getLogger(__name__)
 
 IS_SQLITE = settings.DATABASE_URL.startswith("sqlite")
 SQLITE_SCHEMA_VERSION = 2
@@ -109,10 +112,19 @@ def _sqlite_path() -> str:
 
 
 def _backup_before_ddl(db_path: str) -> str:
-    """Consistent pre-DDL backup (VACUUM INTO includes committed WAL frames)."""
+    """Consistent pre-DDL backup (VACUUM INTO includes committed WAL frames).
+
+    Resumable: a crash between the backup and the version stamp leaves a
+    complete backup behind, so a later attempt reuses it instead of refusing
+    (the ladder is idempotent and safe to re-run). Only an empty or unreadable
+    backup file is an error — never silently reuse a truncated one.
+    """
     dest = f"{db_path}.pre-v2.bak"
     if os.path.exists(dest):
-        raise RuntimeError(f"refusing to overwrite existing migration backup {dest}")
+        if os.path.getsize(dest) == 0 or not os.access(dest, os.R_OK):
+            raise RuntimeError(f"existing migration backup {dest} is empty or unreadable")
+        log.warning("reusing pre-migration backup %s from an interrupted upgrade", dest)
+        return dest
     size = os.path.getsize(db_path)
     if shutil.disk_usage(os.path.dirname(db_path) or ".").free < size * 2:
         raise RuntimeError("insufficient free disk for pre-migration backup")
@@ -158,10 +170,14 @@ def _seed_transitional_generation(sync_conn) -> None:
     """INSERT-IF-ABSENT: the vector generation this install currently serves.
 
     P1a keeps Chroma (``vector_store.COLLECTION_NAME`` + the active embedding
-    fingerprint) as that generation; the P1b cutover replaces this row with the
-    real one. Idempotent, so it also repairs an install missing the row.
+    fingerprint) as that generation. The ``fingerprint`` column stores the
+    64-char ``fingerprint_generation`` token (the same family the vector payload
+    stamps as ``orivory_embed_generation``), not the long canonical contract
+    string — it must fit ``String(128)`` on Postgres. The P1b cutover replaces
+    this row with the real one. Idempotent, so it also repairs an install
+    missing the row.
     """
-    from app.retrieval.embedding_fingerprint import canonical_fingerprint, current_fingerprint
+    from app.retrieval.embedding_fingerprint import current_fingerprint, fingerprint_generation
     from app.retrieval.memory.vector_store import COLLECTION_NAME
 
     sync_conn.exec_driver_sql(
@@ -169,7 +185,7 @@ def _seed_transitional_generation(sync_conn) -> None:
         " SELECT ?, 'memory', ?, ?, 1, CURRENT_TIMESTAMP"
         " WHERE NOT EXISTS (SELECT 1 FROM index_generations"
         "                   WHERE kind = 'memory' AND generation = ?)",
-        (uuid.uuid4().hex, COLLECTION_NAME, canonical_fingerprint(current_fingerprint()),
+        (uuid.uuid4().hex, COLLECTION_NAME, fingerprint_generation(current_fingerprint()),
          COLLECTION_NAME),
     )
 

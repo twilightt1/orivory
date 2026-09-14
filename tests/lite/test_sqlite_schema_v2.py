@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import event, text
+from sqlalchemy import String, event, text
 from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
@@ -21,11 +21,23 @@ from sqlalchemy.pool import NullPool
 
 from app import database, models  # noqa: F401 — register every model on Base
 from app.database import Base
-from app.retrieval.embedding_fingerprint import canonical_fingerprint, current_fingerprint
+from app.models.index_outbox import IndexGeneration
+from app.retrieval.embedding_fingerprint import current_fingerprint, fingerprint_generation
 from app.retrieval.memory.vector_store import COLLECTION_NAME
 
 V2_TABLES = {"index_outbox", "index_generations", "memory_suppressions"}
 V2_COLUMNS = {"memories": "revision", "document_chunks": "revision"}
+
+
+def _assert_fingerprint_fits_column(token: str) -> None:
+    """SQLite ignores VARCHAR length; Postgres does not — the seed must fit."""
+    column_type = IndexGeneration.__table__.c.fingerprint.type
+    assert isinstance(column_type, String) and column_type.length is not None, (
+        "fingerprint stays a length-bounded String (not Text)"
+    )
+    assert len(token) <= column_type.length, (
+        f"fingerprint is {len(token)} chars, column allows {column_type.length}"
+    )
 
 
 async def _engine(tmp_path: Path, name: str):
@@ -121,7 +133,9 @@ async def test_v1_install_is_upgraded_to_v2_and_backed_up(v1_db):
     assert fk_violations == []
     assert integrity == "ok"
     assert [(r[0], r[1], r[3]) for r in generations] == [("memory", COLLECTION_NAME, 1)]
-    assert generations[0][2] == canonical_fingerprint(current_fingerprint())
+    # Same 64-char generation token the vector payload stamps as orivory_embed_generation.
+    assert generations[0][2] == fingerprint_generation(current_fingerprint())
+    _assert_fingerprint_fits_column(generations[0][2])
 
     # Backup must exist and predate the v2 DDL.
     backups = list(Path(tmp_path).glob("*.pre-v2.bak"))
@@ -223,7 +237,8 @@ async def test_bootstrap_is_idempotent_and_seeds_one_generation_row(tmp_path, mo
         assert len(generations) == 1, "seed must be INSERT-IF-ABSENT"
         assert generations[0][0] == "memory"
         assert generations[0][1] == COLLECTION_NAME
-        assert generations[0][2] == canonical_fingerprint(current_fingerprint())
+        assert generations[0][2] == fingerprint_generation(current_fingerprint())
+        _assert_fingerprint_fits_column(generations[0][2])
         assert generations[0][3] == 1
         assert not list(Path(tmp_path).glob("*.pre-v2.bak")), "no DDL on fresh install, no backup"
     finally:
@@ -259,3 +274,39 @@ async def test_upgraded_tables_enforce_outbox_and_generation_uniques(v1_db):
                                fingerprint="fp"))
         with pytest.raises(IntegrityError):
             await db.commit()
+
+
+async def test_interrupted_upgrade_resumes_and_keeps_the_existing_backup(v1_db):
+    """A crash after the v2 DDL but before the version stamp must resume.
+
+    Reproduces the review repro: v2 DDL applied (it autocommits), ``user_version``
+    still 1, a pre-existing non-empty ``.pre-v2.bak``. Re-entry must complete the
+    upgrade and leave that backup's bytes untouched.
+    """
+    eng, tmp_path = v1_db
+    backup = tmp_path / "v1.sqlite.pre-v2.bak"
+    backup.write_bytes(b"pre-v2 backup from the interrupted run")
+    async with eng.begin() as conn:
+        await conn.run_sync(database._upgrade_v1_to_v2)  # the DDL of the partial run
+        version, _ = await _schema(conn)
+    assert version == 1, "fixture must model an interruption, not a finished upgrade"
+
+    before = backup.read_bytes()
+    await database.bootstrap_sqlite()
+
+    async with eng.connect() as conn:
+        version, tables = await _schema(conn)
+    assert version == 2
+    assert V2_TABLES <= tables
+    assert list(Path(tmp_path).glob("*.pre-v2.bak")) == [backup], (
+        "the interrupted run's backup must be reused, not replaced"
+    )
+    assert backup.read_bytes() == before, "an existing backup is never overwritten"
+
+
+async def test_empty_existing_backup_still_refuses(v1_db):
+    """The refusal survives only for an unusable (empty) backup file."""
+    _, tmp_path = v1_db
+    (tmp_path / "v1.sqlite.pre-v2.bak").write_bytes(b"")
+    with pytest.raises(RuntimeError, match="empty or unreadable"):
+        await database.bootstrap_sqlite()
