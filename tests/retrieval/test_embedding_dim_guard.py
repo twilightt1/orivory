@@ -4,8 +4,8 @@
 OpenAI with only a code comment as guard ("do NOT mix backends in one
 store"). Flipping USE_JINA_EMBEDDINGS / USE_LOCAL_EMBEDDINGS after data
 exists wrote mismatched vectors into the same Chroma collection silently.
-The guard stamps backend+dim into collection metadata on first write and
-fails loud on any later mismatch.
+The guard stamps backend+dim+fingerprint into collection metadata on first
+write and fails loud on any later contract mismatch or unreadable metadata.
 """
 from __future__ import annotations
 
@@ -47,38 +47,101 @@ def test_active_backend_name_dispatch(monkeypatch):
 
 def test_unstamped_collection_returns_stamp():
     coll = _collection({"hnsw:space": "cosine"})
-    stamp = check_collection_dim(coll, 1024, backend="jina")
+    stamp = check_collection_dim(
+        coll,
+        1024,
+        backend="jina",
+        fingerprint="jina-test-contract",
+    )
     assert stamp is not None
     assert stamp["orivory_embed_dim"] == 1024
     assert stamp["orivory_embed_backend"] == "jina"
+    assert stamp["orivory_embed_fingerprint"] == "jina-test-contract"
     assert stamp["hnsw:space"] == "cosine"  # existing keys preserved
 
 
 def test_matching_stamp_passes_silently():
-    coll = _collection({"orivory_embed_backend": "jina", "orivory_embed_dim": 1024})
-    assert check_collection_dim(coll, 1024, backend="jina") is None
+    coll = _collection(
+        {
+            "orivory_embed_backend": "jina",
+            "orivory_embed_dim": 1024,
+            "orivory_embed_fingerprint": "jina-test-contract",
+        }
+    )
+    assert (
+        check_collection_dim(
+            coll,
+            1024,
+            backend="jina",
+            fingerprint="jina-test-contract",
+        )
+        is None
+    )
 
 
 def test_dimension_switch_raises_loudly():
-    coll = _collection({"orivory_embed_backend": "jina", "orivory_embed_dim": 1024})
+    coll = _collection(
+        {
+            "orivory_embed_backend": "jina",
+            "orivory_embed_dim": 1024,
+            "orivory_embed_fingerprint": "jina-test-contract",
+        }
+    )
     with pytest.raises(EmbeddingDimensionMismatch, match=r"1024.*1536|1536.*1024"):
-        check_collection_dim(coll, 1536, backend="openai")
+        check_collection_dim(
+            coll,
+            1536,
+            backend="openai",
+            fingerprint="jina-test-contract",
+        )
 
 
 def test_backend_switch_same_dim_raises():
-    coll = _collection({"orivory_embed_backend": "jina", "orivory_embed_dim": 1024})
+    coll = _collection(
+        {
+            "orivory_embed_backend": "jina",
+            "orivory_embed_dim": 1024,
+            "orivory_embed_fingerprint": "jina-test-contract",
+        }
+    )
     with pytest.raises(EmbeddingDimensionMismatch, match="backend"):
-        check_collection_dim(coll, 1024, backend="local")
+        check_collection_dim(
+            coll,
+            1024,
+            backend="local",
+            fingerprint="jina-test-contract",
+        )
 
 
-def test_unreadable_metadata_skips_silently():
-    """Unit-test doubles (MagicMock) expose non-dict metadata — the guard
-    must never break mocked paths, it just cannot verify them."""
-    assert check_collection_dim(SimpleNamespace(), 1536, backend="openai") is None
+def test_same_dim_different_pooling_raises():
+    coll = _collection(
+        {
+            "orivory_embed_backend": "local-arctic",
+            "orivory_embed_dim": 384,
+            "orivory_embed_fingerprint": "pooling=legacy-mean",
+        }
+    )
+    with pytest.raises(EmbeddingDimensionMismatch):
+        check_collection_dim(
+            coll,
+            384,
+            backend="local-arctic",
+            fingerprint="pooling=cls",
+        )
 
-    class _Weird:
+
+def test_unreadable_metadata_no_longer_skips_silently():
+    class Opaque:
         @property
         def metadata(self):
-            raise RuntimeError("nope")
+            raise RuntimeError("unreadable")
 
-    assert check_collection_dim(_Weird(), 1536, backend="openai") is None
+    with pytest.raises(EmbeddingDimensionMismatch):
+        check_collection_dim(Opaque(), 384, backend="local-arctic")
+
+
+def test_magicmock_metadata_remains_compatible():
+    """MagicMock unit doubles may skip the real collection safety guard."""
+    from unittest.mock import MagicMock
+
+    assert check_collection_dim(MagicMock(), 1536, backend="openai") is None

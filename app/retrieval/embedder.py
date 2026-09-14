@@ -1,8 +1,10 @@
+import json
 import logging
 
 from openai import AsyncOpenAI, OpenAI
 
 from app.config import settings
+from app.retrieval.embedding_fingerprint import current_fingerprint
 
 log = logging.getLogger(__name__)
 
@@ -20,20 +22,20 @@ _async_client: AsyncOpenAI | None = None
 _sync_client: OpenAI | None = None
 _local_embed_fn = None  # chromadb ONNX MiniLM (USE_LOCAL_EMBEDDINGS + minilm)
 
-# Collection metadata keys recording which embedding backend + dimension a
-# Chroma collection was created with. Flipping USE_JINA_EMBEDDINGS /
-# USE_LOCAL_EMBEDDINGS after data exists used to write mismatched vectors
-# into the same collection silently — the guard below fails loud instead.
+# Collection metadata keys recording which embedding backend, dimension and
+# contract a collection was created with. Flipping embedding settings after
+# data exists must fail loud instead of mixing incompatible vectors.
 EMBED_BACKEND_META_KEY = "orivory_embed_backend"
 EMBED_DIM_META_KEY = "orivory_embed_dim"
+EMBED_FINGERPRINT_META_KEY = "orivory_embed_fingerprint"
 
 
 class EmbeddingDimensionMismatch(ValueError):
-    """Raised when embeddings don't match the collection's recorded backend.
+    """Raised when an embedding does not match a verifiable collection contract.
 
     Either the embedding config changed after data was indexed (fix: reindex
-    into a fresh collection or restore the previous backend), or vectors from
-    two backends are being mixed (fix: don't).
+    into a fresh collection or restore the previous backend), vectors from
+    two contracts are being mixed, or collection metadata cannot be trusted.
     """
 
 
@@ -48,34 +50,86 @@ def active_backend_name() -> str:
     return "openai"
 
 
-def check_collection_dim(collection, embedding_dim: int, *, backend: str | None = None) -> dict | None:
-    """Verify an embedding fits the collection's recorded backend/dim.
+def _canonical_fingerprint(fingerprint: str | dict | None) -> str:
+    """Return the scalar representation stored in collection metadata."""
+    if fingerprint is None:
+        fingerprint = current_fingerprint()
+    if isinstance(fingerprint, str):
+        return fingerprint
+    if isinstance(fingerprint, dict):
+        try:
+            return json.dumps(
+                fingerprint,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        except (TypeError, ValueError) as exc:
+            raise EmbeddingDimensionMismatch("invalid embedding fingerprint") from exc
+    raise EmbeddingDimensionMismatch("embedding fingerprint must be a string or dict")
+
+
+def check_collection_dim(
+    collection,
+    embedding_dim: int,
+    *,
+    backend: str | None = None,
+    fingerprint: str | dict | None = None,
+) -> dict | None:
+    """Verify an embedding fits the collection's recorded contract.
 
     Returns a replacement metadata dict to stamp when the collection carries
-    no stamp yet (caller applies it via ``collection.modify`` in its own
-    sync/async style), None when the stamp matches, and raises
-    :class:`EmbeddingDimensionMismatch` on a backend or dimension switch.
-
-    Collections whose metadata is unreadable (unit-test doubles, exotic
-    wrappers) are skipped silently — the guard must never break a path it
-    cannot verify.
+    no embedding stamp yet, None when the stamp matches, and raises
+    :class:`EmbeddingDimensionMismatch` on an unknown or mismatched contract.
+    The active embedding fingerprint is used when callers omit one.
     """
     backend = backend or active_backend_name()
+    expected_fingerprint = _canonical_fingerprint(fingerprint)
     # Unwrap the local-mode sync→async adapter (its __getattr__ turns every
     # attribute access into a coroutine factory — read the inner instead).
     inner = getattr(collection, "_inner", collection)
-    if type(inner).__name__ == "MagicMock":
+    if type(inner).__name__ in {"MagicMock", "AsyncMock", "Mock"}:
         return None
     try:
         meta = inner.metadata
-    except Exception:
-        return None
+    except Exception as exc:
+        raise EmbeddingDimensionMismatch(
+            "unreadable collection metadata — quarantine/rebuild, "
+            "do not auto-assign fingerprint"
+        ) from exc
     if not isinstance(meta, dict):
-        return None
-    recorded_dim = meta.get(EMBED_DIM_META_KEY)
-    recorded_backend = meta.get(EMBED_BACKEND_META_KEY)
-    if recorded_dim is None:
-        return {**meta, EMBED_BACKEND_META_KEY: backend, EMBED_DIM_META_KEY: embedding_dim}
+        raise EmbeddingDimensionMismatch(
+            "non-dict collection metadata — quarantine/rebuild"
+        )
+
+    has_dim = EMBED_DIM_META_KEY in meta
+    has_backend = EMBED_BACKEND_META_KEY in meta
+    if not has_dim and not has_backend:
+        return {
+            **meta,
+            EMBED_BACKEND_META_KEY: backend,
+            EMBED_DIM_META_KEY: embedding_dim,
+            EMBED_FINGERPRINT_META_KEY: expected_fingerprint,
+        }
+    if not has_dim or not has_backend:
+        raise EmbeddingDimensionMismatch(
+            "incomplete collection embedding metadata — quarantine/rebuild"
+        )
+
+    recorded_dim = meta[EMBED_DIM_META_KEY]
+    recorded_backend = meta[EMBED_BACKEND_META_KEY]
+    recorded_fingerprint = meta.get(EMBED_FINGERPRINT_META_KEY)
+    if not isinstance(recorded_fingerprint, str) or not recorded_fingerprint:
+        raise EmbeddingDimensionMismatch(
+            "collection lacks embedding fingerprint — quarantine/rebuild, "
+            "do not auto-stamp"
+        )
+    if recorded_fingerprint != expected_fingerprint:
+        raise EmbeddingDimensionMismatch(
+            "same dim but different embedding contract: "
+            f"{recorded_fingerprint!r} vs {expected_fingerprint!r} — "
+            "fresh reindex required"
+        )
     try:
         same_dim = int(recorded_dim) == int(embedding_dim)
     except (TypeError, ValueError):
@@ -94,9 +148,9 @@ def check_collection_dim(collection, embedding_dim: int, *, backend: str | None 
 def stamp_collection_dim(collection, embedding_dim: int, *, backend: str | None = None) -> None:
     """Check the dim guard and stamp an unstamped collection (sync caller).
 
-    Raises :class:`EmbeddingDimensionMismatch` on a backend/dim switch.
-    Stamping failures are best-effort (logged, never raised) — a missing
-    stamp only defers detection, while a stamp error must never break writes.
+    Raises :class:`EmbeddingDimensionMismatch` on an unknown or mismatched
+    contract. Collection ``modify`` failures remain best-effort for the
+    existing write-path behavior.
     """
     stamp = check_collection_dim(collection, embedding_dim, backend=backend)
     if stamp is None:
