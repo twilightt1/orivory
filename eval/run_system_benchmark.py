@@ -73,6 +73,8 @@ from eval.benchmarks.llm_judge import JUDGE_PROMPT_VERSION, build_judge_messages
 from eval.benchmarks.longmemeval_s import load_instances  # noqa: E402
 
 DATASET = ROOT / "eval/benchmarks/data/longmemeval_s_cleaned.json"
+if not DATASET.exists():  # worktree: ignored benchmark data lives on main checkout
+    DATASET = ROOT.parent.parent / "eval/benchmarks/data/longmemeval_s_cleaned.json"
 MODEL = os.environ.get("BENCHMARK_JUDGE_MODEL", os.environ["LLM_MODEL"])
 BASELINE = ROOT / "eval/benchmarks/results/longmemeval_s_baseline.json"
 if not BASELINE.exists():  # worktree: committed baseline lives on main checkout
@@ -83,6 +85,39 @@ ANSWER_SYSTEM = (
     "Answer in at most two sentences. If the memories do not contain the "
     "answer, reply exactly: I have no information about that."
 )
+
+
+def build_stack_metadata(*, top_k: int) -> dict:
+    """Build reproducibility metadata from the active benchmark stack."""
+    import subprocess
+
+    from app.retrieval.embedding_fingerprint import current_fingerprint
+
+    fingerprint = current_fingerprint()
+    try:
+        git_head = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True
+        ).strip()
+    except Exception:
+        git_head = "unknown"
+    return {
+        "database": "sqlite (lite mode)",
+        "vector_store": "chroma local (in-process)",
+        # Keep the legacy scalar key for existing result consumers.
+        "embeddings": fingerprint["model_id"],
+        "embeddings_actual": {
+            "model_id": fingerprint["model_id"],
+            "pooling": fingerprint["pooling"],
+            "dim": fingerprint["dim"],
+            "fingerprint": fingerprint,
+        },
+        "query_prefix": fingerprint["query_prefix"],
+        "passage_prefix": fingerprint["passage_prefix"],
+        "retriever": "MemoryRetriever (vector + salience + entity boost + rerank)",
+        "recall_top_k": top_k,
+        "git_head": git_head,
+        "dataset_sha256": hashlib.sha256(DATASET.read_bytes()).hexdigest(),
+    }
 
 
 def _parse_session_date(raw: str) -> datetime | None:
@@ -512,30 +547,25 @@ async def main_async(args) -> int:
         half = z * _math.sqrt(p * (1 - p) / n_s + z * z / (4 * n_s * n_s)) / denom
         wilson = [round(center - half, 3), round(center + half, 3)]
 
+    stack = build_stack_metadata(top_k=args.top_k)
     payload = {
         "benchmark": "longmemeval_s",
         "run_kind": "orivory_stack",
         "chunking": "session_level" if args.session else "per_turn",
         "answer_mode": "single_pass",
         "note": (
-            "REAL dataset, REAL Orivory stack (SQLite + local Chroma + Jina "
-            "embeddings + MemoryRetriever salience/rerank), REAL judge. Same "
-            "seed and n as the committed full-context baseline. First "
-            "system-vs-baseline comparison — small n, treat as directional."
+            "REAL dataset, REAL Orivory stack (SQLite + local Chroma + "
+            f"{stack['embeddings']} embeddings + MemoryRetriever salience/rerank), "
+            "REAL judge. Same seed and n as the committed full-context baseline. "
+            "First system-vs-baseline comparison — small n, treat as directional."
         ),
         "dataset_path": "eval/benchmarks/data/longmemeval_s_cleaned.json",
-        "dataset_sha256": hashlib.sha256(DATASET.read_bytes()).hexdigest(),
+        "dataset_sha256": stack["dataset_sha256"],
         "dataset_instances": len(all_instances),
         "sample": {"n": len(selected), "seed": args.seed},
         "model": MODEL,
         "judge_prompt_version": JUDGE_PROMPT_VERSION,
-        "stack": {
-            "database": "sqlite (lite mode)",
-            "vector_store": "chroma local (in-process)",
-            "embeddings": "jina-embeddings-v5-text-small",
-            "retriever": "MemoryRetriever (vector + salience + entity boost + rerank)",
-            "recall_top_k": args.top_k,
-        },
+        "stack": stack,
         "mean": mean,
         "questions": len(scored),
         "correct": correct,
