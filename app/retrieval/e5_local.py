@@ -126,6 +126,11 @@ def _encode(texts: list[str]) -> list[list[float]]:
     return _encode_with(texts, _session, _tokenizer)
 
 
+def arctic_files_cached() -> bool:
+    d = model_dir()
+    return (d / ARCTIC_MODEL_FILE).exists() and (d / ARCTIC_TOKENIZER_FILE).exists()
+
+
 def ensure_arctic_files() -> tuple[Path, Path]:
     d = model_dir()
     d.mkdir(parents=True, exist_ok=True)
