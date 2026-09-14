@@ -27,7 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.models.memory import Memory
 from app.models.user import User
-from app.retrieval.memory.outbox import bump_revision, enqueue_upsert
+from app.retrieval.memory.outbox import bump_revision, enqueue_upsert, mark_done
 from app.retrieval.memory.retriever import MemoryRetriever
 from app.retrieval.memory.write_back import index_new_memory, safe_upsert_to_chroma
 from app.schemas.Orivory import (
@@ -125,6 +125,10 @@ async def create_memory(
     await db.refresh(memory)
     # Post-persist indexing (embed + graph) — best-effort, Postgres is truth.
     indexed = await index_new_memory(memory)
+    if indexed:
+        # The fast path has this revision in the index: ack the intent it
+        # enqueued so a boot drain does not re-embed it.
+        await mark_done(db, entity_id=memory.id, revision=memory.revision)
     return _memory_response(memory, indexing="ready" if indexed else "pending")
 
 
@@ -287,6 +291,8 @@ async def update_memory(
     await db.refresh(memory)
     # Write-through to ChromaDB (best-effort)
     indexed = await safe_upsert_to_chroma(memory)
+    if indexed:
+        await mark_done(db, entity_id=memory.id, revision=memory.revision)
     if not data and not indexed:
         # A no-op PATCH enqueues no intent, so a failed write-through must not
         # claim a durable 'pending' backstop that does not exist.

@@ -402,11 +402,17 @@ async def test_backoff_grows_and_is_capped(db, owner, monkeypatch):
         assert row.status == "pending" and row.next_attempt_at is not None
         deltas.append((row.next_attempt_at - before).total_seconds())
 
-    assert deltas[:6] == pytest.approx([60, 120, 240, 480, 960, 1920], abs=2)
-    assert deltas[6:] == pytest.approx([3600, 3600], abs=2)  # 60*2**6 = 3840 -> capped
-    # Non-decreasing (measured against a clock captured just before each drain,
-    # so equal capped waits still carry sub-millisecond jitter).
-    assert deltas == pytest.approx(sorted(deltas), abs=0.01)
+    ladder = [60, 120, 240, 480, 960, 1920, 3600, 3600]  # spec §5.2, capped at 3600
+    for delta, step in zip(deltas, ladder, strict=True):
+        # Window per step: base + uniform(0, min(base*10%, 30)) (spec §5.2). The
+        # +2s absorbs the failed drain's own runtime after ``before`` was read;
+        # the windows never overlap, so this also proves the ladder grows.
+        assert step - 0.01 <= delta <= step + min(step * 0.1, 30) + 2, (delta, step)
+    assert deltas[:6] == sorted(deltas[:6]) and len(set(deltas[:6])) == 6  # strictly growing
+    assert deltas[5] < min(deltas[6:])  # the cap is a wait, still past the last growth step
+    # The two capped waits are the SAME ladder step, so their jittered order is
+    # not meaningful — only that both saturate at the 3600s cap.
+    assert deltas[6:] == pytest.approx([3600, 3600], abs=30)  # 60*2**6 = 3840 -> capped
 
     # The capped intent is still not due: the cap is a wait, not a terminal state.
     assert (await outbox.drain_pending())["claimed"] == 0
@@ -674,6 +680,57 @@ async def test_create_memory_reports_pending_when_the_immediate_upsert_failed(db
 
     assert response.indexing == "pending"
     assert len(await _outbox_rows()) == 1
+
+
+async def test_immediate_index_acks_its_intent_only_when_the_write_landed(db, owner, monkeypatch):
+    """F2: a landed fast path flips its own intent to `done`; a failed one stays pending."""
+    from app.api.v1 import memories as memories_api
+    from app.schemas.Orivory import MemoryCreate
+
+    upserts: list[str] = []
+
+    async def landed(memory):
+        upserts.append(memory.content)
+        return True
+
+    monkeypatch.setattr(memories_api, "index_new_memory", landed)
+    ready = await memories_api.create_memory(
+        MemoryCreate(content="indexed now"), SimpleNamespace(id=owner), db
+    )
+    assert ready.indexing == "ready"
+
+    async def chroma_down(_memory):
+        return False  # nothing was written: the intent is the only record of it
+
+    monkeypatch.setattr(memories_api, "index_new_memory", chroma_down)
+    pending = await memories_api.create_memory(
+        MemoryCreate(content="index later"), SimpleNamespace(id=owner), db
+    )
+    assert pending.indexing == "pending"
+
+    by_id = {row.entity_id: row for row in await _outbox_rows()}
+    assert (by_id[ready.id.hex].status, by_id[ready.id.hex].attempts) == ("done", 0)
+    assert by_id[pending.id.hex].status == "pending"
+
+    # The boot drain finds only the un-acked intent: the indexed revision is
+    # never re-applied.
+    async def drain_upsert(memory):
+        upserts.append(memory.content)
+
+    monkeypatch.setattr(outbox, "upsert_memory", drain_upsert)
+    assert await outbox.drain_pending() == {
+        "claimed": 1, "applied": 1, "skipped": 0, "blocked": 0, "failed": 0,
+    }
+    assert upserts == ["indexed now", "index later"]
+
+    # ...and it never touches a delete intent at the same entity+revision.
+    await outbox.enqueue_delete(db, entity_id=ready.id.hex, tenant_id=owner.hex, revision=1)
+    await db.commit()
+    await outbox.mark_done(db, entity_id=ready.id, revision=1)
+
+    actions = {row.operation: row.status for row in await _outbox_rows()
+               if row.entity_id == ready.id.hex}
+    assert actions == {"upsert": "done", "delete": "pending"}
 
 
 async def test_update_memory_bumps_revision_and_enqueues(db, owner, monkeypatch):

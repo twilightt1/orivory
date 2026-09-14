@@ -30,7 +30,7 @@ from app.ingestion.import_formats import (
 )
 from app.models.memory import Memory
 from app.retrieval.embedder import EmbeddingDimensionMismatch
-from app.retrieval.memory.outbox import bump_revision, enqueue_upsert
+from app.retrieval.memory.outbox import bump_revision, enqueue_upsert, mark_done
 from app.retrieval.memory.write_back import index_new_memory
 from app.schemas.Orivory import ImportSummary
 
@@ -140,7 +140,11 @@ async def run_import(
         # the committed Postgres row is the truth (reindex task replays it).
         for memory in created_rows:
             try:
-                await index_new_memory(memory)
+                indexed = await index_new_memory(memory)
+                if indexed:
+                    # Indexed in the fast path: ack the row's intent so the boot
+                    # drain does not re-embed the whole import.
+                    await mark_done(db, entity_id=memory.id, revision=memory.revision)
             except EmbeddingDimensionMismatch:
                 raise
             except Exception as exc:

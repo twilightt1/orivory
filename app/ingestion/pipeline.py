@@ -224,6 +224,7 @@ def _project_document_to_memories(db, document_id: str, parents) -> None:
     from app.models.conversation import Conversation
     from app.models.document import Document
     from app.models.memory import Memory
+    from app.retrieval.memory.outbox import mark_done_sync
     from app.retrieval.memory.vector_store import (
         delete_memories_sync,
         upsert_memories_sync,
@@ -262,8 +263,11 @@ def _project_document_to_memories(db, document_id: str, parents) -> None:
         .scalars()
         .all()
     )
-    if rows:
-        upsert_memories_sync(rows)
+    if rows and upsert_memories_sync(rows):
+        # The vectors are in: ack the intents committed with the rows, so a
+        # boot drain does not re-embed the whole projection.
+        for memory in rows:
+            mark_done_sync(db, entity_id=memory.id, revision=memory.revision)
 
 
 def _fail(db, document_id: str, error: str) -> None:

@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.pool import NullPool
 
 from app import database, models  # noqa: F401 — register every model on Base
+from app.config import settings
 from app.database import Base
 from app.models.index_outbox import IndexGeneration
 from app.retrieval.embedding_fingerprint import current_fingerprint, fingerprint_generation
@@ -330,6 +331,11 @@ async def test_app_boot_drains_the_outbox_and_survives_a_chroma_outage(tmp_path,
     monkeypatch.setattr(database, "IS_SQLITE", True)
     monkeypatch.setattr(database, "AsyncSessionLocal", sessions)
     monkeypatch.setattr(outbox, "AsyncSessionLocal", sessions)
+    # The lifespan gates the bootstrap and the drain on settings.DATABASE_URL
+    # itself, so it must point at this test's file whatever the ambient URL is
+    # (the shared tests/conftest.py defaults it to Postgres for the full-stack
+    # suites). Without the pin the hook no-ops and the row is never attempted.
+    monkeypatch.setattr(settings, "DATABASE_URL", f"sqlite+aiosqlite:///{tmp_path / 'boot.sqlite'}")
 
     async def offline_storage():
         return None

@@ -28,7 +28,7 @@ from app.ingestion.document_memory import is_suppressed_async
 from app.ingestion.types import ConnectorItem, ItemError, SyncResult
 from app.models.memory import Memory
 from app.models.source import MemorySource, Source
-from app.retrieval.memory.outbox import bump_revision, enqueue_upsert
+from app.retrieval.memory.outbox import bump_revision, enqueue_upsert, mark_done
 
 log = logging.getLogger(__name__)
 
@@ -142,7 +142,10 @@ class SourceSyncService:
             )
         ).scalars().all()
         for memory in rows:
-            await safe_upsert_to_chroma(memory)
+            if await safe_upsert_to_chroma(memory):
+                # Indexed now: ack the intent this batch committed, so a boot
+                # drain does not re-embed it.
+                await mark_done(self.db, entity_id=memory.id, revision=memory.revision)
             safe_enqueue_graph_build(memory.id)
 
     # ── internals ────────────────────────────────────────────────────────────

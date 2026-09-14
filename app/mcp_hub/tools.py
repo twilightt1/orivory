@@ -36,6 +36,7 @@ from app.models.memory import Memory
 from app.models.memory_access_log import MemoryAccessLog
 from app.retrieval.embedder import EmbeddingDimensionMismatch
 from app.retrieval.memory.correction import Slot, get_cm, resolve_correction, state_of
+from app.retrieval.memory.outbox import mark_done
 from app.retrieval.memory.write_back import index_new_memory
 from app.services.erasure_service import erase_memories
 
@@ -357,11 +358,17 @@ async def add_memory(title: str, content: str, tags: list[str] | None = None) ->
             summary=summary_out)
         memory = out["memory"]
     try:
-        await index_new_memory(memory)  # best-effort: embed + graph enqueue
+        indexed = await index_new_memory(memory)  # best-effort: embed + graph enqueue
     except EmbeddingDimensionMismatch:
         raise
     except Exception as exc:
+        indexed = False
         log.warning("MCP add_memory indexing failed for %s: %s", memory.id, exc)
+    if indexed:
+        # Indexed in the fast path: ack the durable intent so a boot drain does
+        # not re-embed this revision.
+        async with _session() as db:
+            await mark_done(db, entity_id=memory.id, revision=memory.revision)
     async with _session() as db:
         db.add(
             _ledger_entry(
@@ -509,11 +516,15 @@ async def correct_memory(memory_id=None, subject="", attribute="", scope="defaul
                     "dirtied": out["dirtied"], "memory_id": str(new.id)}))
         await db.commit()
     try:
-        await index_new_memory(new)
+        indexed = await index_new_memory(new)
     except EmbeddingDimensionMismatch:
         raise
     except Exception as exc:
+        indexed = False
         log.warning("MCP correct_memory indexing failed for %s: %s", new.id, exc)
+    if indexed:
+        async with _session() as db:
+            await mark_done(db, entity_id=new.id, revision=new.revision)
     return {"status": out["status"], "id": str(new.id),
             "superseded": out["superseded"], "dirtied": out["dirtied"],
             **_memory_provenance(new)}

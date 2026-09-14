@@ -5,8 +5,9 @@ increasing ``revision`` on the row and inserts one ``index_outbox`` intent in
 the SAME transaction — so a crash between the SQL commit and the vector write
 is recoverable: the intent survives and :func:`drain_pending` replays it
 against the LATEST SQL state. The existing post-commit write-through stays as
-it was (best-effort, fast path); the outbox is the durable backstop, not a
-replacement.
+it was (best-effort, fast path); on success it acks its own intent
+(:func:`mark_done`), so only an un-indexed write stays pending. The outbox is
+the durable backstop, not a replacement.
 
 P1a keeps Chroma (:mod:`app.retrieval.memory.vector_store`) as the backend.
 A drain applies one intent at a time: a dead row collapses to a delete, a
@@ -18,9 +19,10 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import UTC, datetime, timedelta
+from random import uniform
 from typing import Any
 
-from sqlalchemy import or_, select
+from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
@@ -198,11 +200,72 @@ def enqueue_delete_sync(db: Session, *, entity_id: str, tenant_id: str, revision
     db.execute(_intent_stmt(values, db))
 
 
+# ── ack: the immediate write-through already indexed this revision ──────────
+
+
+def _mark_done_stmt(*, entity_id, revision: int):
+    """UPDATE flipping ONLY the pending upsert intent for that entity+revision.
+
+    Delete intents and other revisions are different obligations and are
+    matched out by the WHERE clause.
+    """
+    return (
+        update(IndexOutbox)
+        .where(
+            IndexOutbox.kind == KIND_MEMORY,
+            IndexOutbox.entity_id == _entity_id(entity_id),
+            IndexOutbox.revision == int(revision),
+            IndexOutbox.operation == OPERATION_UPSERT,
+            IndexOutbox.status == "pending",
+        )
+        .values(status="done", updated_at=datetime.now(UTC))
+    )
+
+
+async def mark_done(db: AsyncSession, *, entity_id, revision: int) -> int:
+    """Ack this entity+revision's upsert intent after a SUCCESSFUL write-through.
+
+    Callers index the latest SQL state right after their commit; without this
+    the row would stay ``pending`` and every boot would re-embed it. Only ever
+    called when the vector write landed — a failure must leave the intent
+    pending, since that pending row is the proof the vector still owes it.
+
+    Never raises: an ack failure is logged and the intent stays ``pending``,
+    which is safe (the drain replays it) and must not fail the caller's write.
+    Commits its own UPDATE — the ack must not ride a session whose next commit
+    may never come (``get_db`` does not commit).
+    """
+    try:
+        result = await db.execute(_mark_done_stmt(entity_id=entity_id, revision=revision))
+        await db.commit()
+        return getattr(result, "rowcount", 0) or 0
+    except Exception as exc:
+        log.warning("Outbox ack failed for %s@%s: %s", entity_id, revision, exc)
+        return 0
+
+
+def mark_done_sync(db: Session, *, entity_id, revision: int) -> int:
+    """Synchronous variant of :func:`mark_done` (Celery / CLI / ingestion)."""
+    try:
+        result = db.execute(_mark_done_stmt(entity_id=entity_id, revision=revision))
+        db.commit()
+        return getattr(result, "rowcount", 0) or 0
+    except Exception as exc:
+        log.warning("Outbox ack failed for %s@%s: %s", entity_id, revision, exc)
+        return 0
+
+
 # ── drain ───────────────────────────────────────────────────────────────────
 
 
-def _backoff_seconds(attempts: int) -> int:
-    return min(_BACKOFF_BASE_SECONDS * 2 ** max(attempts - 1, 0), _BACKOFF_CAP_SECONDS)
+def _backoff_seconds(attempts: int) -> float:
+    """Next wait: exponential ladder + bounded jitter (spec §5.2).
+
+    The jitter (up to 10% of the step, capped at 30s) keeps a fleet of installs
+    that failed in the same boot from retrying in lockstep.
+    """
+    backoff = min(_BACKOFF_BASE_SECONDS * 2 ** max(attempts - 1, 0), _BACKOFF_CAP_SECONDS)
+    return backoff + uniform(0, min(backoff * 0.1, 30))
 
 
 def _error_text(exc: Exception) -> str:
@@ -308,4 +371,6 @@ __all__ = [
     "enqueue_delete_sync",
     "enqueue_upsert",
     "enqueue_upsert_sync",
+    "mark_done",
+    "mark_done_sync",
 ]
