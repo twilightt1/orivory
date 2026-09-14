@@ -72,11 +72,21 @@ def _upsert_values(memory, target_generation: str) -> dict[str, Any]:
         # The row's id is a Python-side default, applied at flush; the intent
         # must carry the same id, so materialize it early (same generator).
         memory.id = uuid.uuid4()
+    revision = int(getattr(memory, "revision", 0) or 0)
+    if revision <= 0:
+        # Never guess this write's revision: a guessed one collides with an
+        # earlier intent at the same revision (deduped away by the unique key)
+        # or is acked stale by the drain — a silently lost index write either
+        # way. The caller must have bumped in the same transaction.
+        raise ValueError(
+            f"memory {memory.id} has no revision to enqueue: call "
+            "outbox.bump_revision(memory) in the same transaction as the write"
+        )
     return {
         "kind": KIND_MEMORY,
         "entity_id": _entity_id(memory.id),
         "tenant_id": _entity_id(memory.user_id),
-        "revision": int(getattr(memory, "revision", 1) or 1),
+        "revision": revision,
         "operation": OPERATION_UPSERT,
         "target_generation": target_generation,
     }

@@ -50,8 +50,12 @@ log = logging.getLogger(__name__)
 router = APIRouter(prefix="/memories", tags=["memories"])
 
 
-def _memory_response(memory: Memory, *, indexing: Literal["ready", "pending"] = "ready") -> MemoryResponse:
-    """Map ORM Memory.extra_metadata to API field `metadata`."""
+def _memory_response(memory: Memory, *, indexing: Literal["ready", "pending"] | None = None) -> MemoryResponse:
+    """Map ORM Memory.extra_metadata to API field `metadata`.
+
+    ``indexing`` is set by write paths only (POST/PATCH); read paths leave it
+    None so a response never claims an index state it did not observe.
+    """
     return MemoryResponse(
         id=memory.id,
         user_id=memory.user_id,
@@ -286,6 +290,10 @@ async def update_memory(
     await db.refresh(memory)
     # Write-through to ChromaDB (best-effort)
     indexed = await safe_upsert_to_chroma(memory)
+    if not data and not indexed:
+        # A no-op PATCH enqueues no intent, so a failed write-through must not
+        # claim a durable 'pending' backstop that does not exist.
+        return _memory_response(memory, indexing=None)
     return _memory_response(memory, indexing="ready" if indexed else "pending")
 
 

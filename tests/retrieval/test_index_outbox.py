@@ -1,9 +1,13 @@
 """Outbox: same-transaction intent, idempotent unique key, stale-skip, blocked-on-mismatch.
 
-Real SQLite file, real sessions: the drain opens its own session through
-``AsyncSessionLocal``, so this suite runs against the ambient ``DATABASE_URL``
-(``--confcutdir=tests/retrieval`` keeps the root conftest — and its Postgres
-default URL — out of the way).
+Isolated by construction: the fixture builds a private SQLite file on the
+test's ``tmp_path`` and monkeypatches it in as the module engine / async
+sessionmaker / sync sessionmaker, so this suite can never read or write
+whatever ``DATABASE_URL`` is ambient. (It used to DELETE every row of
+``index_outbox`` / ``index_generations`` / ``memories`` / ``users`` in the
+ambient DB — run against a developer's real lite install that destroyed
+memories.) Real file, real sessions, real drain: only the engines are swapped
+(pattern: ``tests/lite/test_sqlite_schema_v2.py``).
 """
 from __future__ import annotations
 
@@ -15,9 +19,13 @@ from types import SimpleNamespace
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import delete, select
+from sqlalchemy import create_engine, event, select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import NullPool
 
-from app.database import IS_SQLITE, AsyncSessionLocal, Base, engine, sync_session
+from app import database
+from app.database import Base, sync_session
 from app.models.index_outbox import IndexGeneration, IndexOutbox
 from app.models.memory import Memory
 from app.models.user import User
@@ -25,19 +33,38 @@ from app.retrieval.embedder import EmbeddingDimensionMismatch
 from app.retrieval.memory import outbox
 from app.retrieval.memory.vector_store import COLLECTION_NAME
 
-pytestmark = pytest.mark.skipif(not IS_SQLITE, reason="outbox tests need a sqlite DATABASE_URL")
+OUTBOX_DB = "outbox.sqlite"
+
+
+def _sync_engine(url: str):
+    """Sync twin of the temp engine (Celery/CLI face), same file + pragmas."""
+    eng = create_engine(url.replace("+aiosqlite", ""), connect_args={"check_same_thread": False})
+    event.listen(eng, "connect", database._configure_sqlite_connection)
+    return eng
 
 
 @pytest_asyncio.fixture
-async def db():
-    """Real tables on the file DB, emptied before every test (re-runnable)."""
-    async with engine.begin() as conn:
+async def db(tmp_path, monkeypatch):
+    """A private per-test SQLite file — nothing here can reach an ambient DB."""
+    url = f"sqlite+aiosqlite:///{tmp_path / OUTBOX_DB}"
+    eng = create_async_engine(url, poolclass=NullPool)
+    event.listen(eng.sync_engine, "connect", database._configure_sqlite_connection)
+    sessions = async_sessionmaker(eng, class_=AsyncSession, expire_on_commit=False, autoflush=False)
+    sync_eng = _sync_engine(url)
+    monkeypatch.setattr(database, "engine", eng)
+    monkeypatch.setattr(database, "IS_SQLITE", True)
+    monkeypatch.setattr(database, "AsyncSessionLocal", sessions)
+    monkeypatch.setattr(outbox, "AsyncSessionLocal", sessions)  # the drain's own sessionmaker
+    monkeypatch.setattr(
+        database, "_get_sync_sessionmaker",
+        lambda: sessionmaker(bind=sync_eng, expire_on_commit=False, autoflush=False),
+    )
+    async with eng.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-    async with AsyncSessionLocal() as session:
-        for table in (IndexOutbox, IndexGeneration, Memory, User):
-            await session.execute(delete(table))
-        await session.commit()
+    async with sessions() as session:
         yield session
+    await eng.dispose()
+    sync_eng.dispose()
 
 
 @pytest_asyncio.fixture
@@ -56,13 +83,25 @@ def _memory(owner: uuid.UUID, content: str = "x") -> Memory:
 
 async def _outbox_rows() -> list[IndexOutbox]:
     """Read the outbox through a fresh session (immune to snapshot staleness)."""
-    async with AsyncSessionLocal() as session:
+    async with database.AsyncSessionLocal() as session:
         return list((await session.execute(select(IndexOutbox).order_by(IndexOutbox.seq))).scalars().all())
 
 
 async def _memory_row(memory_id: uuid.UUID) -> Memory | None:
-    async with AsyncSessionLocal() as session:
+    async with database.AsyncSessionLocal() as session:
         return await session.get(Memory, memory_id)
+
+
+# ── isolation: the module can only ever touch its own temp file ─────────────
+
+
+async def test_module_engine_points_at_a_private_temp_file(db, tmp_path):
+    assert database.engine.url.database == str(tmp_path / OUTBOX_DB)
+    # The drain's sessionmaker is the patched one, bound to that same engine.
+    assert outbox.AsyncSessionLocal is database.AsyncSessionLocal
+    assert outbox.AsyncSessionLocal.kw["bind"] is database.engine
+    async with outbox.AsyncSessionLocal() as session:
+        assert session.get_bind() is database.engine.sync_engine
 
 
 # ── enqueue: same transaction, idempotent key ───────────────────────────────
@@ -77,6 +116,21 @@ async def test_enqueue_rolls_back_with_the_row(db, owner):
 
     assert await _outbox_rows() == []
     assert await _memory_row(memory.id) is None
+
+
+async def test_enqueue_without_a_bumped_revision_fails_loudly(db, owner):
+    """A guessed revision is a silently lost index write — never guess."""
+    memory = _memory(owner)  # unsaved: the revision column default lands at flush
+    db.add(memory)
+    with pytest.raises(ValueError, match=str(memory.id)) as excinfo:
+        await outbox.enqueue_upsert(db, memory)
+    assert "bump_revision" in str(excinfo.value)
+
+
+def test_sync_enqueue_without_a_bumped_revision_fails_loudly(db, owner):
+    memory = _memory(owner)
+    with sync_session() as sync_db, pytest.raises(ValueError, match=str(memory.id)):
+        outbox.enqueue_upsert_sync(sync_db, memory)
 
 
 async def test_upsert_intent_is_idempotent_per_revision(db, owner):
@@ -130,7 +184,7 @@ async def test_target_generation_reads_the_active_generation_row(db, owner):
     await db.commit()
     # A new session (a new request) must see the swapped manifest: the read is
     # memoized per session only.
-    async with AsyncSessionLocal() as fresh:
+    async with database.AsyncSessionLocal() as fresh:
         await outbox.enqueue_upsert(fresh, other)
         await fresh.commit()
 
@@ -276,7 +330,7 @@ async def test_drain_retries_transient_failure_with_backoff(db, owner, monkeypat
         applied.append(str(memory_row.id))
 
     monkeypatch.setattr(outbox, "upsert_memory", ok)
-    async with AsyncSessionLocal() as session:
+    async with database.AsyncSessionLocal() as session:
         due = await session.get(IndexOutbox, row.seq)
         due.next_attempt_at = datetime.now(UTC) - timedelta(seconds=1)
         await session.commit()
@@ -418,6 +472,57 @@ async def test_update_memory_bumps_revision_and_enqueues(db, owner, monkeypatch)
     assert [(row.revision, row.operation) for row in intents] == [(1, "upsert"), (2, "upsert")]
 
 
+async def test_noop_patch_never_claims_a_pending_intent(db, owner, monkeypatch):
+    """A no-op PATCH enqueues nothing: a failed write-through is not 'pending'."""
+    from app.api.v1 import memories as memories_api
+    from app.schemas.Orivory import MemoryUpdate
+
+    async def upsert_down(_memory):
+        return False
+
+    monkeypatch.setattr(memories_api, "safe_upsert_to_chroma", upsert_down)
+
+    memory = _memory(owner, content="v1")
+    db.add(memory)
+    outbox.bump_revision(memory)
+    await outbox.enqueue_upsert(db, memory)
+    await db.commit()
+
+    response = await memories_api.update_memory(
+        memory.id, MemoryUpdate(), SimpleNamespace(id=owner), db
+    )
+
+    assert response.indexing is None, "no intent exists; 'pending' would be a lie"
+    assert response.revision == 1  # the body changed nothing, no bump
+    assert len(await _outbox_rows()) == 1  # only the fixture's own intent
+
+    async def upsert_ok(_memory):
+        return True
+
+    monkeypatch.setattr(memories_api, "safe_upsert_to_chroma", upsert_ok)
+    again = await memories_api.update_memory(
+        memory.id, MemoryUpdate(), SimpleNamespace(id=owner), db
+    )
+    assert again.indexing == "ready" and again.revision == 1  # write-through landed
+
+
+async def test_get_memory_does_not_claim_an_index_state(db, owner):
+    """A read reports no `indexing`: the only intent is still pending."""
+    from app.api.v1 import memories as memories_api
+
+    memory = _memory(owner, content="v1")
+    db.add(memory)
+    outbox.bump_revision(memory)
+    await outbox.enqueue_upsert(db, memory)
+    await db.commit()
+
+    fetched = await memories_api.get_memory(memory.id, SimpleNamespace(id=owner), db)
+
+    assert fetched.indexing is None
+    assert fetched.revision == 1
+    assert (await _outbox_rows())[0].status == "pending"  # not indexed, and we do not claim it
+
+
 CHATGPT_PAYLOAD = [
     {
         "id": "c1",
@@ -457,7 +562,7 @@ async def test_import_enqueues_every_created_row(db, owner, monkeypatch):
     )
 
     assert summary.created == 2
-    async with AsyncSessionLocal() as session:
+    async with database.AsyncSessionLocal() as session:
         memories = (await session.execute(select(Memory))).scalars().all()
     assert {row.revision for row in memories} == {1}
     assert len(indexed) == 2
