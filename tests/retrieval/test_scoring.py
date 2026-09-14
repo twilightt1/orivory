@@ -10,6 +10,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 from app.database import Base
+from app.retrieval.embedder import EmbeddingDimensionMismatch
 from app.retrieval.memory import retriever as retriever_module
 from app.retrieval.memory.retriever import MemoryRetriever
 from app.retrieval.memory.scoring import time_decay_score
@@ -69,6 +70,10 @@ async def _failed_embedding(*_args, **_kwargs):
     raise RuntimeError("embedding unavailable")
 
 
+async def _mismatched_embedding(*_args, **_kwargs):
+    raise EmbeddingDimensionMismatch("collection contract is 384-dim, query is 1536-dim")
+
+
 async def _empty_search(*_args, **_kwargs):
     return []
 
@@ -122,3 +127,20 @@ async def test_embed_failure_returns_empty_response_with_trace_timings(monkeypat
     assert response.trace.stage_ms["embed_compute"] > 0
     assert response.trace.stage_ms["embed_ms"] > 0
     assert response.trace.rewrite_skipped is False
+
+
+@pytest.mark.asyncio
+async def test_embed_mismatch_propagates_instead_of_empty_response(monkeypatch, tmp_path):
+    """A contract mismatch is a readiness failure — never flattened to empty."""
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 't7_scoring.db'}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    async with AsyncSession(engine) as db:
+        monkeypatch.setattr(retriever_module, "fetch_personal_context", _empty_context)
+        monkeypatch.setattr(retriever_module, "rewrite_query", _identity_rewrite)
+        monkeypatch.setattr(retriever_module, "embed_query", _mismatched_embedding)
+        with pytest.raises(EmbeddingDimensionMismatch):
+            await MemoryRetriever(db, uuid.uuid4()).recall(
+                "trace probe", top_k=5, include_personal_context=True
+            )
+    await engine.dispose()

@@ -355,9 +355,10 @@ async def recall_memory(
         4. Hydrate + apply entity boost + time decay.
         5. Return top_k with trace (rewritten query, entities, latency).
 
-    Every step degrades gracefully: an empty ``results`` list plus a
-    ``trace`` describing what was attempted is returned even if LLM,
-    ChromaDB, or the DB read is partially down.
+    Every step degrades gracefully (empty ``results`` plus a ``trace``),
+    with two exceptions: an embedding contract mismatch or an unreachable
+    vector store answer 503 with a typed body (``embedding_contract_mismatch``
+    / ``vector_unavailable``) — never a silent empty recall.
     """
     retriever = MemoryRetriever(
         db=db,

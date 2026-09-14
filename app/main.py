@@ -1,7 +1,7 @@
 from contextlib import asynccontextmanager
 
 import structlog
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette import status
@@ -9,6 +9,8 @@ from starlette import status
 from app.api.v1.router import api_router
 from app.config import settings
 from app.middleware.logging_middleware import LoggingMiddleware
+from app.retrieval.embedder import EmbeddingDimensionMismatch
+from app.retrieval.vector_retriever import VectorUnavailableError
 
 log = structlog.get_logger()
 
@@ -90,6 +92,31 @@ app.add_middleware(
 )
 
 app.include_router(api_router)
+
+
+# Typed readiness errors: an embedding contract mismatch or an unreachable
+# vector store must answer 503 with a machine-readable body — never an
+# unhandled 500 and never a silent empty 200 (see MemoryRetriever.recall).
+@app.exception_handler(EmbeddingDimensionMismatch)
+async def _embedding_contract_mismatch_handler(
+    _request: Request, exc: EmbeddingDimensionMismatch
+) -> JSONResponse:
+    log.error("Embedding contract mismatch", error=str(exc))
+    return JSONResponse(
+        {"error": "embedding_contract_mismatch"},
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+    )
+
+
+@app.exception_handler(VectorUnavailableError)
+async def _vector_unavailable_handler(
+    _request: Request, exc: VectorUnavailableError
+) -> JSONResponse:
+    log.warning("Vector store unavailable", error=str(exc))
+    return JSONResponse(
+        {"error": "vector_unavailable"},
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+    )
 
 if settings.MCP_HUB_ENABLED:
     from starlette.routing import Route

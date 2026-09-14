@@ -34,6 +34,7 @@ from app.retrieval.embedding_fingerprint import (
     current_fingerprint,
     fingerprint_generation,
 )
+from app.retrieval.vector_retriever import VectorUnavailableError
 
 # Lazily imported so this module is importable in test/CLI contexts
 # that don't have ChromaDB running.
@@ -489,13 +490,19 @@ async def search_memories(
 
     Returns a list of dicts:
         {memory_id, content, score, metadata, rank, source="vector"}
+
+    Raises :class:`VectorUnavailableError` when the collection cannot be
+    acquired (a vector outage is a readiness signal, never an empty list)
+    and :class:`EmbeddingDimensionMismatch` on a contract mismatch.
     """
     user_filter = _build_user_filter(user_id, where)
     try:
         collection = await _get_collection()
     except Exception as e:
+        # An outage is a typed readiness signal, never an empty result: a
+        # silent [] here is a false "no memories matched".
         log.warning("Chroma unavailable for search", extra={"error": str(e)})
-        return []
+        raise VectorUnavailableError(f"ChromaDB unreachable for memory search: {e}") from e
 
     count = await collection.count()
     # Fail loud on backend/dim switches; never stamp here (read path). The

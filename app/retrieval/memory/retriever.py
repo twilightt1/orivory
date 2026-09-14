@@ -13,9 +13,12 @@ Pipeline (one call to :py:meth:`MemoryRetriever.recall`):
     7. Sort by combined score, return top_k.
     8. Build the ``RecallTrace`` with timings + fallbacks used.
 
-Every step degrades gracefully. The worst case (LLM down + ChromaDB
-down + no context) still returns a 200 with an empty ``results`` list
-and a trace indicating what was attempted.
+Every step degrades gracefully, EXCEPT two typed signals that must never be
+served as an empty result: an embedding contract mismatch and an unreachable
+vector store. Those propagate to the API as a 503 readiness error (see
+``app.main`` handlers). Everything else (LLM down, DB read errors) still
+returns a 200 with an empty ``results`` list and a trace indicating what was
+attempted.
 """
 from __future__ import annotations
 
@@ -38,6 +41,7 @@ from app.retrieval.memory.correction import state_of as _state_of
 from app.retrieval.memory.query_rewriter import rewrite_query
 from app.retrieval.memory.scoring import entity_boost, time_decay_score
 from app.retrieval.memory.vector_store import search_memories
+from app.retrieval.vector_retriever import VectorUnavailableError
 from app.schemas.Orivory import (
     RECALL_TRACE_STAGE_KEYS,
     MemoryResponse,
@@ -138,6 +142,10 @@ class MemoryRetriever:
         embed_error: Exception | None = None
         try:
             embedding = await embed_query(rewritten if not llm_fallback else query)
+        except EmbeddingDimensionMismatch:
+            # A contract mismatch is a readiness failure, not a degraded
+            # embed: it must reach the caller as a typed error.
+            raise
         except Exception as e:
             embed_error = e
             log.error("embed_query failed", extra={"error": str(e)})
@@ -163,9 +171,9 @@ class MemoryRetriever:
                 user_id=str(self.user_id),
                 top_k=top_k * self.rerank_factor,
             )
-        except EmbeddingDimensionMismatch:
-            # A contract mismatch is a readiness/data-integrity failure, not
-            # an ordinary no-match result.
+        except (EmbeddingDimensionMismatch, VectorUnavailableError):
+            # A contract mismatch or a vector outage is a readiness/data
+            # integrity failure, not an ordinary no-match result.
             raise
         except Exception as e:
             log.error("search_memories failed", extra={"error": str(e)})
