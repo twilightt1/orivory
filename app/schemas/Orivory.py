@@ -71,6 +71,12 @@ class MemoryResponse(BaseModel):
     captured_at: datetime
     indexed_at:  datetime
     updated_at:  datetime
+    # Monotonic per-entity write counter (spec §4.1): bumped with every
+    # content/metadata write that is enqueued to the index outbox.
+    revision:    int
+    # "pending" = the write's durable index intent is still queued (the
+    # immediate best-effort embed did not land); read paths report "ready".
+    indexing:    Literal["ready", "pending"] = "ready"
     metadata:    dict
 
     model_config = ConfigDict(from_attributes=True)

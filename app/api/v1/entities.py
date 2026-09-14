@@ -100,6 +100,7 @@ def _memory_response(memory: Memory) -> MemoryResponse:
         captured_at=memory.captured_at,
         indexed_at=memory.indexed_at,
         updated_at=memory.updated_at,
+        revision=memory.revision or 1,  # unsaved/detached rows carry the column default
         metadata=memory.extra_metadata or {},
     )
 

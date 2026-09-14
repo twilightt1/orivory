@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.models.memory import Memory
 from app.models.user import User
+from app.retrieval.memory.outbox import bump_revision, enqueue_upsert
 from app.retrieval.memory.retriever import MemoryRetriever
 from app.retrieval.memory.write_back import (
     index_new_memory,
@@ -49,7 +50,7 @@ log = logging.getLogger(__name__)
 router = APIRouter(prefix="/memories", tags=["memories"])
 
 
-def _memory_response(memory: Memory) -> MemoryResponse:
+def _memory_response(memory: Memory, *, indexing: Literal["ready", "pending"] = "ready") -> MemoryResponse:
     """Map ORM Memory.extra_metadata to API field `metadata`."""
     return MemoryResponse(
         id=memory.id,
@@ -69,6 +70,8 @@ def _memory_response(memory: Memory) -> MemoryResponse:
         captured_at=memory.captured_at,
         indexed_at=memory.indexed_at,
         updated_at=memory.updated_at,
+        revision=memory.revision or 1,  # unsaved/detached rows carry the column default
+        indexing=indexing,
         metadata=memory.extra_metadata or {},
     )
 
@@ -112,11 +115,16 @@ async def create_memory(
         extra_metadata=body.metadata,
     )
     db.add(memory)
+    # Durable index intent in the SAME commit as the row: if the process dies
+    # before the vector write, the drain replays it. The write-through below
+    # stays the fast path; the intent is the backstop.
+    bump_revision(memory)
+    await enqueue_upsert(db, memory)
     await db.commit()
     await db.refresh(memory)
     # Post-persist indexing (embed + graph) — best-effort, Postgres is truth.
-    await index_new_memory(memory)
-    return _memory_response(memory)
+    indexed = await index_new_memory(memory)
+    return _memory_response(memory, indexing="ready" if indexed else "pending")
 
 
 @router.get("", response_model=MemoryListResponse)
@@ -271,11 +279,14 @@ async def update_memory(
     for field, value in data.items():
         setattr(memory, field, value)
 
+    if data:
+        bump_revision(memory)
+        await enqueue_upsert(db, memory)
     await db.commit()
     await db.refresh(memory)
     # Write-through to ChromaDB (best-effort)
-    await safe_upsert_to_chroma(memory)
-    return _memory_response(memory)
+    indexed = await safe_upsert_to_chroma(memory)
+    return _memory_response(memory, indexing="ready" if indexed else "pending")
 
 
 @router.delete("/{memory_id}", status_code=status.HTTP_204_NO_CONTENT)

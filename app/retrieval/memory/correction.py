@@ -9,6 +9,7 @@ from uuid import uuid4
 from sqlalchemy import select
 
 from app.models.memory import Memory
+from app.retrieval.memory.outbox import bump_revision, enqueue_upsert
 
 CM_ASSERTION = "cm_assertion"
 CM_SUBJECT = "cm_subject"
@@ -195,6 +196,11 @@ async def resolve_correction(db, *, user_id, title, content, tags=None,
                  source_ref=source_ref, captured_at=now, extra_metadata=meta,
                  summary=summary)
     db.add(new)
+    # The new fact is the only row whose vector payload changes (superseded /
+    # dirtied rows only carry cm_* metadata, which never reaches the vector):
+    # enqueue its durable intent in this same commit.
+    bump_revision(new)
+    await enqueue_upsert(db, new)
     superseded, dirtied = [], []
     if status == "superseded":
         for m in exact:

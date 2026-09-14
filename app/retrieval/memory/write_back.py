@@ -84,16 +84,21 @@ def safe_enqueue_graph_build(memory_id: UUID | str) -> None:
         )
 
 
-async def index_new_memory(memory: Memory) -> None:
+async def index_new_memory(memory: Memory) -> bool:
     """Run the full post-persist indexing pipeline for one memory.
 
     Caller must have already committed the row. Embeds synchronously (best
     effort for transient outages) and enqueues graph extraction. Contract
     mismatches propagate as typed integrity failures. Use this from any async
     path that creates or updates a ``Memory``.
+
+    Returns whether the vector write landed: ``False`` means the durable
+    outbox intent enqueued with the row is now the only path to the index
+    (``drain_pending``), which is what ``indexing="pending"`` reports.
     """
-    await safe_upsert_to_chroma(memory)
+    indexed = await safe_upsert_to_chroma(memory)
     safe_enqueue_graph_build(memory.id)
+    return indexed
 
 
 __all__ = [

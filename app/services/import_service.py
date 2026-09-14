@@ -30,6 +30,7 @@ from app.ingestion.import_formats import (
 )
 from app.models.memory import Memory
 from app.retrieval.embedder import EmbeddingDimensionMismatch
+from app.retrieval.memory.outbox import bump_revision, enqueue_upsert
 from app.retrieval.memory.write_back import index_new_memory
 from app.schemas.Orivory import ImportSummary
 
@@ -111,6 +112,10 @@ async def run_import(
                 captured_at=item.captured_at,
                 extra_metadata={**item.metadata, "import": {"requested_by": requested_by}},
             )
+            # Stamp the first indexed revision at construction: a later flush
+            # would materialize the column default first and turn the same
+            # bump into revision 2.
+            bump_revision(memory)
             db.add(memory)
             created_rows.append(memory)
             if item.source_ref:
@@ -123,6 +128,10 @@ async def run_import(
             )
 
     if created_rows:
+        # Durable index intents for the whole batch, in the same commit as the
+        # rows themselves — a crash before indexing replays from the outbox.
+        for memory in created_rows:
+            await enqueue_upsert(db, memory)
         await db.commit()
         # Server-side defaults (id, timestamps) must load before indexing.
         for memory in created_rows:
