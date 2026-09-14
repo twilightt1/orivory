@@ -112,7 +112,7 @@ async def delete_document(db: AsyncSession, document: Document, conversation: Co
 
     # Unify (P1.1): also remove the cross-conversation memories derived from
     # this document, and their vectors. Best-effort on the vector side.
-    memory_ids = await delete_document_memories_async(db, document_id)
+    memory_ids = await delete_document_memories_async(db, document_id, user_id=conversation.user_id)
 
     await db.delete(document)
     conversation.document_count = max(0, conversation.document_count - 1)

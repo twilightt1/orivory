@@ -214,20 +214,34 @@ def _ingest(db, document_id: str) -> None:
 def _project_document_to_memories(db, document_id: str, parents) -> None:
     """Create + embed cross-conversation memories for an ingested document.
 
-    Commits the new Memory rows, then embeds them into the shared memory
-    collection. Embedding is best-effort (replayable via reindex); the rows
-    are the durable source of truth.
+    Commits the new Memory rows — with their durable index intents — then
+    embeds them into the shared memory collection. Embedding is best-effort
+    (replayable via reindex); the rows are the durable source of truth.
     """
     from sqlalchemy import select
 
     from app.ingestion.document_memory import build_document_memories_sync
+    from app.models.conversation import Conversation
+    from app.models.document import Document
     from app.models.memory import Memory
     from app.retrieval.memory.vector_store import (
         delete_memories_sync,
         upsert_memories_sync,
     )
 
-    result = build_document_memories_sync(db, document_id, parents)
+    # The owner is the conversation's owner (never a caller-supplied id): the
+    # projection queries below must not read or embed another user's rows.
+    doc = db.get(Document, document_id)
+    conversation = db.get(Conversation, doc.conversation_id) if doc is not None else None
+    if conversation is None:
+        log.warning(
+            "Doc→memory projection skipped: document or conversation not found",
+            extra={"doc_id": document_id},
+        )
+        return
+    user_id = conversation.user_id
+
+    result = build_document_memories_sync(db, document_id, parents, user_id=user_id)
     db.commit()
 
     # Purge vectors from a prior projection whose Postgres rows were just
@@ -239,7 +253,12 @@ def _project_document_to_memories(db, document_id: str, parents) -> None:
         return
 
     rows = (
-        db.execute(select(Memory).where(Memory.source_ref == document_id))
+        db.execute(
+            select(Memory).where(
+                Memory.source_ref == document_id,
+                Memory.user_id == user_id,
+            )
+        )
         .scalars()
         .all()
     )

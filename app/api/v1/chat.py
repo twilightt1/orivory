@@ -355,7 +355,9 @@ async def delete_conversation(
     ).scalars().all()
     removed_memory_ids: list[str] = []
     for doc_id in doc_ids:
-        removed_memory_ids.extend(await delete_document_memories_async(db, str(doc_id)))
+        removed_memory_ids.extend(
+            await delete_document_memories_async(db, str(doc_id), user_id=conversation.user_id)
+        )
 
     await db.delete(conversation)
     await db.commit()
