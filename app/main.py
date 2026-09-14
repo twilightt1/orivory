@@ -50,17 +50,25 @@ def _requested_processes() -> int:
     """How many app processes the launcher asked for (1 = a single owner).
 
     ``uvicorn --reload``/``--workers N`` re-launch the app in each process with
-    the same argv; ``WEB_CONCURRENCY`` is uvicorn's/Gunicorn's worker count and
-    ``UVICORN_RELOAD`` is uvicorn's env fallback for the ``--reload`` flag.
+    the same argv; ``WEB_CONCURRENCY`` and ``UVICORN_WORKERS`` are uvicorn's /
+    Gunicorn's worker counts — uvicorn reads ``--workers`` from
+    ``UVICORN_WORKERS`` through its ``UVICORN_`` envvar prefix, so the env var
+    alone is a multi-process launcher. ``UVICORN_RELOAD`` is uvicorn's env
+    fallback for the ``--reload`` flag.
     """
     if os.environ.get("UVICORN_RELOAD", "").strip() or "--reload" in sys.argv:
         return 2  # a reloader: a supervisor plus the app it restarts
-    workers = os.environ.get("WEB_CONCURRENCY", "").strip()
-    if workers.isdigit() and int(workers) > 1:
-        return int(workers)
-    if "--workers" in sys.argv:
-        index = sys.argv.index("--workers")
-        value = sys.argv[index + 1] if index + 1 < len(sys.argv) else ""
+    for source in ("WEB_CONCURRENCY", "UVICORN_WORKERS"):
+        workers = os.environ.get(source, "").strip()
+        if workers.isdigit() and int(workers) > 1:
+            return int(workers)
+    for index, token in enumerate(sys.argv):
+        if token.startswith("--workers="):
+            value = token.split("=", 1)[1]  # the single-token spelling
+        elif token == "--workers":
+            value = sys.argv[index + 1] if index + 1 < len(sys.argv) else ""
+        else:
+            continue
         if value.isdigit() and int(value) > 1:
             return int(value)
     return 1

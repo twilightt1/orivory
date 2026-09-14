@@ -2,16 +2,18 @@
 
 DB-free and service-free by construction: local mode runs against a private
 ``tmp_path`` folder (closed in teardown, so its exclusive lock never leaks into
-another test) and no test opens a socket. The single-owner rule is a real
-property of qdrant-client 1.19 local mode — ``QdrantClient(path=...)`` locks the
-folder and the second opener raises ``RuntimeError: ... already accessed`` —
-pinned here against the library, not mocked.
+another test), and no test dials a socket: the one server-mode test builds its
+remote clients with the version handshake disabled. The single-owner rule is a
+real property of qdrant-client 1.19 local mode — ``QdrantClient(path=...)``
+locks the folder and the second opener raises ``RuntimeError: ... already
+accessed`` — pinned here against the library, not mocked.
 """
 from __future__ import annotations
 
 import sys
 import threading
 import uuid
+from typing import Any
 
 import pytest
 import pytest_asyncio
@@ -36,19 +38,21 @@ async def local(tmp_path, monkeypatch):
     await vector_backend.close_clients()
 
 
-async def test_local_client_is_single_owner(local, monkeypatch):
+async def test_local_client_is_single_owner(local):
     sync_client = vector_backend.get_sync_client()
     async_client = vector_backend.get_async_client()
 
-    assert isinstance(sync_client, QdrantClient)
+    assert isinstance(sync_client, vector_backend._LocalSyncProxy)
     assert isinstance(async_client, vector_backend._SyncAsAsync)
-    # The async face drives the ONE sync client — a second QdrantClient on the
+    # Both faces drive the ONE embedded client — a second QdrantClient on the
     # same folder is what already-accesses the lock.
-    assert async_client._inner is sync_client
+    assert async_client._inner is sync_client._inner
     assert vector_backend.get_async_client() is async_client  # cached handle
     assert vector_backend.get_sync_client() is sync_client
 
-    # Every async call is submitted to the dedicated local executor.
+    # Every local call is submitted to the dedicated local executor. Swapped by
+    # hand (not monkeypatch): the fixture teardown closes the executor, and a
+    # deferred restore would put a shut-down one back in the module.
     threads: list[str] = []
     real_executor = vector_backend._LOCAL_EXECUTOR
 
@@ -63,17 +67,19 @@ async def test_local_client_is_single_owner(local, monkeypatch):
         def shutdown(self, /, *args, **kwargs):
             return real_executor.shutdown(*args, **kwargs)
 
-    monkeypatch.setattr(vector_backend, "_LOCAL_EXECUTOR", _RecordingExecutor())
-
-    vector_backend.ensure_collection("memory", COLLECTION, dim=384)
-    vector = [0.25] * 384
-    point_id = str(uuid.uuid4())
-    await async_client.upsert(
-        collection_name=COLLECTION, points=[PointStruct(id=point_id, vector=vector)]
-    )
-    hits = (
-        await async_client.query_points(collection_name=COLLECTION, query=vector, limit=1)
-    ).points
+    vector_backend._LOCAL_EXECUTOR = _RecordingExecutor()
+    try:
+        vector_backend.ensure_collection("memory", COLLECTION, dim=384)
+        vector = [0.25] * 384
+        point_id = str(uuid.uuid4())
+        await async_client.upsert(
+            collection_name=COLLECTION, points=[PointStruct(id=point_id, vector=vector)]
+        )
+        hits = (
+            await async_client.query_points(collection_name=COLLECTION, query=vector, limit=1)
+        ).points
+    finally:
+        vector_backend._LOCAL_EXECUTOR = real_executor
 
     assert [hit.id for hit in hits] == [point_id]
     # Cosine SIMILARITY (1.0 for an identical vector), never 1 - distance.
@@ -81,6 +87,42 @@ async def test_local_client_is_single_owner(local, monkeypatch):
     assert (await async_client.count(COLLECTION)).count == 1
     assert threads, "no local call went through the executor"
     assert all(name.startswith("qdrant-local") for name in threads)
+
+
+async def test_local_client_is_opened_on_and_driven_from_owner_thread(local, monkeypatch):
+    """Spec §3.1, literally: the ONE local client is CONSTRUCTED on the
+    ``qdrant-local`` executor thread, and a call made from this (main) thread
+    runs there too — sync face and async face alike.
+    """
+    opened: list[str] = []
+    called: list[str] = []
+
+    class _RecordingClient(QdrantClient):  # a REAL client that leaves thread evidence
+        def __init__(self, *args, **kwargs):
+            opened.append(threading.current_thread().name)
+            super().__init__(*args, **kwargs)
+
+        def collection_exists(self, collection_name: str, **kwargs: Any) -> bool:
+            called.append(threading.current_thread().name)
+            return super().collection_exists(collection_name, **kwargs)
+
+    monkeypatch.setattr(vector_backend, "QdrantClient", _RecordingClient)
+    caller_thread = threading.current_thread().name
+
+    sync_client = vector_backend.get_sync_client()  # triggers the lazy open
+    assert vector_backend.is_local_mode()
+    assert opened, "the local client was never constructed"
+    assert opened[0].startswith("qdrant-local")
+    assert opened[0] != caller_thread
+
+    # Real calls from this thread, through both faces, land on the owner thread.
+    assert sync_client.collection_exists(COLLECTION) is False
+    vector_backend.ensure_collection("memory", COLLECTION, dim=384)
+    assert sync_client.collection_exists(COLLECTION) is True
+    await vector_backend.get_async_client().count(COLLECTION)
+
+    assert called and all(name.startswith("qdrant-local") for name in called)
+    assert set(called) == set(opened)  # the thread that opened it is the one running it
 
 
 async def test_second_owner_is_blocked(local):
@@ -92,6 +134,7 @@ async def test_second_owner_is_blocked(local):
 
 async def test_multiworker_local_refuses_boot(local, monkeypatch):
     monkeypatch.delenv("WEB_CONCURRENCY", raising=False)
+    monkeypatch.delenv("UVICORN_WORKERS", raising=False)
     monkeypatch.delenv("UVICORN_RELOAD", raising=False)
     monkeypatch.setattr(sys, "argv", ["app.main:app"])
     main._refuse_multi_owner_local_qdrant()  # exactly one process: fine
@@ -109,7 +152,25 @@ async def test_multiworker_local_refuses_boot(local, monkeypatch):
     with pytest.raises(RuntimeError, match="QDRANT_MODE=local"):
         main._refuse_multi_owner_local_qdrant()
 
+    # uvicorn also takes the single-token spelling and the UVICORN_ envvar.
+    monkeypatch.setattr(sys, "argv", ["app.main:app", "--workers=4"])
+    with pytest.raises(RuntimeError, match="QDRANT_MODE=local"):
+        main._refuse_multi_owner_local_qdrant()
+
+    monkeypatch.setattr(sys, "argv", ["app.main:app"])
+    monkeypatch.setenv("UVICORN_WORKERS", "4")
+    with pytest.raises(RuntimeError, match="QDRANT_MODE=local"):
+        main._refuse_multi_owner_local_qdrant()
+
+    # One worker, spelled any way, is still one owner.
+    monkeypatch.setenv("UVICORN_WORKERS", "1")
+    main._refuse_multi_owner_local_qdrant()
+    monkeypatch.delenv("UVICORN_WORKERS")
+    monkeypatch.setattr(sys, "argv", ["app.main:app", "--workers=1"])
+    main._refuse_multi_owner_local_qdrant()
+
     # The guard is the first thing the lifespan does: the app refuses to serve.
+    monkeypatch.setattr(sys, "argv", ["app.main:app"])
     monkeypatch.setenv("WEB_CONCURRENCY", "4")
     with pytest.raises(RuntimeError, match="QDRANT_MODE=local"):
         async with main.lifespan(main.app):
@@ -126,6 +187,16 @@ def test_server_mode_allows_workers(monkeypatch):
 
 async def test_server_mode_uses_async_and_sync_clients(monkeypatch):
     monkeypatch.setattr(settings, "QDRANT_MODE", "server")
+    # Nothing listens on localhost:6333 in this test and these are REAL clients:
+    # skip the version handshake both constructors would otherwise dial for.
+    monkeypatch.setattr(
+        vector_backend, "QdrantClient", lambda **kw: QdrantClient(**kw, check_compatibility=False)
+    )
+    monkeypatch.setattr(
+        vector_backend,
+        "AsyncQdrantClient",
+        lambda **kw: AsyncQdrantClient(**kw, check_compatibility=False),
+    )
 
     async_client = vector_backend.get_async_client()
     sync_client = vector_backend.get_sync_client()
@@ -150,6 +221,7 @@ async def test_close_clients_releases_lock(local):
 def test_mode_flip_in_lite(monkeypatch):
     monkeypatch.delenv("QDRANT_MODE", raising=False)
     monkeypatch.delenv("QDRANT_API_KEY", raising=False)
+    monkeypatch.delenv("QDRANT_URL", raising=False)  # a dev shell's URL must not decide this
 
     # lite + no API key + a localhost URL -> embedded local Qdrant (the same
     # flip rule CHROMA_MODE has had); anything that can reach a server stays
