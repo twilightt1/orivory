@@ -113,3 +113,19 @@ If Redis is lost:
 7. Start API and Celery.
 8. Check `/ready`.
 9. Run offline or live API eval smoke.
+
+## P1b cutover backups (SQLite / lite)
+
+The Qdrant cutover has its own offline tooling — see
+[ROLLBACK_P1B.md](ROLLBACK_P1B.md):
+
+- take the backup with `python scripts/migrate_qdrant.py backup --dir /backups/p1b`
+  (VACUUM INTO snapshot + checksum manifest + uploads/chroma copies);
+- prove it restores with
+  `python scripts/migrate_qdrant.py verify --restore-drill --dir /backups/p1b`
+  — it restores into a NEW directory and refuses to report ready unless the
+  checksums, `integrity_check`, `foreign_key_check`, the recorded embedding
+  fingerprint and the deletion/suppression ledger all hold;
+- going back to the pre-P1b stack for one release is
+  `scripts/rollback_to_chroma.py` (isolated venv, `requirements-rollback.txt`).
+

@@ -703,6 +703,123 @@ def _backup_sources() -> dict[str, Path]:
     return sources
 
 
+# ── the backup's own records: contract stamp + deletion ledger ──────────────
+
+
+def _norm_id(value: object) -> str:
+    """Compare ids the way SQLite stores them: hex, no dashes, lowercase."""
+    return str(value or "").replace("-", "").strip().lower()
+
+
+def _json_list(value: object) -> list:
+    """A JSON column read straight from the driver comes back as text.
+
+    Iterating a str yields characters, so an unparsed ``requested_memory_ids``
+    would silently compare nothing and make the absence check pass — the one
+    direction a delete ledger must never fail in.
+    """
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            return []
+    return list(value) if isinstance(value, (list, tuple)) else []
+
+
+def _table_names(conn: sqlite3.Connection) -> set[str]:
+    return {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+
+
+def _active_contract_rows(conn: sqlite3.Connection) -> list[tuple[str, str]]:
+    """``[(kind, fingerprint)]`` for every ACTIVE generation row, or nothing."""
+    if "index_generations" not in _table_names(conn):
+        return []
+    return [
+        (str(kind), str(fingerprint or ""))
+        for kind, fingerprint in conn.execute(
+            "SELECT kind, fingerprint FROM index_generations WHERE is_active = 1"
+        )
+    ]
+
+
+def _active_tokens(conn: sqlite3.Connection) -> dict[str, str | None]:
+    """The token of the ACTIVE generation per kind — ``None`` when there is none.
+
+    Recorded at backup time and reproduced from the restore, so a restore that
+    silently changed (or lost) the pointer is a finding, not a guess.
+    """
+    tokens: dict[str, str | None] = {kind: None for kind in KINDS}
+    for kind, token in _active_contract_rows(conn):
+        if kind in tokens and token and tokens[kind] is None:
+            tokens[kind] = token
+    return tokens
+
+
+def _ledger_digest(db_path: str | Path) -> dict:
+    """Digest of the deletion/suppression ledger the backup carries.
+
+    The ledger — not the vectors — is what stops a restore from resurrecting
+    content the user deleted or forgot (§5.4/§12.3), so the drill compares this
+    record against the restored bytes and refuses on drift.
+    """
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        tables = _table_names(conn)
+        digest: dict[str, dict] = {}
+        if "memory_suppressions" in tables:
+            rows = sorted(
+                f"{_norm_id(user_id)}|{source_ref}|{reason}"
+                for user_id, source_ref, reason in conn.execute(
+                    "SELECT user_id, source_ref, reason FROM memory_suppressions"
+                )
+            )
+            digest["suppressions"] = {
+                "present": True, "count": len(rows),
+                "sha256": hashlib.sha256("\n".join(rows).encode()).hexdigest(),
+            }
+        else:
+            digest["suppressions"] = {"present": False, "count": 0,
+                                      "sha256": hashlib.sha256(b"").hexdigest()}
+        if "erasure_receipts" in tables:
+            rows = sorted(
+                f"{receipt_id}|{status}|"
+                f"{','.join(sorted(_norm_id(value) for value in _json_list(ids)))}"
+                for receipt_id, status, ids in conn.execute(
+                    "SELECT id, status, requested_memory_ids FROM erasure_receipts"
+                )
+            )
+            digest["erasure_receipts"] = {
+                "present": True, "count": len(rows),
+                "sha256": hashlib.sha256("\n".join(rows).encode()).hexdigest(),
+            }
+        else:
+            digest["erasure_receipts"] = {"present": False, "count": 0,
+                                          "sha256": hashlib.sha256(b"").hexdigest()}
+        return digest
+    finally:
+        conn.close()
+
+
+def _refresh_manifest(manifest_path: Path, snapshot: Path, recorded: dict) -> dict:
+    """Add the drill's records to a manifest that predates them, from the bytes.
+
+    Only derived records are ever added (they are recomputed from the verified
+    snapshot), and only when they are missing: an operator's existing manifest
+    is otherwise left exactly as it is.
+    """
+    conn = sqlite3.connect(f"file:{snapshot}?mode=ro", uri=True)
+    try:
+        recorded.setdefault("db", {})["fingerprint"] = _active_tokens(conn)
+    finally:
+        conn.close()
+    recorded.setdefault("deletion_ledger", _ledger_digest(snapshot))
+    recorded["refreshed_at"] = datetime.now(UTC).isoformat()
+    manifest_path.write_text(json.dumps(recorded, indent=2, default=str))
+    log.info("refreshed %s with the fingerprint and ledger records the drill reads",
+             manifest_path)
+    return recorded
+
+
 def backup(*, dest_dir: Path) -> dict:
     """VACUUM INTO snapshot + checksum manifest; resumable, never overwriting."""
     if not is_sqlite():
@@ -742,6 +859,11 @@ def backup(*, dest_dir: Path) -> dict:
                 raise MigrationRefused(
                     f"existing backup {snapshot} does not match its manifest — refusing to reuse it"
                 )
+            if "deletion_ledger" not in recorded or "fingerprint" not in recorded.get("db", {}):
+                # A manifest written before the restore drill learned to read
+                # these: the bytes are verified, so the records are recomputed
+                # from them instead of leaving the drill unable to pass.
+                recorded = _refresh_manifest(manifest_path, snapshot, recorded)
             log.info("reusing the verified backup at %s", snapshot)
             report["reused"] = True
             report["files"] = recorded.get("files", [])
@@ -768,6 +890,7 @@ def backup(*, dest_dir: Path) -> dict:
             user_version = snapshot_conn.execute("PRAGMA user_version").fetchone()[0]
             integrity = snapshot_conn.execute("PRAGMA integrity_check").fetchone()[0]
             memories = snapshot_conn.execute("SELECT count(*) FROM memories").fetchone()[0]
+            fingerprint = _active_tokens(snapshot_conn)
         finally:
             snapshot_conn.close()
         manifest = {
@@ -780,7 +903,14 @@ def backup(*, dest_dir: Path) -> dict:
                 "user_version": int(user_version),
                 "integrity_check": integrity,
                 "memories": int(memories),
+                # The contract the snapshot's ACTIVE generation served, per kind
+                # (``None`` = no active row). The restore drill reproduces this
+                # from the restored bytes and refuses on drift.
+                "fingerprint": fingerprint,
             },
+            # What the ledger held at backup time: a restore that cannot prove
+            # forgotten content stays forgotten is not a restore (R33).
+            "deletion_ledger": _ledger_digest(snapshot),
             "files": files,
             "missing": missing,
             "router_schema_version": database.SQLITE_SCHEMA_VERSION,
@@ -986,7 +1116,222 @@ def verify(*, kind: str) -> dict:
         return _verify(kind)
 
 
-# ── cutover (spec §6.2 step 8, ruling R27) ──────────────────────────────────
+# ── restore drill (spec §12, ruling R33) ────────────────────────────────────
+
+DRILL_ABSENCE_STATUS = "completed"
+
+
+def _check(findings: list[str]) -> dict:
+    return {"ok": not findings, "findings": findings}
+
+
+def _drill_checksum(manifest: dict, backup_dir: Path, target: Path, restored_db: Path) -> dict:
+    """Every byte the manifest recorded must be present and unchanged."""
+    findings: list[str] = []
+    recorded_db = manifest.get("db", {}).get("sha256")
+    if not recorded_db:
+        findings.append("the manifest records no database checksum")
+    elif not restored_db.is_file():
+        findings.append(f"the restored database {restored_db.name} is missing")
+    elif _sha256(restored_db) != recorded_db:
+        findings.append(f"the restored database {restored_db.name} does not match its manifest")
+    for entry in manifest.get("files", []):
+        source, dest = backup_dir / entry["path"], target / entry["path"]
+        if not source.is_file():
+            findings.append(f"{entry['path']} is recorded but missing from the backup")
+        elif not dest.is_file():
+            findings.append(f"{entry['path']} was not restored")
+        elif _sha256(dest) != entry.get("sha256"):
+            findings.append(f"{entry['path']} does not match its checksum")
+    return _check(findings)
+
+
+def _drill_integrity(path: Path) -> dict:
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        result = conn.execute("PRAGMA integrity_check").fetchone()[0]
+    finally:
+        conn.close()
+    return _check([] if result == "ok" else [f"PRAGMA integrity_check says {result!r}"])
+
+
+def _drill_foreign_keys(path: Path) -> dict:
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+    finally:
+        conn.close()
+    return _check([f"PRAGMA foreign_key_check: {row}" for row in violations[:5]])
+
+
+def _drill_fingerprint(manifest: dict, path: Path) -> dict:
+    """The contract stamp the backup recorded must survive the restore.
+
+    A restore that silently changed the ladder version or the active generation
+    pointer serves a different contract than the one the backup was taken
+    under — the drill refuses to call that ready.
+    """
+    findings: list[str] = []
+    recorded = manifest.get("db", {}).get("fingerprint")
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        user_version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+        contract = _active_contract_rows(conn)
+        live = _active_tokens(conn)
+    finally:
+        conn.close()
+    if not isinstance(recorded, dict):
+        findings.append("the manifest records no embedding fingerprint — re-run `backup`")
+    else:
+        for kind in KINDS:
+            if live.get(kind) != recorded.get(kind):
+                findings.append(
+                    f"{kind}: the restore's active contract {live.get(kind)!r} does not "
+                    f"match the recorded {recorded.get(kind)!r}"
+                )
+    for kind in KINDS:
+        active = [token for row_kind, token in contract if row_kind == kind]
+        if len(active) > 1:
+            findings.append(f"{kind}: {len(active)} active generation rows — exactly one owner")
+        if any(not token for token in active):
+            findings.append(f"{kind}: an active generation row carries no fingerprint")
+    recorded_version = manifest.get("db", {}).get("user_version")
+    if recorded_version is not None and int(recorded_version) != user_version:
+        findings.append(
+            f"the restored schema is user_version={user_version}, the backup recorded "
+            f"{recorded_version} — the restore is not the backup"
+        )
+    return _check(findings)
+
+
+def _drill_ledger(manifest: dict, path: Path) -> dict:
+    """The deletion/suppression ledger must be present AND unchanged (R33)."""
+    findings: list[str] = []
+    recorded = manifest.get("deletion_ledger")
+    live = _ledger_digest(path)
+    for name, record in live.items():
+        if not record["present"]:
+            findings.append(f"the {name} table is missing from the snapshot — a restore "
+                            "cannot prove forgotten content stays forgotten")
+    if not isinstance(recorded, dict):
+        findings.append("the manifest records no deletion/suppression ledger — "
+                        "re-run `backup` before trusting a restore")
+    elif recorded != live:
+        findings.append("the deletion/suppression ledger drifted from the record taken at "
+                        f"backup time: {recorded} vs {live}")
+    return _check(findings)
+
+
+def _drill_absence(path: Path) -> dict:
+    """GC/absence assertions: the restore must not resurrect what was erased.
+
+    A receipt with status ``completed`` is a hard claim that its memories were
+    gone; a chunk whose document row no longer exists is GC residue that no
+    reader can serve. Either one present in the restore means the bytes are not
+    the state the receipt was written against.
+    """
+    findings: list[str] = []
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        tables = _table_names(conn)
+        if "erasure_receipts" in tables:
+            present = {_norm_id(row[0]) for row in conn.execute("SELECT id FROM memories")}
+            for receipt_id, status, ids in conn.execute(
+                "SELECT id, status, requested_memory_ids FROM erasure_receipts"
+            ):
+                if status != DRILL_ABSENCE_STATUS:
+                    continue
+                for memory_id in _json_list(ids):
+                    if _norm_id(memory_id) in present:
+                        findings.append(
+                            f"erasure receipt {receipt_id} erased {memory_id}, which the "
+                            "restore resurrects"
+                        )
+        if "document_chunks" in tables and "documents" in tables:
+            orphans = conn.execute(
+                "SELECT count(*) FROM document_chunks WHERE document_id NOT IN "
+                "(SELECT id FROM documents)"
+            ).fetchone()[0]
+            if orphans:
+                findings.append(f"{orphans} chunk row(s) have no document — GC residue")
+    finally:
+        conn.close()
+    return _check(findings)
+
+
+def restore_drill(*, backup_dir: Path, target: Path | None = None) -> dict:
+    """Restore a ``backup --dir`` volume into a NEW directory and verify it.
+
+    Read-only over the backup volume (checksums are recomputed, never written)
+    and it never touches the live database, so it is safe to run with the app
+    up. ``target`` defaults to ``<backup_dir>.restore`` beside the backup.
+    """
+    if not is_sqlite():
+        raise MigrationRefused(
+            "restore-drill restores a SQLite backup; a server deployment drills its "
+            "snapshot restore with Qdrant's own tooling"
+        )
+    backup_dir = Path(backup_dir).resolve()
+    if not backup_dir.is_dir():
+        raise MigrationRefused(f"no backup directory at {backup_dir}")
+    snapshots = sorted(backup_dir.glob(f"*.{BACKUP_SUFFIX}"))
+    if len(snapshots) != 1:
+        raise MigrationRefused(
+            f"expected exactly one *.{BACKUP_SUFFIX} snapshot in {backup_dir}, "
+            f"found {len(snapshots)}"
+        )
+    snapshot = snapshots[0]
+    manifest_path = Path(f"{snapshot}.manifest.json")
+    if not manifest_path.is_file():
+        raise MigrationRefused(
+            f"{snapshot} has no checksum manifest — a restore that cannot be verified "
+            "is not a restore"
+        )
+    try:
+        manifest = json.loads(manifest_path.read_text())
+    except json.JSONDecodeError:
+        raise MigrationRefused(f"manifest {manifest_path} is not readable JSON") from None
+    target = Path(target).resolve() if target else backup_dir.parent / f"{backup_dir.name}.restore"
+    if target.exists() and any(target.iterdir()):
+        raise MigrationRefused(
+            f"target {target} is not empty — the drill restores into a NEW directory "
+            "(the original volume is never written)"
+        )
+    target.mkdir(parents=True, exist_ok=True)
+    restored_db = target / snapshot.name
+    shutil.copy2(snapshot, restored_db)
+    for entry in manifest.get("files", []):
+        source, dest = backup_dir / entry["path"], target / entry["path"]
+        if source.is_file():
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, dest)
+
+    checks = {
+        "checksum": _drill_checksum(manifest, backup_dir, target, restored_db),
+        "integrity": _drill_integrity(restored_db),
+        "foreign_keys": _drill_foreign_keys(restored_db),
+        "fingerprint": _drill_fingerprint(manifest, restored_db),
+        "ledger": _drill_ledger(manifest, restored_db),
+        "absence": _drill_absence(restored_db),
+    }
+    report = {
+        "ok": all(check["ok"] for check in checks.values()),
+        "backup_dir": str(backup_dir),
+        "manifest": str(manifest_path),
+        "target": str(target),
+        "database": str(restored_db),
+        "checks": checks,
+    }
+    report["ready"] = report["ok"]
+    if not report["ok"]:
+        print(
+            "restore drill failed: " + "; ".join(
+                f"{name}={len(check['findings'])}"
+                for name, check in checks.items() if not check["ok"]
+            ),
+            file=sys.stderr,
+        )
+    return report
 
 
 def cutover(*, yes: bool = False) -> dict:
@@ -1110,7 +1455,14 @@ def _parser() -> argparse.ArgumentParser:
     bf.add_argument("--resume", action="store_true", help="continue from the checkpoint")
 
     vf = sub.add_parser("verify", help="full read-side audit against the live collection")
-    vf.add_argument("--kind", choices=list(KINDS), required=True)
+    vf.add_argument("--kind", choices=list(KINDS), default=None,
+                    help="the kind to audit (required unless --restore-drill)")
+    vf.add_argument("--restore-drill", action="store_true",
+                    help="restore the backup into a NEW directory and verify the restore")
+    vf.add_argument("--dir", type=Path, default=None,
+                    help="the backup directory a restore drill reads (never writes)")
+    vf.add_argument("--target", type=Path, default=None,
+                    help="where the drill restores to (default: <dir>.restore)")
 
     cut = sub.add_parser("cutover", help="flip the pointer for BOTH kinds (one transaction)")
     cut.add_argument("--yes", action="store_true")
@@ -1128,7 +1480,14 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "backfill":
             report = backfill(kind=args.kind, batch=args.batch, resume=args.resume)
         elif args.command == "verify":
-            report = verify(kind=args.kind)
+            if args.restore_drill:
+                if args.dir is None:
+                    raise MigrationRefused("verify --restore-drill needs --dir <backup directory>")
+                report = restore_drill(backup_dir=args.dir, target=args.target)
+            elif args.kind is None:
+                raise MigrationRefused("verify needs --kind <kind>, or --restore-drill --dir <dir>")
+            else:
+                report = verify(kind=args.kind)
         else:
             report = cutover(yes=args.yes)
     except VerifyFailed as exc:

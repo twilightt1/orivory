@@ -241,3 +241,22 @@ def arctic_embed_queries(texts: list[str]) -> list[list[float]]:
 
 def arctic_embed_passages(texts: list[str]) -> list[list[float]]:
     return _encode_with(texts, _asession, _atokenizer, pooling="cls")
+
+
+def arctic_embed_queries_mean(texts: list[str]) -> list[list[float]]:
+    """Legacy-contract query embeddings: arctic XS, MASKED MEAN pooling.
+
+    The pre-P1b releases pooled the mean instead of the trained [CLS] token
+    (``LEGACY_MEAN_FINGERPRINT``). Only the Chroma rollback tool (T6) and the
+    mean-vs-CLS ablation (T8) may build vectors through here — the live read
+    path is CLS. Both go through the same :func:`_encode_with` implementation,
+    so the two contracts can never drift apart in tokenization or truncation.
+    """
+    return _encode_with(
+        [ARCTIC_QUERY_PREFIX + t for t in texts], _asession, _atokenizer, pooling="mean"
+    )
+
+
+def arctic_embed_passages_mean(texts: list[str]) -> list[list[float]]:
+    """Legacy-contract passage embeddings (no prefix, masked mean; see above)."""
+    return _encode_with(texts, _asession, _atokenizer, pooling="mean")
