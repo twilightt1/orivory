@@ -126,8 +126,16 @@ class MemoryRetriever:
         query: str,
         top_k: int = 10,
         include_personal_context: bool = True,
+        include_superseded: bool = False,
     ) -> RecallResponse:
-        """Run the full recall pipeline and return a ``RecallResponse``."""
+        """Run the full recall pipeline and return a ``RecallResponse``.
+
+        ``include_superseded`` (default off) keeps superseded rows eligible
+        through the visibility filter so they can be RANKED and returned: the
+        MCP id seam asks for it (ruling R11(p2)) because that surface owns its
+        own ``history`` widening, and it widens at hydration, not here. Dirty
+        rows stay hidden either way — never a served row, on any surface.
+        """
         t0 = time.perf_counter()
         stage_ms: dict[str, float] = dict.fromkeys(RECALL_TRACE_ZERO_KEYS, 0.0)
         # The candidate counters (T3): each key is written where its leg
@@ -341,7 +349,7 @@ class MemoryRetriever:
                 mem = hydrated.get(mid)
                 if mem is None:
                     continue
-                if _state_of(mem) in ("superseded", "dirty"):
+                if _hidden(mem, include_superseded=include_superseded):
                     continue
                 authorized = dict(cand)
                 authorized["memory_id"] = mid
@@ -394,7 +402,7 @@ class MemoryRetriever:
                     for cand in widened:
                         mid = str(cand.get("memory_id", ""))
                         mem = refetched.get(mid)
-                        if mem is None or _state_of(mem) in ("superseded", "dirty"):
+                        if mem is None or _hidden(mem, include_superseded=include_superseded):
                             continue
                         authorized = dict(cand)
                         authorized["memory_id"] = mid
@@ -439,7 +447,7 @@ class MemoryRetriever:
                         for cand in fresh:
                             mid = str(cand["memory_id"])
                             mem = hydrated_refill.get(mid)
-                            if mem is None or _state_of(mem) in ("superseded", "dirty"):
+                            if mem is None or _hidden(mem, include_superseded=include_superseded):
                                 continue
                             authorized = dict(cand)
                             authorized["memory_id"] = mid
@@ -526,7 +534,7 @@ class MemoryRetriever:
                 for cand in candidates:
                     mid = str(cand.get("memory_id", ""))
                     mem = refreshed.get(mid)
-                    if mem is None or _state_of(mem) in ("superseded", "dirty"):
+                    if mem is None or _hidden(mem, include_superseded=include_superseded):
                         continue
                     current_cand = dict(cand)
                     current_cand["memory_id"] = mid
@@ -668,6 +676,25 @@ class MemoryRetriever:
         response.trace.latency_ms = round(stage_ms["total"], 2)
         return response
 
+    async def recall_ids(
+        self, query: str, top_k: int = 10
+    ) -> list[tuple[UUID, float]]:
+        """The ranked-ids view of :py:meth:`recall` — the shared id seam.
+
+        Ruling R22(p2): the MCP hub serves the SAME ordering this class
+        computes, as ``[(memory_id, score), ...]`` best first, instead of
+        re-implementing a second ranking. No personal-context block (the MCP
+        payload has none) and superseded rows stay ELIGIBLE: that surface
+        widens to them at hydration when its caller asks for history.
+        """
+        response = await self.recall(
+            query,
+            top_k=top_k,
+            include_personal_context=False,
+            include_superseded=True,
+        )
+        return [(UUID(str(r.id)), float(r.score)) for r in response.results]
+
     # ── helpers ─────────────────────────────────────────────────────────
 
     async def _lexical_leg(self, query: str, limit: int) -> list[dict] | None:
@@ -753,6 +780,18 @@ class MemoryRetriever:
         response.trace.stage_ms.update(trace_stage_ms)
         response.trace.latency_ms = round(trace_stage_ms["total"], 2)
         return response
+
+
+def _hidden(memory: Memory, *, include_superseded: bool = False) -> bool:
+    """Rows no serving path may return: dirty always, superseded unless asked.
+
+    Superseded rows are history — the API path hides them unconditionally,
+    while ``recall(include_superseded=True)`` keeps them rankable so the MCP
+    seam can widen to them at hydration (ruling R11(p2)). Dirty rows are wrong
+    data, not history: never eligible, on any surface.
+    """
+    state = _state_of(memory)
+    return state == "dirty" or (state == "superseded" and not include_superseded)
 
 
 def _memory_response(memory: Memory) -> MemoryResponse:
