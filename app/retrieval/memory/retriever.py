@@ -52,7 +52,7 @@ from app.retrieval.memory.scoring import entity_boost, time_decay_score
 from app.retrieval.memory.vector_store import search_memories
 from app.retrieval.vector_retriever import VectorUnavailableError
 from app.schemas.Orivory import (
-    RECALL_TRACE_STAGE_KEYS,
+    RECALL_TRACE_ZERO_KEYS,
     MemoryResponse,
     MemoryWithScore,
     RecallResponse,
@@ -108,13 +108,11 @@ class MemoryRetriever:
     ) -> RecallResponse:
         """Run the full recall pipeline and return a ``RecallResponse``."""
         t0 = time.perf_counter()
-        stage_ms: dict[str, float] = {
-            **dict.fromkeys(RECALL_TRACE_STAGE_KEYS, 0.0),
-            "rewrite_ms": 0.0,
-            "embed_ms": 0.0,
-            "search_ms": 0.0,
-            "hydrate_ms": 0.0,
-        }
+        stage_ms: dict[str, float] = dict.fromkeys(RECALL_TRACE_ZERO_KEYS, 0.0)
+        # The candidate counters (T3): each key is written where its leg
+        # produces a REAL number — never pre-filled, so an absent key means
+        # "this leg did not run" and a `0` is a measured zero.
+        counts: dict[str, int] = {}
 
         # 0) Freshness barrier (P3, ruling R1): wait — bounded — for THIS
         # tenant's own pending index intents before anything reads the index,
@@ -217,6 +215,7 @@ class MemoryRetriever:
             stage_ms["search_ms"] = (time.perf_counter() - t_search) * 1000.0
 
         num_candidates = len(candidates)
+        counts["dense"] = num_candidates  # the first fetch, pre-filter (T3)
 
         # 5) Hydrate and authorize from SQL before any candidate text can be
         # sent to a remote reranker. Vector payload content is stale/untrusted.
@@ -265,6 +264,7 @@ class MemoryRetriever:
         # refill rows are hydrated, SQL-authorized and filtered exactly like
         # the first page's — nothing enters scoring unchecked.
         if len(candidates) < top_k and num_candidates >= pool:
+            added = 0  # rows the refill really ADDS to the pool (T3 counter)
             t_refill = time.perf_counter()
             try:
                 refill_rows = await search_memories(
@@ -300,6 +300,7 @@ class MemoryRetriever:
                         )
                         candidates.append(authorized)
                         hydrated[mid] = mem
+                        added += 1
             except (EmbeddingDimensionMismatch, VectorUnavailableError):
                 # The same contract as the first search: a store outage is a
                 # readiness signal, never a short result list.
@@ -310,6 +311,7 @@ class MemoryRetriever:
                 # Written only when the refill ran (in `finally`, so a failed
                 # attempt is recorded too) — an absent key means "not needed".
                 stage_ms["refill"] = (time.perf_counter() - t_refill) * 1000.0
+                counts["refill"] = added
 
         # 5b) Semantic rerank (Jina cross-encoder, opt-in): the input is now
         # SQL-authorized current content. A rerank FAILURE — the typed
@@ -352,6 +354,9 @@ class MemoryRetriever:
                     if mid in hydrated:
                         ranked.append(cand)
                 seen_ids = {str(cand.get("memory_id", "")) for cand in ranked}
+                # T3: the size of the reranked head that merged. A fallback
+                # writes no `reranked` count — it served no reranked head.
+                counts["reranked"] = len(ranked)
                 candidates = ranked + [
                     cand
                     for cand in fallback_candidates
@@ -386,6 +391,12 @@ class MemoryRetriever:
                 ) * 1000.0
             finally:
                 stage_ms["rerank"] = (time.perf_counter() - t_rerank) * 1000.0
+
+        # T3: the counters for the legs that feed scoring — the pool that
+        # survived every filter (eligibility, refill, the post-network
+        # re-validation), and the SQL rows it resolves against.
+        counts["eligible"] = len(candidates)
+        counts["hydrated"] = len(hydrated)
 
         # 6) Score: entity_boost + time_decay
         scored: list[tuple[Memory, float, list[str]]] = []
@@ -478,6 +489,7 @@ class MemoryRetriever:
                 )
 
             latency_ms = (time.perf_counter() - t0) * 1000.0
+            counts["returned"] = len(results)
             trace = RecallTrace(
                 rewritten_query=rewritten,
                 entities=entities,
@@ -490,6 +502,7 @@ class MemoryRetriever:
                 half_life_days=self.half_life_days,
                 rewrite_skipped=rewrite_skipped,
                 stage_ms=stage_ms,
+                counts=counts,
             )
             response = RecallResponse(
                 results=results,
@@ -533,7 +546,7 @@ class MemoryRetriever:
         stage_ms: dict[str, float] | None = None,
     ) -> RecallResponse:
         log.info("Returning empty recall", extra={"reason": reason})
-        trace_stage_ms: dict[str, float] = dict.fromkeys(RECALL_TRACE_STAGE_KEYS, 0.0)
+        trace_stage_ms: dict[str, float] = dict.fromkeys(RECALL_TRACE_ZERO_KEYS, 0.0)
         trace_stage_ms.update(stage_ms or {})
         t_serialization = time.perf_counter()
         try:
@@ -550,6 +563,10 @@ class MemoryRetriever:
                 half_life_days=self.half_life_days,
                 rewrite_skipped=rewrite_skipped,
                 stage_ms=trace_stage_ms,
+                # The one counter this path owns: the response really carried
+                # zero results. Every other counter names a leg that never ran
+                # — absent, never a fabricated zero (T3/C3).
+                counts={"returned": 0},
             )
             response = RecallResponse(
                 results=[],

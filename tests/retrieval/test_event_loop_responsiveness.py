@@ -366,3 +366,41 @@ async def test_the_barrier_wait_for_bounds_an_offloaded_drain(store, monkeypatch
 
     release.set()  # unpark before teardown: no thread outlives the store
     assert await asyncio.to_thread(finished.wait, 10)
+
+
+# ── 3. the signed RYW budget at the recall-ALONE shape (T1 review F1 → C1) ──
+
+
+async def test_a_50_intent_backlog_drains_inside_the_signed_read_your_writes_budget(store):
+    """C1/F1: recall ALONE drains the default 50-intent backlog inside 2.0 s.
+
+    Ruling R9(p2) keeps the signed 2.0 s meaning for exactly this shape — a
+    recall with no competing ingest. Nothing here softens the budget: the
+    shipped setting is asserted and then measured, with the REAL embedder,
+    because the drain embeds all 50 documents on the request path (that is
+    what makes this number a real one). The concurrent three-leg shape above
+    keeps its own, test-local budget; this is the release contract.
+    """
+    assert settings.RECALL_FRESHNESS_BUDGET_SECONDS == 2.0  # the signed budget
+    await warmup_embedder()
+    # Warm the drain path itself (first claim, first write) so the measured
+    # run is the backlog's cost, not one-time session/coordination plumbing.
+    await _seed_pending(store, [_text("warmup", 0)])
+    assert len((await _recall(store)).results) > 0
+
+    await _seed_pending(store, [_text("backlog", index) for index in range(DRAIN_DOCS)])
+
+    began = time.perf_counter()
+    response = await _recall(store)  # the barrier drains the backlog in-band
+    elapsed = time.perf_counter() - began
+
+    print(
+        f"RYW recall-alone (n={DRAIN_DOCS} intents, real embedder): {elapsed:.3f}s "
+        f"of the signed {settings.RECALL_FRESHNESS_BUDGET_SECONDS}s budget"
+    )
+    assert elapsed < settings.RECALL_FRESHNESS_BUDGET_SECONDS, (
+        f"the recall-alone drain regressed past the signed budget: {elapsed:.3f}s"
+    )
+    assert await _intent_statuses(store) == {"done"}  # the backlog really landed
+    assert len(response.results) > 0  # served, not an empty 200
+    assert response.trace.stage_ms["queue_wait"] > 0.0  # a measured wait, not a no-op

@@ -43,6 +43,12 @@ from app.retrieval import reranker as reranker_module
 from app.retrieval.memory import retriever as rmod
 from app.retrieval.memory.retriever import MemoryRetriever
 from app.retrieval.reranker import RerankInvalidResponse, RerankUnavailable
+from app.schemas.Orivory import (
+    RECALL_TRACE_COUNTER_KEYS,
+    RECALL_TRACE_STAGE_KEYS,
+    RECALL_TRACE_ZERO_KEYS,
+    RecallTrace,
+)
 
 # ── fakes ───────────────────────────────────────────────────────────────────
 
@@ -213,6 +219,23 @@ async def test_returned_count_is_min_top_k_eligible_never_the_rerankers(
     assert {str(result.id) for result in response.results} <= acceptable
     assert not (set(str(g) for g in gone) & {str(result.id) for result in response.results})
 
+    # T3: the same facts, as counters — the pre-filter fetch, the rows the
+    # refill really ADDED (a stale-only refill page adds zero, and that zero is
+    # a measured fact, not a fabricated one), the pool that entered scoring and
+    # the served count. A leg that never ran has NO key.
+    counts = response.trace.counts
+    assert counts["dense"] == len(first_page)
+    assert counts["eligible"] == eligible
+    assert counts["returned"] == len(response.results)
+    if refill:
+        assert counts["refill"] == eligible - first_eligible
+    else:
+        assert "refill" not in counts
+    if shape != "empty" and eligible > 1:  # the rerank leg needs >1 candidate
+        assert counts["reranked"] == min(eligible, min(top_k, 5))  # cap pinned above
+    else:
+        assert "reranked" not in counts
+
 
 async def test_pool_comes_from_the_settings_multiplier_and_top_n_from_the_request(
     recall_env, monkeypatch
@@ -354,6 +377,12 @@ async def test_one_bounded_refill_when_filtering_empties_a_full_pool(recall_env,
     # its stale rows are dropped, its good rows are served.
     assert ids <= {str(m.id) for m in [*good, *later_good]}
     assert ids & {str(m.id) for m in later_good}
+    # T3: the counter is what the refill ADDED to the pool (post-filter), not
+    # the page it fetched (36 new rows: 16 stale + 20 usable).
+    assert response.trace.counts["refill"] == 20
+    assert response.trace.counts["dense"] == 20
+    assert response.trace.counts["eligible"] == 24
+    assert response.trace.counts["returned"] == 10
 
 
 async def test_no_refill_when_the_store_was_already_exhausted(recall_env, monkeypatch):
@@ -370,6 +399,7 @@ async def test_no_refill_when_the_store_was_already_exhausted(recall_env, monkey
 
     assert store.calls == [20], "no second search — the page was short"
     assert "refill" not in response.trace.stage_ms
+    assert "refill" not in response.trace.counts
     assert len(response.results) == 6 == min(10, 6)
 
 
@@ -400,6 +430,9 @@ async def test_refill_runs_with_rerank_off_too(recall_env, monkeypatch):
     assert len(ids) == 10
     assert ids <= {str(m.id) for m in [*good, *later_good]}
     assert "retrieval.rerank_failed" not in fallback_counts()
+    # Rerank off: the leg never ran, so its counter never appears (T3/C3).
+    assert response.trace.counts["refill"] == 20
+    assert "reranked" not in response.trace.counts
 
 
 # ── R11: typed failures, dense fallback, counted ────────────────────────────
@@ -437,6 +470,10 @@ async def test_rerank_failure_degrades_to_dense_order_and_is_counted(
     ], "vector order continues on a reranker failure"
     assert fallback_counts()["retrieval.rerank_failed"] == 1
     assert response.trace.stage_ms["rerank"] > 0.0  # recorded in `finally`
+    # T3: a fallback serves no reranked head, so no `reranked` count — the
+    # fallback counter and the stage duration are the record of what happened.
+    assert "reranked" not in response.trace.counts
+    assert response.trace.counts["returned"] == 10
 
 
 async def test_empty_results_body_degrades_to_dense_order_and_is_counted(
@@ -467,6 +504,7 @@ async def test_empty_results_body_degrades_to_dense_order_and_is_counted(
     ], "vector order continues when the transport answers with an empty pool"
     assert fallback_counts()["retrieval.rerank_failed"] == 1
     assert response.trace.stage_ms["rerank"] > 0.0
+    assert "reranked" not in response.trace.counts  # R14: no head came back
 
 
 # ── R11: the transport's own classification ─────────────────────────────────
@@ -622,3 +660,65 @@ async def test_top_n_is_per_call_and_the_setting_only_caps_it(monkeypatch):
     await reranker_module.rerank("q", documents, top_n=3)  # the request may be smaller
     await reranker_module.rerank("q", documents)  # no per-call value → the cap
     assert sent == [7, 3, 7]
+
+
+# ── T3: the trace contract — declared stage keys + real candidate counters ──
+
+
+def test_the_declared_trace_keys_cover_every_stage_the_path_writes():
+    """C2: `refill` (T2's new stage) and the four legacy `_ms` keys are part of
+    ``RECALL_TRACE_STAGE_KEYS`` — declared, so the contract covers what the
+    retriever writes instead of leaking unversioned extras.
+
+    `refill` is the ONE declared key that is not pre-initialised: T2's contract
+    is "present ⟺ the refill ran", and a pre-filled 0.0 would claim it ran in
+    zero time. Every other declared key starts at 0.0 (P0 design: the reserved
+    keys stay diffable, `lexical` included, until its leg exists in T5).
+    """
+    assert "refill" in RECALL_TRACE_STAGE_KEYS
+    assert "refill" not in RECALL_TRACE_ZERO_KEYS
+    assert {"rewrite_ms", "embed_ms", "search_ms", "hydrate_ms"} <= set(RECALL_TRACE_STAGE_KEYS)
+    trace = RecallTrace(
+        rewritten_query="q", entities=[], latency_ms=0.0, num_candidates=0,
+        num_results=0, used_personal_context=False, llm_fallback=False,
+    )
+    assert set(trace.stage_ms) == set(RECALL_TRACE_ZERO_KEYS)
+    assert trace.counts == {}  # counters: absent stays absent, never a zero wall
+
+
+async def test_the_counters_name_every_leg_that_ran_and_none_that_did_not(
+    recall_env, monkeypatch
+):
+    """C3: `counts` is made of REAL numbers — a key exists iff its leg ran.
+
+    Empty pool: the dense search really ran and counted 0; the legs that never
+    ran (lexical/fused — no hybrid index until T5; refill; reranked) stay absent
+    rather than appearing as fabricated zeros. With rows: the same keys appear
+    with the counts the pipeline factually produced, and nothing else.
+    """
+    uid = recall_env
+    store = _Store([])
+    monkeypatch.setattr(rmod, "search_memories", store)
+    monkeypatch.setattr(reranker_module, "rerank", _cap_rerank())
+
+    retriever = MemoryRetriever(_FakeDB([]), uid, semantic_rerank=True)
+    empty = await retriever.recall("backpack", top_k=10, include_personal_context=False)
+    assert empty.trace.counts == {
+        "dense": 0, "eligible": 0, "hydrated": 0, "returned": 0,
+    }
+    assert set(empty.trace.counts) <= set(RECALL_TRACE_COUNTER_KEYS)
+    assert "lexical" not in empty.trace.counts and "fused" not in empty.trace.counts
+
+    memories = [_mem(uid, content=f"m{i}") for i in range(12)]
+    store.rows = [(m.id, 0.9 - i / 100) for i, m in enumerate(memories)]
+    retriever = MemoryRetriever(_FakeDB(memories), uid, semantic_rerank=True)
+    full = await retriever.recall("backpack", top_k=5, include_personal_context=False)
+
+    assert full.trace.counts == {
+        "dense": 10,      # the R4 pool: ceil(5 * 2.0)
+        "eligible": 10,   # every row survived the filter, none refilled
+        "reranked": 5,    # min(top_k, cap) rows carry a rerank score
+        "hydrated": 12,   # the fake DB hands over every row it holds
+        "returned": 5,
+    }
+    assert set(full.trace.counts) <= set(RECALL_TRACE_COUNTER_KEYS)
