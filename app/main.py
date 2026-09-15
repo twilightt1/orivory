@@ -1,3 +1,4 @@
+import asyncio
 import os
 import sys
 from contextlib import asynccontextmanager
@@ -103,14 +104,18 @@ async def lifespan(app: FastAPI):
     from app.retrieval.memory.drain_loop import start_drain_loop, stop_drain_loop
 
     await _drain_index_outbox_at_boot()
-    drain_task = await start_drain_loop()
+    # Created INSIDE the try whose ``finally`` stops it: storage init can raise
+    # a BaseException (a shutdown cancel), and one raised outside the try would
+    # leak a running drain task into teardown — and skip ``close_clients()``.
+    drain_task: asyncio.Task | None = None
     try:
-        from app.storage import ensure_bucket
-        await ensure_bucket()
-        log.info("Storage ready (backend=%s)", settings.STORAGE_BACKEND)
-    except Exception as e:
-        log.warning("Storage init failed", error=str(e))
-    try:
+        drain_task = await start_drain_loop()
+        try:
+            from app.storage import ensure_bucket
+            await ensure_bucket()
+            log.info("Storage ready (backend=%s)", settings.STORAGE_BACKEND)
+        except Exception as e:
+            log.warning("Storage init failed", error=str(e))
         if settings.MCP_HUB_ENABLED:
             # Starlette does not run a mounted app's lifespan, so the host
             # lifespan must run the MCP session manager itself (see

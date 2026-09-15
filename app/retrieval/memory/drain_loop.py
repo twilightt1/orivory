@@ -118,7 +118,14 @@ async def stop_drain_loop(task: asyncio.Task | None) -> None:
     if _stop is not None:
         _stop.set()
     try:
-        await asyncio.wait_for(task, timeout=_STOP_TIMEOUT_SECONDS)
+        # An already-cancelled task re-raises CancelledError on await — and
+        # CancelledError is not an Exception, so unguarded it escapes the
+        # lifespan's ``finally`` and skips ``close_clients()`` (the local-mode
+        # folder-lock release this loop exists to protect).
+        if not task.cancelled():
+            await asyncio.wait_for(task, timeout=_STOP_TIMEOUT_SECONDS)
+    except asyncio.CancelledError:
+        pass  # cancelled out from under us (or cancelled mid-wait): stopped is stopped
     except TimeoutError:
         log.warning("Outbox drain loop did not stop in time; cancelling")
         task.cancel()

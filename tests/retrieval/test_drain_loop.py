@@ -318,8 +318,10 @@ async def test_stop_ends_the_task_within_the_bound(env, monkeypatch, caplog):
 async def test_stop_cancels_a_drain_that_overruns_the_bound(monkeypatch):
     """A hung drain must not hold the shutdown past the 5s bound."""
     stuck = asyncio.Event()
+    entered = asyncio.Event()  # set from inside the batch: stop is meaningful then
 
     async def hung(*, batch_size):
+        entered.set()  # the batch is in flight; a sleep would only guess that
         await stuck.wait()  # a vector call that never comes back
 
     monkeypatch.setattr(drain_loop, "drain_pending", hung)
@@ -330,13 +332,50 @@ async def test_stop_cancels_a_drain_that_overruns_the_bound(monkeypatch):
 
     task = await drain_loop.start_drain_loop()
     assert task is not None
-    await asyncio.sleep(0.02)  # let it enter the hung batch
+    await asyncio.wait_for(entered.wait(), timeout=5)  # it is inside the hung batch
     await drain_loop.stop_drain_loop(task)
 
     assert task.cancelled()
     assert ("warning", "Outbox drain loop did not stop in time; cancelling") in [
         (level, event) for level, event, _ in captured.events
     ]
+
+
+async def test_stop_survives_a_drain_task_cancelled_elsewhere(monkeypatch):
+    """A task cancelled by someone else must not raise out of the shutdown.
+
+    ``await`` on a cancelled task re-raises ``CancelledError``, which is not an
+    ``Exception``: before the guard it escaped the lifespan's ``finally`` and
+    skipped ``close_clients()`` — the folder-lock release this loop exists to
+    protect.
+    """
+    never = asyncio.Event()
+
+    async def hung(*, batch_size):
+        await never.wait()
+
+    monkeypatch.setattr(drain_loop, "drain_pending", hung)
+    monkeypatch.setattr(drain_loop, "_STOP_TIMEOUT_SECONDS", 1.0)
+    captured = _LogCapture()
+    monkeypatch.setattr(drain_loop, "log", captured)
+
+    # A cancel that has landed: ``task.cancelled()`` is already true.
+    task = await drain_loop.start_drain_loop()
+    assert task is not None
+    task.cancel()
+    await _until(lambda: task.cancelled())
+    await drain_loop.stop_drain_loop(task)  # the old code raised CancelledError here
+
+    # …and one still in flight when stop is called: the wait sees it land.
+    inflight = await drain_loop.start_drain_loop()
+    assert inflight is not None
+    inflight.cancel()
+    assert not inflight.cancelled()  # requested, not yet delivered
+    await drain_loop.stop_drain_loop(inflight)
+
+    assert task.cancelled() and inflight.cancelled()
+    assert captured.events == []  # not an error, and not a "did not stop in time"
+    assert drain_loop._stop is None  # the module state is cleared on both paths
 
 
 # ── both dialects (ruling R4: no SQLite-only gate) ──────────────────────────
