@@ -359,11 +359,15 @@ def test_reingest_enqueues_chunk_intents_in_the_row_transaction(sync_db, monkeyp
     sync_db.commit()
 
     indexed: list[list[str]] = []
-    purged: list[tuple] = []
+    purged: list[set[str]] = []
 
     def _upsert(rows, *, user_id):
         indexed.append([str(row.id) for row in rows])
         return len(rows)
+
+    def _purge(chunk_ids, *, user_id, conversation_id):
+        purged.append({str(chunk_id) for chunk_id in chunk_ids})
+        return len(chunk_ids)
 
     monkeypatch.setattr(pipeline, "_project_document_to_memories", lambda *a, **k: None)
     monkeypatch.setattr("app.storage.get_object_sync", lambda *a, **k: b"file bytes")
@@ -374,9 +378,7 @@ def test_reingest_enqueues_chunk_intents_in_the_row_transaction(sync_db, monkeyp
     monkeypatch.setattr(
         "app.retrieval.retrieval_cache.invalidate_query_cache_sync", lambda *a, **k: None)
     monkeypatch.setattr(vector_retriever, "upsert_chunks_sync", _upsert)
-    monkeypatch.setattr(
-        vector_retriever, "delete_document_chunks_sync",
-        lambda *args, **kwargs: purged.append((args, kwargs)))
+    monkeypatch.setattr(vector_retriever, "delete_chunks_by_ids", _purge)
 
     pipeline._ingest(sync_db, str(doc.id))
     first_ids = {row.id.hex for row in _chunk_rows(sync_db, doc.id)}
@@ -407,10 +409,12 @@ def test_reingest_enqueues_chunk_intents_in_the_row_transaction(sync_db, monkeyp
     # The immediate attempt ran after the commit: the vectors that landed are
     # acked, while the delete intents stay pending for the drain.
     assert [{uuid.UUID(i).hex for i in ids} for ids in indexed] == [first_children, second_children]
-    assert purged == [
-        ((str(doc.conversation_id), str(doc.id)), {"user_id": str(owner)})
-        for _ in range(2)
-    ]
+    # The purge is ID-scoped (ruling R9): exactly the ids that LEFT SQL, once per
+    # ingest — never a document-wide sweep that could take a live row's point.
+    assert len(purged) == 2
+    assert purged[0] == set()  # the first ingest replaced nothing
+    assert {uuid.UUID(i).hex for i in purged[1]} == first_ids
+    assert purged[1].isdisjoint({str(uuid.UUID(i)) for i in second_ids})
     statuses = {(row.entity_id, row.operation): row.status for row in intents}
     assert all(statuses[(entity_id, "upsert")] == "done" for entity_id in by_operation["upsert"])
     assert all(statuses[(entity_id, "delete")] == "pending" for entity_id in by_operation["delete"])

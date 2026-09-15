@@ -289,7 +289,13 @@ def _delete_filtered_sync(chunk_filter: qm.Filter, *, what: str) -> bool:
 async def delete_document_chunks(
     conversation_id: str, document_id: str, *, user_id: str
 ) -> bool:
-    """Delete one document's points with a server-side filtered delete."""
+    """Delete one document's points with a server-side filtered delete.
+
+    A TRUE document delete only — every point of the document belongs to rows
+    being deleted with it. A REINGEST must purge by id instead
+    (:func:`delete_chunks_by_ids`): a document-wide sweep can take a point a
+    concurrent drain has just written and acked for a still-live row.
+    """
     return await _delete_filtered(
         build_chunk_filter(user_id, conversation_id, document_id=document_id),
         what=f"document:{document_id}",
@@ -299,11 +305,61 @@ async def delete_document_chunks(
 def delete_document_chunks_sync(
     conversation_id: str, document_id: str, *, user_id: str
 ) -> bool:
-    """Synchronous variant of :func:`delete_document_chunks`."""
+    """Synchronous variant of :func:`delete_document_chunks` — a true delete only."""
     return _delete_filtered_sync(
         build_chunk_filter(user_id, conversation_id, document_id=document_id),
         what=f"document:{document_id}",
     )
+
+
+def delete_chunks_by_ids(chunk_ids: list[str], *, user_id: str, conversation_id: str) -> int:
+    """Delete exactly the NAMED ids, inside the caller's own scope (ruling R8/R9).
+
+    The reingest purge. Id-scoped by construction: only the ids whose rows left
+    SQL are named, so this can never sweep away a point a concurrent drain has
+    just written and acked for a row that is STILL live (that ack is final —
+    no pending intent is left to replay the point). The selector is the id set
+    ANDed into the tenant-scoped chunk filter, so naming a foreign point's id
+    reaches nothing.
+
+    Returns how many of the named ids this call confirmed deleted; a partial or
+    unconfirmed delete is logged and reported as a short count (``0`` when the
+    store itself failed) — the caller's durable delete intents stay pending and
+    the drain owns the retry. The readback counts by ID ALONE: the tenant clause
+    protects the DELETE, and an id outside the caller's scope must report
+    honestly as not deleted rather than count as a deletion this call made.
+    """
+    ids = [str(chunk_id) for chunk_id in chunk_ids]
+    if not ids:
+        return 0
+    try:
+        client, generation, _ = _open_collection_sync(_current_dim())
+        client.delete(
+            collection_name=generation,
+            points_selector=qm.Filter(
+                must=[
+                    *(build_chunk_filter(user_id, conversation_id).must or []),
+                    qm.HasIdCondition(has_id=ids),
+                ]
+            ),
+        )
+        survivors = client.count(
+            collection_name=generation,
+            count_filter=qm.Filter(must=[qm.HasIdCondition(has_id=ids)]),
+        )
+        deleted = len(ids) - int(survivors.count)
+        if deleted < len(ids):
+            log.warning(
+                "Chunk delete by id not confirmed",
+                extra={"n": len(ids), "survivors": int(survivors.count)},
+            )
+        return deleted
+    except Exception as e:
+        log.warning(
+            "Failed to delete chunks by id from Qdrant (sync)",
+            extra={"n": len(ids), "error": str(e)},
+        )
+        return 0
 
 
 async def delete_conversation_chunks(conversation_id: str, *, user_id: str) -> bool:
@@ -420,6 +476,7 @@ __all__ = [
     "KIND_CHUNK",
     "VectorUnavailableError",
     "delete_chunks",
+    "delete_chunks_by_ids",
     "delete_conversation_chunks",
     "delete_document_chunks",
     "delete_document_chunks_sync",

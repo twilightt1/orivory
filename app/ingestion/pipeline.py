@@ -188,7 +188,7 @@ def _ingest(db, document_id: str) -> None:
     # Immediate attempt after the commit (spec §5.2): the intents above are the
     # durable proof, so a vector outage must not fail an ingested document.
     try:
-        _index_document_chunks(db, document_id=document_id, children=children,
+        _index_document_chunks(db, children=children, old_ids=old_ids,
                                user_id=user_id, conversation_id=conversation_id)
     except Exception as exc:
         log.warning(
@@ -227,30 +227,32 @@ def _ingest(db, document_id: str) -> None:
     )
 
 
-def _index_document_chunks(db, *, document_id: str, children, user_id: str,
+def _index_document_chunks(db, *, children, old_ids, user_id: str,
                            conversation_id: str) -> None:
-    """The post-commit fast path: purge the document's old points, write the new.
+    """The post-commit fast path: write the new children, ack, then forget the old.
 
-    Both steps are idempotent and both are covered by intents: the filtered
-    delete sweeps the previous ingest's points even when their per-id delete
-    intents have not drained, and each child's upsert intent is acked only
-    after its own vector landed.
+    The ORDER is the fence (ruling R9): the purge names ONLY the ids whose rows
+    left SQL in this same commit, so it can never delete a point a concurrent
+    drain has just written and acked for a row that is still live — that ack is
+    final, nothing is left pending to replay it. Each child's ack still follows
+    its own vector write; a purge that cannot be confirmed only leaves the
+    delete intents pending (the durable proof), never a live row without a point.
     """
     from app.models.document_chunk import DocumentChunk
     from app.retrieval.memory.outbox import KIND_CHUNK, mark_done_sync
-    from app.retrieval.vector_retriever import (
-        delete_document_chunks_sync,
-        upsert_chunks_sync,
-    )
-
-    delete_document_chunks_sync(conversation_id, document_id, user_id=user_id)
+    from app.retrieval.vector_retriever import delete_chunks_by_ids, upsert_chunks_sync
 
     rows = [db.get(DocumentChunk, uuid.UUID(str(child.id))) for child in children]
     rows = [row for row in rows if row is not None]
-    if not rows or not upsert_chunks_sync(rows, user_id=user_id):
-        return
-    for row in rows:
-        mark_done_sync(db, entity_id=row.id, revision=row.revision, kind=KIND_CHUNK)
+    if rows and upsert_chunks_sync(rows, user_id=user_id):
+        for row in rows:
+            mark_done_sync(db, entity_id=row.id, revision=row.revision, kind=KIND_CHUNK)
+
+    delete_chunks_by_ids(
+        [str(chunk_id) for chunk_id in old_ids],
+        user_id=user_id,
+        conversation_id=conversation_id,
+    )
 
 
 def _project_document_to_memories(db, document_id: str, parents) -> None:
