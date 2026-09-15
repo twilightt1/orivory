@@ -40,8 +40,14 @@ unifies them.
   task rebuilds vectors from rows). Which generation is active per kind is a
   row in `index_generations`; a store that cannot name its contract is
   quarantined rather than served (P1b cutover, see §7).
-- **BM25 + reranking** — hybrid recall: vector candidates + keyword
-  candidates fused, then reranked.
+- **Lexical leg + reranking (P2)** — memory recall is DENSE-only by default.
+  A SQLite FTS5 lexical leg (`memory_fts`, schema ladder v4) can be fused with
+  the dense page by RRF when `RETRIEVAL_HYBRID_ENABLED=true` — it ships OFF,
+  and only the T7 ablation artifact (`eval/ablation_retrieval_p2.json`) may
+  enable it. Where a vector outage hits, the SQLite lexical leg answers alone
+  (typed 503 on Postgres, which has no lexical leg). Cross-encoder rerank
+  (`RETRIEVAL_SEMANTIC_RERANK`) is opt-in per deployment; a reranked head is
+  MERGED into dense order, so the served count never shrinks because rerank ran.
 - **Salience loop** — memories used in answers get bumped; untouched ones
   decay. Ranking is salience × recency × relevance (the Generative-Agents
   scoring, reinforced on access); the decay is computed when a memory is

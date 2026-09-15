@@ -1,8 +1,9 @@
 # Rolling a P1b install back to the pre-P1b stack
 
 **This escape hatch exists for ONE release** (spec §12). After that release the
-Qdrant path is the only path, this document and `scripts/rollback_to_chroma.py`
-are deleted, and the P1b-compatible restore is `verify --restore-drill` alone.
+Qdrant path is the only path, §1-§4 and `scripts/rollback_to_chroma.py` are
+deleted, and the P1b-compatible restore is `verify --restore-drill` alone. §6
+(P2 -> pre-P2) is the exception: see §5 for its removal condition.
 
 P1b cuts over by flipping the generation pointer: the SQLite database keeps
 serving, but the vectors moved to Qdrant and the local embedding contract went
@@ -197,13 +198,21 @@ written to. Both rules are enforced before a byte is copied (default target:
 
 ## 5. Removal condition
 
-Keep this escape hatch for **exactly one release**. Delete this document,
-`scripts/rollback_to_chroma.py`, `requirements-rollback.txt` and
+Keep this escape hatch for **exactly one release**. Delete §1-§4 (the Chroma
+rebuild), `scripts/rollback_to_chroma.py`, `requirements-rollback.txt` and
 `tests/migration/test_p1b_rollback.py` in the release after P1b (spec §12), and
 drop the retired store itself — the `LEGACY_CHROMA_PATH` directory
 (`Orivory_memories` + `rag_conv_*`) — once the window closes: nothing serves from
 it after `cutover`, so it is only disk at that point. From that release the only
 supported restore is `verify --restore-drill` plus a Qdrant snapshot restore.
+
+**§6 is NOT part of that deletion.** The P2 rollback recipe (drop the FTS5
+objects, re-stamp `user_version = 3`) has no other home and is the only
+documented way back from a v4 file to a pre-P2 binary — deleting it in the
+release after P1b would remove the recipe in exactly the release that ships P2.
+Before §1-§4 go, move §6 into
+[OPERATIONS_RUNBOOK.md](OPERATIONS_RUNBOOK.md) (and re-point this document's
+references to it).
 
 ## 6. Rolling a P2 install back to a pre-P2 binary
 

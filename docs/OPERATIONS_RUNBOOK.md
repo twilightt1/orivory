@@ -218,6 +218,108 @@ curl -fsS -H "Authorization: Bearer $ADMIN_ACCESS_TOKEN" \
   http://localhost:8000/api/v1/admin/diagnostics | python -m json.tool
 ```
 
+## P2 — rerank, hybrid recall and the FTS5 lexical index
+
+### What ships, and what the dials mean
+
+- **Rerank is opt-in** (`RETRIEVAL_SEMANTIC_RERANK=false` by default). Where it
+  is on, the cross-encoder reorders the fetched pool and MERGES into dense
+  order: the served count never shrinks because rerank ran — it is
+  `min(top_k, eligible)`, always.
+  - `JINA_RERANKER_TOP_N` (default **20**) is the per-call CAP on the
+    reranker's own answer (`min(top_k, cap)`), **not** the rerank window. The
+    window is the retrieval pool: `top_k x RETRIEVAL_RERANK_POOL_MULTIPLIER`
+    (default 2.0, so 20 for the default `top_k=10`). A cap below the window
+    leaves the tail of every recall on the dense x boost x decay regime inside
+    the same sort (ruling R13) — keep them in step.
+  - `JINA_RERANKER_TIMEOUT_SECONDS` (default 10) bounds ONE call. A timeout, a
+    non-2xx or a malformed body is a typed failure: the answer continues in
+    dense order and the `retrieval.rerank_failed` counter increments. A rising
+    rate means the reranker is down (or slow) — alert on the rate, not on the
+    occurrence.
+  - The diagnostics payload's `config.reranker_top_n` is that CAP: it is not a
+    result count and not the rerank window.
+- **Hybrid recall ships OFF** (`RETRIEVAL_HYBRID_ENABLED=false`). With it on,
+  recall runs the SQLite FTS5 lexical leg beside the dense leg and fuses them by
+  RRF (`RETRIEVAL_RRF_K`, default 60). It may only be enabled by the T7
+  ablation artifact passing the signed gate (`eval/ablation_retrieval_p2.json`
+  records the verdict); that flip is a separate, documented decision — never a
+  config default. The OFF path is dense-only: no lexical query, no
+  `lexical`/`fused` counters.
+- **The lexical leg is SQLite-only** (`memory_fts`, created by the schema
+  ladder's v4 step — see the P1b section for the ladder's shape). A Postgres
+  deployment has no lexical leg and must keep the typed `503` on a vector
+  outage; there is no Alembic step for FTS5 by design.
+- **Vector outage on SQLite answers from the lexical leg.** The recall returns
+  FTS5 results, `trace.counts.lexical` is set, `dense` is absent, and
+  `retrieval.vector_unavailable` increments (ruling R19). This fallback is NOT
+  gated by the hybrid flag — it only ever replaces the typed `503`.
+- **MCP search keeps the freshness barrier (ruling R24).** `search_memory`
+  ranks through the same recall seam as the API, so the P3 barrier applies: on
+  a deployment that cannot land its intents, an MCP search pays the
+  `RECALL_FRESHNESS_BUDGET_SECONDS` wait and then answers from the SQL
+  ordering. That is the design (the `add_memory` → `search_memory` chain is
+  what P3 protects), and the escape hatch is `OUTBOX_DRAIN_ENABLED=false`,
+  which quiesces the store AND stops recall waiting for its own writes.
+- **Budgets (signed §12.2).** Read-your-writes stays **2.0 s** for a recall
+  ALONE (the P3 barrier); under concurrent bulk ingest a `503
+  index_freshness_timeout` is the accepted shape (ruling R9) — clients retry.
+  Recall **p95 <= 150 ms** at fixture scale, asserted by the P2 gate. RSS
+  <= 1 GB is measured, not gated (a P5 item). The embed executor
+  (`EMBED_EXECUTOR_WORKERS`, default 2) is the loop-lag lever; ORT's
+  `EMBED_ORT_INTRA_OP_THREADS` is the oversubscription dial (0 = ORT default,
+  set 1 only to cap a small machine — and re-measure, it costs ~4x).
+
+### The lexical index, erasure and disk
+
+`memory_fts` is an FTS5 table plus its shadow tables, maintained by triggers in
+the SAME transaction as the `memories` write (update = delete-by-`memory_id`
+then insert; identity never rides on the FTS rowid). Deleting or erasing a
+memory removes its row and its index entry, and the serving paths confirm
+absence — but **deleted text can persist in the file's bytes**: inside the FTS
+shadow tables' free pages, in the SQLite freelist, and in the WAL, until a
+checkpoint or `VACUUM` reclaims them. Erasure receipts verify the SERVING path
+(no row, no point), never the physical bytes. If an erasure must be reflected
+on disk immediately, checkpoint and compact:
+
+```bash
+sqlite3 /data/orivory.db "PRAGMA wal_checkpoint(TRUNCATE); VACUUM;"
+```
+
+### Ladder v4 and going back to a pre-P2 binary
+
+A P2 install runs SQLite `user_version = 4` (the v3 schema + `memory_fts` + its
+three triggers); the ladder steps v3 -> v4 once, backfills the index from
+coverage (by id, not by count) and takes its own `<db>.pre-p2.bak` milestone
+snapshot beside the database. A later boot at v4 never re-asserts or rebuilds
+the index — repair is explicit (`lexical_index.rebuild`).
+
+A pre-P2 binary cannot open a v4 file: its ladder tops out at 3 and refuses with
+`unsupported SQLite schema version 4; expected 3`. The documented way back is
+[ROLLBACK_P1B.md](ROLLBACK_P1B.md) §6 (drop the triggers + the virtual table,
+re-stamp `user_version = 3`) — run it on a COPY, and roll forward by booting a
+P2 binary, which re-runs the step.
+
+### Fallback counter labels
+
+`app/observability/fallbacks.py` (inspect with `fallback_counts()`, or grep the
+`Fallback activated` debug logs; aggregate centrally in a multi-process
+deployment). Alert on the RATE, not on any single activation:
+
+| label | means |
+|---|---|
+| `retrieval.vector_unavailable` | vector store down, the lexical leg answered (SQLite) or the typed 503 was served |
+| `retrieval.rerank_failed` | Jina/reranker error or timeout, dense order kept |
+| `retrieval.bm25_rebuild_failed` | BM25 lazy rebuild failed, stale index used (document path) |
+| `mcp.search_sql_fallback` | MCP search answered from the SQL ordering — barrier timeout, vector outage, or a degraded leg served empty (R23/R25) |
+| `crag.grading_failed` | doc grading error, defaulted IRRELEVANT |
+| `index.outbox_drain_failed` | a drain round raised; intents stay pending for the retry |
+
+```bash
+curl -fsS -H "Authorization: Bearer $ADMIN...OKEN" \
+  http://localhost:8000/api/v1/admin/diagnostics | python -m json.tool
+```
+
 ## P1b cutover (SQLite / lite deployments)
 
 P1b moves the vector store from the retired Chroma install to Qdrant and swaps

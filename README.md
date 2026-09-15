@@ -47,7 +47,7 @@ Postgres + Qdrant under the hood.
 
 | Area | What you get |
 |---|---|
-| **🧠 Memory store** | Evidence-first correctable memory: sửa 1 lần mọi agent nhớ đúng (supersede có scope/thời gian hiệu lực), stale view tự chặn, time-aware recall, hybrid vector + keyword search |
+| **🧠 Memory store** | Evidence-first correctable memory: sửa 1 lần mọi agent nhớ đúng (supersede có scope/thời gian hiệu lực), stale view tự chặn, time-aware recall, vector + keyword search (lexical/hybrid fusion opt-in, mặc định OFF — xem [OPERATIONS_RUNBOOK](docs/OPERATIONS_RUNBOOK.md#p2--rerank-hybrid-recall-and-the-fts5-lexical-index)) |
 | **🕸️ Knowledge graph** | Automatic entity extraction, relation mapping, cluster detection |
 | **🔌 MCP hub** | 7 tools — `search/get/timeline/list_recent/add/correct/delete/forget`: any MCP-capable agent (Claude Desktop, Cursor, OpenClaw…) connects with a scoped per-agent token — see [skills/orivory](skills/orivory/SKILL.md) |
 | **📜 Access ledger** | Append-only audit log: which agent read or wrote which memory, when |

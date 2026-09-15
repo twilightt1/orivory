@@ -44,17 +44,29 @@ results.
 | `hallucination_flag_rate` | How often the LLM-as-judge flagged an answer |
 | `correction_rate` | Of the flagged ones, how many retries fixed it |
 
-### RAGAS-style metrics (with `--enable-ragas`)
+### RAGAS-style metrics (`--enable-ragas`)
 
-| Metric | What it measures |
-|--------|------------------|
-| `answer_relevancy` | Token-level overlap between answer and question |
-| `context_precision@k` | Fraction of top-k chunks that are relevant |
-| `context_recall@k` | Fraction of relevant chunks that are in top-k |
-| `faithfulness_simple` | % of answer claims supported by context |
-| `hallucination_token_rate` | % of answer tokens not grounded in context |
-| `mrr` | Mean reciprocal rank of the first relevant source |
-| `ndcg@k` | Normalized discounted cumulative gain at k |
+> **Not implemented in this repo.** `--enable-ragas` imports
+> `eval/ragas_metrics.py`, which does not exist here, so the flag is a silent
+> no-op: the report carries no `context_recall@k`, `context_precision@k`,
+> `mrr`, `ndcg@k`, `faithfulness` or `answer_relevancy` number. Do not cite
+> them as measured. What the offline run DOES compute is the core table above
+> (source-hit, keyword coverage, citation rate, fallback accuracy); LLM-judged
+> fields come only from a judge run (`eval/llm_judge.py`).
+
+### Retrieval ablation artifacts (the measured evidence)
+
+The retrieval evidence the P2 gate reads is `eval/ablation_retrieval_p2.py`
+plus its committed artifact `eval/ablation_retrieval_p2.json`: four arms
+(dense-only / lexical-only / RRF hybrid / hybrid+rerank) over a frozen
+311-row, 48-query fixture, per-slice `recall@{1,5,10}` and MRR, the enable-rule
+verdict for `RETRIEVAL_HYBRID_ENABLED` and the late-vs-full hydration verdict.
+It is **evidence at fixture scale** — read the artifact's `limitations` before
+quoting any number (the whole `+0.1042` overall recall@5 gain sits in the
+`exact_id` slice, the dense leg is exact cosine rather than Qdrant ANN, and the
+rerank stage is a local stand-in). Shape is pinned by
+`tests/retrieval/test_p2_ablation_contract.py`; the embedding-pooling ablation
+from P1b is `eval/ablation_mean_vs_cls.py` + `eval/ablation_mean_vs_cls.json`.
 
 ## The eval dataset
 
@@ -85,7 +97,9 @@ Each case has:
 
 1. **Summary table** — overall metrics
 2. **Per-case results** — each case's status + sources
-3. **RAGAS section** — when `--enable-ragas` is set
+3. **Retrieval ablation evidence** — the committed artifacts, not the
+   `--enable-ragas` flag (see "Retrieval ablation artifacts" above; that flag is
+   a no-op in this repo)
 4. **Failed cases** — anything that crossed a threshold
 5. **Recommendations** — auto-generated next steps
 

@@ -6,40 +6,62 @@ that exercise it.
 
 ---
 
-## 1. Hybrid retrieval (BM25 + dense + RRF)
+## 1. Hybrid retrieval (dense + FTS5 lexical + RRF) — opt-in, SQLite-only
 
-**Why.** BM25 excels at exact keyword / Vietnamese diacritic matches
-(e.g. `"API"`, `"rate limit"`). Dense retrieval excels at semantic
-paraphrases. Combining them via Reciprocal Rank Fusion gives the best
-of both.
+**Why.** A lexical leg excels at exact keywords, code identifiers and Vietnamese
+diacritics (`"ORIVORY-4417"`, `"hồ sơ dự án"` typed either way), where a local
+embedding model has no idea what the token *means*. Dense retrieval carries the
+semantic paraphrases. Fusing the two by Reciprocal Rank Fusion keeps both.
+
+**Status: ships OFF.** `RETRIEVAL_HYBRID_ENABLED=false` by default; only the
+T7 ablation artifact passing the signed non-inferiority gate
+(`eval/ablation_retrieval_p2.json`; no slice losing > 0.02 recall@5 vs
+dense-only, overall gain >= +0.02) may enable it, as a separate documented
+decision. On the frozen fixture the flag's arm measured **+0.1042 overall
+recall@5** with the entire gain in the `exact_id` slice — evidence at FIXTURE
+scale, with a stand-in reranker and index-global BM25 statistics, never a
+production claim (read the artifact's `limitations`).
 
 **Where.**
-- BM25: [`app/retrieval/bm25_retriever.py`](../app/retrieval/bm25_retriever.py)
-- Dense: [`app/retrieval/vector_store.py`](../app/retrieval/memory/vector_store.py)
-- RRF: [`app/retrieval/hybrid_retriever.py`](../app/retrieval/hybrid_retriever.py) (contains `reciprocal_rank_fusion` function)
+- Lexical leg (memory): [`app/retrieval/memory/lexical_index.py`](../app/retrieval/memory/lexical_index.py) — SQLite FTS5 (`memory_fts`, created by the schema ladder's v4 step; triggers maintain it in the writing transaction). SQLite-only by ruling R3: a Postgres deployment has NO lexical leg, and a vector outage there keeps the typed 503.
+- Dense leg: [`app/retrieval/memory/vector_store.py`](../app/retrieval/memory/vector_store.py)
+- Fusion: [`app/retrieval/hybrid_retriever.py`](../app/retrieval/hybrid_retriever.py) — `fuse_by_uuid` (UUID-keyed, zero-based ranks); the legacy `reciprocal_rank_fusion` dedupes by parent/content and is **not** used for memory.
+- The document/BM25 path ([`app/retrieval/bm25_retriever.py`](../app/retrieval/bm25_retriever.py), Redis parent cache) is a separate legacy leg, not the memory recall's.
 
-**Trade-off.** Slightly higher latency than dense-only (two retrievers +
-fusion), but ~30% recall improvement on Vietnamese technical terms
-(measured on the offline eval set).
+**Trade-off.** A second query per recall (the FTS5 page) plus a fusion pass —
+in-Python, and only paid when the flag is on. When the vector store is down the
+lexical leg answers ALONE (SQLite), which is the one case where the size of
+that cost is irrelevant.
 
-**Test.** `tests/rag/test_hybrid_retrieval.py::test_bm25_contributes_when_dense_fails`
+**Test.** [`tests/retrieval/test_hybrid_recall.py`](../tests/retrieval/test_hybrid_recall.py)
+(fusion order, UUID dedupe, the outage fallback, the OFF path),
+[`tests/retrieval/test_p2_ablation_contract.py`](../tests/retrieval/test_p2_ablation_contract.py)
+(the artifact's shape), and the §9 gate [`tests/retrieval/test_p2_gate.py`](../tests/retrieval/test_p2_gate.py).
 
 ---
 
 ## 2. Reciprocal Rank Fusion
 
 ```
-score(d) = Σ_i  1 / (k + rank_i(d))     # k = 60 (Cormack et al.)
+score(d) = Σ_i  1 / (k + rank_i(d) + 1)     # k = RETRIEVAL_RRF_K (default 60)
 ```
 
 **Why RRF instead of linear combination.** RRF needs no score
-calibration between retrievers (BM25 scores ≠ cosine scores). It also
-handles "the result only appears in one list" gracefully.
+calibration between retrievers (global BM25 and cosine are not comparable). It
+also handles "the result only appears in one list" gracefully.
 
-**Where.** [`app/retrieval/hybrid_retriever.py`](../app/retrieval/hybrid_retriever.py) (contains `reciprocal_rank_fusion` function)
+**Memory-specific rules.** Fusion is keyed by the canonical memory UUID
+(never content or `parent_id`: two memories with identical text stay two
+memories), ranks are ZERO-based, `k >= 1` is validated at config load, and the
+legs' own scores travel separately on each candidate — the fused order is the
+sum, never a bare cosine (a refill row appended with its raw cosine would
+outrank the whole fused head).
 
-**Test.** `tests/rag/test_rrf.py` — covers single-list inputs, equal rank, and
-overlapping docs.
+**Where.** [`app/retrieval/hybrid_retriever.py`](../app/retrieval/hybrid_retriever.py) — `fuse_by_uuid`.
+
+**Test.** [`tests/retrieval/test_hybrid_recall.py`](../tests/retrieval/test_hybrid_recall.py)
+covers single-list inputs, equal rank, the k seam, duplicate-text rows and the
+refill re-fusion.
 
 ---
 
@@ -81,20 +103,35 @@ opt-in (gated by config) because not all domains benefit from it.
 
 ---
 
-## 5. Cross-encoder reranking
+## 5. Cross-encoder reranking (opt-in)
 
-A small cross-encoder reads `(query, chunk)` pairs and re-orders the top-K
-chunks. Cheaper than re-embedding the whole corpus, and the signal is much
-stronger than cosine similarity alone.
+A cross-encoder reads `(query, chunk)` pairs and re-orders the candidate pool.
+Cheaper than re-embedding the whole corpus, and the signal is much stronger
+than cosine similarity alone.
 
-**Where.** [`app/retrieval/reranker.py`](../app/retrieval/reranker.py)
-(uses FlashRank by default)
+**Status: opt-in per deployment** (`RETRIEVAL_SEMANTIC_RERANK=false` by
+default). It is an outbound call carrying memory text, which is why the
+pipeline SQL-authorizes and re-reads every candidate BEFORE the transport sees
+it (spec §7.5/§14: no pre-ACL outbound text).
 
-**Trade-off.** ~50-150 ms added latency. We compensate by
-reranking only the **top 20** of the 50 retrieved chunks.
+**Where.** [`app/retrieval/reranker.py`](../app/retrieval/reranker.py) — the
+Jina rerank API (`jina-reranker-v2-base-multilingual`), one HTTP call bounded by
+`JINA_RERANKER_TIMEOUT_SECONDS` (default 10).
 
-**Benchmark.** See [`eval/benchmarks/reranker_benchmark.py`](../eval/README.md)
-for an NDCG/MRR harness.
+**Semantics (P2).** The window is the retrieval pool
+`top_k x RETRIEVAL_RERANK_POOL_MULTIPLIER` (signed default 2.0);
+`JINA_RERANKER_TOP_N` (default 20) is only the per-call CAP on the transport's
+answer, and the reranked head is MERGED into dense order — the served count is
+`min(top_k, eligible)` and never shrinks because rerank ran. A timeout, a
+non-2xx or a malformed body is typed (`RerankUnavailable` /
+`RerankInvalidResponse`): the answer continues in dense order, counted as
+`retrieval.rerank_failed`. A `0.0` relevance is DATA, never absence.
+
+**Test.** [`tests/retrieval/test_rerank_pool.py`](../tests/retrieval/test_rerank_pool.py)
+(pool/top_k/merge/typed failures/zero score) and the §9 gate
+[`tests/retrieval/test_p2_gate.py`](../tests/retrieval/test_p2_gate.py)
+(over real stores). The ablation's rerank arm (`eval/ablation_retrieval_p2.py`)
+measures the STAGE with a local stand-in scorer, never Jina's quality.
 
 ---
 

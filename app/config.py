@@ -364,6 +364,25 @@ class Settings(BaseSettings):
             # vector-outage fallback fuses with the flag OFF, so the typo would
             # turn the typed 503 into an unhandled 500.
             raise ValueError("RETRIEVAL_RRF_K must be >= 1")
+        # ── The P2 numeric knobs (T1/T2/T5): each one has a domain a typo can
+        # leave silently — a 0-width embed executor raises inside the first
+        # request, a negative ORT width fails far from load, a 0 cap asks the
+        # reranker transport for zero rows on every call, a non-positive pool
+        # multiplier collapses the fetch the count invariant lives on, and a
+        # non-positive timeout turns every rerank into a failure. Refuse at
+        # load (the EMBED_BATCH_SIZE/RRF_K precedent).
+        if self.EMBED_EXECUTOR_WORKERS < 1:
+            raise ValueError("EMBED_EXECUTOR_WORKERS must be >= 1")
+        if self.EMBED_ORT_INTRA_OP_THREADS < 0:
+            raise ValueError(
+                "EMBED_ORT_INTRA_OP_THREADS must be >= 0 (0 = ONNX Runtime's own default)"
+            )
+        if self.JINA_RERANKER_TOP_N < 1:
+            raise ValueError("JINA_RERANKER_TOP_N must be >= 1")
+        if self.RETRIEVAL_RERANK_POOL_MULTIPLIER <= 0:
+            raise ValueError("RETRIEVAL_RERANK_POOL_MULTIPLIER must be > 0")
+        if self.JINA_RERANKER_TIMEOUT_SECONDS <= 0:
+            raise ValueError("JINA_RERANKER_TIMEOUT_SECONDS must be > 0")
 
     def _validate_production_settings(self) -> None:
         self._require_strong_jwt_secret()

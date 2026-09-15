@@ -38,6 +38,14 @@ brain). Point Claude Desktop / Cursor / OpenClaw at
 - **No task queue** — work runs inline in the API process; a crash mid-task
   loses that task (fine: SQL is truth, and anything a write enqueued into
   `index_outbox` is replayed by the P3 drain loop on the next run).
+- **The first boot may download the embedding model.** Lite warms the local
+  ONNX session during the lifespan — a REAL inference, before the boot drain and
+  before anything is served — and on a fresh volume that means downloading
+  `snowflake-arctic-embed-xs` (~90 MB) first. That download has **no timeout**,
+  so a slow or blocked network extends boot; pre-seed the model cache (persist
+  `/data/models` or `~/.cache/orivory/e5` on the volume) when that matters.
+  `EMBED_WARMUP_ON_BOOT=false` skips the boot warm-up and pays a cold session
+  (~610-685 ms) on the first request instead.
 
 ## Full stack still exists
 
