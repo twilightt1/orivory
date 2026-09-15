@@ -180,9 +180,11 @@ by characters before the LLM call; the fallback answer is an explicit
   active manifest row it does not: `outbox.active_generation()` falls back to
   the transitional generation name with no fingerprint, an EMPTY generation is
   allowed, and reads answer `[]`. That is the state on Postgres (P1a never
-  seeded `index_generations` there) and on any install whose contract token did
-  not change. SQL stays canonical; the migration rebuilds the vectors. The
-  offline sequence — `inventory → backup → backfill → verify →
+  seeded `index_generations` there). An unchanged-contract install is empty for
+  a different reason: its row is ACTIVE and the guard passes on token equality,
+  but that row names the same pre-P1b transitional generation, whose Qdrant
+  collection is empty. SQL stays canonical; the migration rebuilds the vectors.
+  The offline sequence — `inventory → backup → backfill → verify →
   cutover`, app stopped throughout — is in
   [OPERATIONS_RUNBOOK.md](OPERATIONS_RUNBOOK.md), and the one-release swap-back
   in [ROLLBACK_P1B.md](ROLLBACK_P1B.md).

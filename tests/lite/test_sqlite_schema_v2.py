@@ -136,9 +136,9 @@ async def test_v1_install_is_upgraded_to_v2_and_backed_up(v1_db):
     assert [tuple(row) for row in chunks] == [("v1 chunk text", 1)]
     assert fk_violations == []
     assert integrity == "ok"
-    # An UPGRADE writes the two real rows INACTIVE: the install keeps serving its
-    # OLD pointer — loud (the guard rejects the pre-P1b masked-mean contract)
-    # until `migrate_qdrant.py cutover` flips it.
+    # An UPGRADE writes the two real rows INACTIVE: with no active row the
+    # fallback generation is the empty pre-P1b transitional one, so an
+    # un-migrated read answers [] — not loud — until cutover flips the pointer.
     assert {(r[0], r[1]) for r in generations} == {
         ("memory", generation_name("memory")), ("chunk", generation_name("chunk"))}
     assert not any(r[3] for r in generations), "the ladder never moves the pointer"

@@ -15,7 +15,8 @@ The loud path needs that mismatch: with NO active row the guard has nothing to
 reject — ``outbox.active_generation()`` falls back to the transitional name
 with no fingerprint, an EMPTY generation is allowed, and reads answer ``[]``.
 That is the Postgres/full-stack state (P1a never seeded ``index_generations``
-there), not this ladder's.
+there) — and this ladder's own v1→v3 path, which never had a P1a row to keep
+active.
 
 The carry item this pins (T1-M4): the old ``_seed_transitional_generation``
 re-created the ``Orivory_memories`` row on EVERY boot. The ladder writes the real

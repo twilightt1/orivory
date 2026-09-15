@@ -161,9 +161,11 @@ generation pointer says:
   generation name with no fingerprint, an EMPTY generation is deliberately
   allowed, and the read path creates/reads that generation and answers `[]`.
   P1a never seeded `index_generations` on Postgres, so an un-migrated
-  full-stack deployment serves empty vector results — and so does any install
-  whose contract token did not change (an unchanged-contract install keeps
-  serving its old vectors). SQL stays canonical in both cases; the migration
+  full-stack deployment serves empty vector results — and so does an install
+  whose contract token did not change: the guard passes on token equality, but
+  the generation it names is still the pre-P1b transitional one, whose Qdrant
+  collection is empty (the old vectors live in the retired Chroma store, which
+  the runtime cannot read). SQL stays canonical in both cases; the migration
   rebuilds the vectors, so no recall is lost permanently.
 
 > On a full-stack/Postgres or unchanged-contract install an un-migrated
