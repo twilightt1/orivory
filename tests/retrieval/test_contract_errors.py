@@ -29,8 +29,8 @@ from app.retrieval.embedding_fingerprint import (
     current_fingerprint,
     fingerprint_generation,
 )
+from app.retrieval.memory import freshness, vector_store
 from app.retrieval.memory import retriever as retriever_module
-from app.retrieval.memory import vector_store
 from app.retrieval.vector_retriever import VectorUnavailableError
 from app.utils.dependencies import enforce_llm_quota, get_current_verified_user
 
@@ -57,12 +57,19 @@ async def _zero_embedding(*_args, **_kwargs):
 
 
 @asynccontextmanager
-async def _recall_client(tmp_path):
-    """App client on a real temp-SQLite DB, with auth/quota/DB overridden."""
+async def _recall_client(tmp_path, monkeypatch):
+    """App client on a real temp-SQLite DB, with auth/quota/DB overridden.
+
+    The P3 freshness barrier reads the outbox through its OWN sessionmaker, so
+    ``freshness`` is pointed at this same real DB (empty outbox → 0 pending) —
+    otherwise the barrier's count read raises and, by ruling R14, fails closed
+    after its budget.
+    """
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 't7_contract.db'}")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     sessions = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    monkeypatch.setattr(freshness, "AsyncSessionLocal", sessions)
 
     async def _db_override():
         async with sessions() as session:
@@ -88,7 +95,7 @@ async def test_recall_endpoint_returns_503_on_contract_mismatch(tmp_path, monkey
     monkeypatch.setattr(retriever_module, "rewrite_query", _identity_rewrite)
     monkeypatch.setattr(retriever_module, "embed_query", _mismatched_embedding)
 
-    async with _recall_client(tmp_path) as client:
+    async with _recall_client(tmp_path, monkeypatch) as client:
         response = await client.post(
             "/api/v1/memories/recall", json={"query": "trace probe"}
         )
@@ -106,7 +113,7 @@ async def test_recall_endpoint_returns_503_on_vector_unavailable(tmp_path, monke
     monkeypatch.setattr(retriever_module, "embed_query", _zero_embedding)
     monkeypatch.setattr(retriever_module, "search_memories", unavailable)
 
-    async with _recall_client(tmp_path) as client:
+    async with _recall_client(tmp_path, monkeypatch) as client:
         response = await client.post(
             "/api/v1/memories/recall", json={"query": "trace probe"}
         )

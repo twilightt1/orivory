@@ -356,9 +356,11 @@ async def recall_memory(
         5. Return top_k with trace (rewritten query, entities, latency).
 
     Every step degrades gracefully (empty ``results`` plus a ``trace``),
-    with two exceptions: an embedding contract mismatch or an unreachable
-    vector store answer 503 with a typed body (``embedding_contract_mismatch``
-    / ``vector_unavailable``) — never a silent empty recall.
+    with three exceptions: an embedding contract mismatch, an unreachable
+    vector store, or a recall that waited out its freshness budget for a write
+    still in flight answer 503 with a typed body (``embedding_contract_mismatch``
+    / ``vector_unavailable`` / ``index_freshness_timeout``) — never a silent
+    empty recall.
     """
     retriever = MemoryRetriever(
         db=db,

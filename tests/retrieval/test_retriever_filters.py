@@ -44,7 +44,10 @@ class _FakeDB:
         return _FakeResult(self.rows)
 
 
-async def test_recall_hides_superseded_and_dirty(monkeypatch):
+async def test_recall_hides_superseded_and_dirty(monkeypatch, barrier_outbox):
+    # ``barrier_outbox``: the R14 freshness barrier runs first on every recall
+    # and reads its own outbox (tests/retrieval/conftest.py) — even when the
+    # retriever's DB is a fake.
     from app.retrieval.memory import retriever as R
     uid = uuid.uuid4()
     cur = _mem({}, uid=uid)
@@ -68,7 +71,7 @@ async def test_recall_hides_superseded_and_dirty(monkeypatch):
     assert out.trace.stage_ms.keys() >= {"rewrite_ms", "embed_ms", "search_ms", "hydrate_ms"}
 
 
-async def test_recall_fast_path_skips_llm(monkeypatch):
+async def test_recall_fast_path_skips_llm(monkeypatch, barrier_outbox):
     from app.retrieval.memory import retriever as R
     uid = uuid.uuid4()
     cur = _mem({}, uid=uid)

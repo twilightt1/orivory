@@ -175,7 +175,10 @@ async def test_async_search_quarantines_populated_unstamped_collection(monkeypat
 
 
 @pytest.mark.asyncio
-async def test_recall_propagates_contract_mismatch(monkeypatch):
+async def test_recall_propagates_contract_mismatch(monkeypatch, barrier_outbox):
+    # ``barrier_outbox``: the R14 freshness barrier reads its own outbox on
+    # every recall (tests/retrieval/conftest.py); this test's retriever DB is
+    # a ``SimpleNamespace``, but the barrier's is real.
     from app.retrieval.memory import retriever as retriever_module
     from app.retrieval.memory.retriever import MemoryRetriever
 
@@ -199,7 +202,7 @@ async def test_recall_propagates_contract_mismatch(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_remote_rerank_sees_only_current_sql_owned_content(monkeypatch):
+async def test_remote_rerank_sees_only_current_sql_owned_content(monkeypatch, barrier_outbox):
     from datetime import UTC, datetime
 
     from app.models.memory import Memory

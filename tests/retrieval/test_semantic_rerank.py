@@ -61,11 +61,13 @@ def _fake_vector_search(cands):
 
 
 @pytest.fixture()
-def recall_env(monkeypatch):
+def recall_env(monkeypatch, barrier_outbox):
     """Wire a working recall path without any external service.
 
     The retriever takes user_id directly (no principal) — returns it for
-    the tests to build the retriever with.
+    the tests to build the retriever with. ``barrier_outbox`` gives recall's
+    R14 freshness barrier a real (empty) outbox to count: this suite fakes the
+    retriever's DB, but the barrier reads its own — see tests/retrieval/conftest.py.
     """
     uid = uuid.uuid4()
 
