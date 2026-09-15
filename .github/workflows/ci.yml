@@ -100,6 +100,24 @@ jobs:
           python -m pytest --confcutdir=tests/retrieval tests/retrieval/test_drain_loop.py tests/retrieval/test_freshness_barrier.py tests/retrieval/test_drain_races.py tests/retrieval/test_p3_gate.py -q
           python -m pytest --confcutdir=tests/rag tests/rag/test_pipeline_purge_fence.py -q
 
+      - name: Run P2 retrieval/hybrid suites (temp SQLite, no services)
+        env:
+          # Same discipline as the P1a/P1b/P3 steps above: every module here
+          # opens its own private SQLite file + private embedded-Qdrant folder
+          # (the P1b gate's store, reused as a plugin), so no compose service is
+          # involved. Explicit paths on purpose — a new suite never runs unless
+          # it is listed. The P2 gate itself is tests/retrieval/test_p2_gate.py
+          # (§9 acceptance row); the last line is the batch of retrieval /
+          # observability suites that had no CI step of their own before P2,
+          # and the event-loop heartbeat + ablation-contract modules carry
+          # their own cold-cache guards (arctic onnx cache missing → skip).
+          DATABASE_URL: sqlite+aiosqlite:////tmp/p2_ci.db
+        run: |
+          python -m pytest --confcutdir=tests/retrieval tests/retrieval/test_p2_gate.py tests/retrieval/test_rerank_pool.py tests/retrieval/test_hybrid_recall.py -q
+          python -m pytest --confcutdir=tests/retrieval tests/retrieval/test_event_loop_responsiveness.py tests/retrieval/test_p2_ablation_contract.py -q
+          python -m pytest --confcutdir=tests/retrieval tests/retrieval/test_semantic_rerank.py tests/retrieval/test_p0_final_safety.py tests/retrieval/test_retriever_filters.py tests/retrieval/test_e5_local.py tests/retrieval/test_embedding_fingerprint.py tests/retrieval/test_vector_degradation.py tests/retrieval/test_xs_parity.py -q
+          python -m pytest --confcutdir=tests/observability tests/observability -q
+
       - name: Run P1b mean-vs-CLS ablation (evidence artifact, never a gate)
         env:
           # An empty model dir on purpose: the script SKIPs (exit 0) instead of
@@ -108,6 +126,20 @@ jobs:
           # eval/ablation_mean_vs_cls.json, produced on a machine with the cache.
           LOCAL_E5_DIR: /tmp/orivory-ablation-models
         run: python eval/ablation_mean_vs_cls.py
+
+      - name: Run P2 retrieval ablation + its contract test
+        # Never a gate: the artifact is the evidence, the contract test pins its
+        # SHAPE (arms/slices/verdicts), and the script itself refuses to
+        # download the ~90MB arctic ONNX on a cold runner — so the step runs it
+        # when the cache is warm and says why it skipped when it is not. Before
+        # P2 this script and its contract test appeared in no CI step at all.
+        run: |
+          python -m pytest --confcutdir=tests/retrieval tests/retrieval/test_p2_ablation_contract.py -q
+          if python -c "from app.retrieval import e5_local; raise SystemExit(0 if e5_local.arctic_files_cached() else 1)"; then
+            python eval/ablation_retrieval_p2.py
+          else
+            echo "arctic artifacts not cached → the ablation SKIPS; eval/ablation_retrieval_p2.json is the committed evidence"
+          fi
 
       - name: Run benchmark unit tests (DB-free)
         run: python -m pytest --confcutdir=tests/benchmarks tests/benchmarks -q
@@ -250,7 +282,10 @@ jobs:
       EMBED_BATCH_SIZE: "64"
       JINA_API_KEY: test-jina-key
       JINA_RERANKER_MODEL: jina-reranker-v2-base-multilingual
-      JINA_RERANKER_TOP_N: "5"
+      # R13: the per-call CAP, kept at the shipped default — CI is not a
+      # deployment, and a pre-R13 5 here is the same stale default the
+      # example files carried.
+      JINA_RERANKER_TOP_N: "20"
       EVALUATOR_FAILURE_MODE: warn_only
       RATE_LIMIT_PER_MINUTE: "600"
       RATE_LIMIT_PER_DAY: "10000"
@@ -348,7 +383,10 @@ jobs:
       EMBED_BATCH_SIZE: "64"
       JINA_API_KEY: test-jina-key
       JINA_RERANKER_MODEL: jina-reranker-v2-base-multilingual
-      JINA_RERANKER_TOP_N: "5"
+      # R13: the per-call CAP, kept at the shipped default — CI is not a
+      # deployment, and a pre-R13 5 here is the same stale default the
+      # example files carried.
+      JINA_RERANKER_TOP_N: "20"
       EVALUATOR_FAILURE_MODE: warn_only
       RATE_LIMIT_PER_MINUTE: "600"
       RATE_LIMIT_PER_DAY: "10000"

@@ -20,6 +20,11 @@ Ruling R6(p2) fixes the contract: ``max < 30 ms`` and ``p99 < 15 ms``, with the
 model warmed BEFORE the ticker starts (a cold ``InferenceSession`` is boot's
 cost, not a request's).
 
+EVERY test in this module builds the real arctic session, so the whole module
+carries the house guard (R15/C3): with a warm cache it runs, on a cold cache it
+skips cleanly instead of making CI download ~90 MB of ONNX. That is why T8
+CI-wires the module without a per-claim decorator on each test.
+
 The second test pins the other half of "bounded": the barrier's
 ``asyncio.wait_for`` must really PREEMPT an offloaded drain. Before P2 the drain
 ran inline, so a slow embedding held the barrier — and the whole loop — until
@@ -71,6 +76,15 @@ P99_LAG_MS = 15.0
 TICK_MS = 2.0
 DRAIN_DOCS = 50  # the default drain batch: the batch the barrier drains on recall
 INGEST_DOCS = 50
+
+# The house guard for an artifact-bound module (R15; T1 review C3 → T8): every
+# claim below embeds with the real arctic ONNX session, so a cold cache SKIPS
+# instead of downloading. This is strictly broader than the per-test guard the
+# RYW claim below used to carry — it can skip more, never less.
+pytestmark = pytest.mark.skipif(
+    not e5_local.arctic_files_cached(),
+    reason="arctic onnx cache missing — run local, do not download in CI",
+)
 
 QUERY = "what did i see on the walk at dusk"
 
@@ -375,10 +389,6 @@ async def test_the_barrier_wait_for_bounds_an_offloaded_drain(store, monkeypatch
 # ── 3. the signed RYW budget at the recall-ALONE shape (T1 review F1 → C1) ──
 
 
-@pytest.mark.skipif(
-    not e5_local.arctic_files_cached(),
-    reason="arctic onnx cache missing — run local, do not download in CI",
-)
 async def test_a_50_intent_backlog_drains_inside_the_signed_read_your_writes_budget(store):
     """C1/F1: recall ALONE drains the default 50-intent backlog inside 2.0 s.
 
@@ -389,8 +399,8 @@ async def test_a_50_intent_backlog_drains_inside_the_signed_read_your_writes_bud
     what makes this number a real one). The concurrent three-leg shape above
     keeps its own, test-local budget; this is the release contract.
 
-    Guarded like the gate's latency test (R15): the drain needs the cached
-    arctic artifacts, so a cold cache SKIPS instead of downloading in CI.
+    Guarded by the module's own house guard (R15, above): the drain needs the
+    cached arctic artifacts, so a cold cache SKIPS instead of downloading.
     """
     assert settings.RECALL_FRESHNESS_BUDGET_SECONDS == 2.0  # the signed budget
     await warmup_embedder()
