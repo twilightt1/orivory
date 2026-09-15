@@ -15,7 +15,9 @@ Design rules:
     implementation (ruling R22(p2)) — while keeping its own index-only payload.
     The recall's typed readiness errors (freshness barrier timeout, vector
     outage) degrade to the SQL ordering at this boundary instead of becoming a
-    5xx the MCP host cannot parse (ruling R23(p2)).
+    5xx the MCP host cannot parse (ruling R23(p2)); so does a degraded leg
+    that would otherwise be served as a confident ``results: []`` (embed
+    outage, untyped store failure — ruling R25(p2)).
 """
 from __future__ import annotations
 
@@ -135,10 +137,16 @@ def _ledger_entry(
 async def _sql_recall_ids(principal: AgentPrincipal, limit: int) -> list[tuple[UUID, float]]:
     """The SQL ordering: salience desc, then captured_at desc.
 
-    The pre-P2 body of the seam, kept as the R23(p2) fallback when the recall
-    path cannot answer. Dirty rows are filtered before the LIMIT so they
+    The pre-P2 body of the seam, kept as the R23(p2)/R25(p2) fallback when the
+    recall path cannot answer. Dirty rows are filtered before the LIMIT so they
     cannot consume capped candidate slots; superseded rows stay eligible
     (history widening happens at the hydration step).
+
+    The score half of each pair is the row's RAW salience, NOT the recall's
+    fused/decayed score — the two orderings' numbers live on different scales.
+    Only the ids (the ordering itself) are consumed downstream today, so the
+    mismatch is invisible; never start comparing these scores with the healthy
+    path's.
     """
     async with _session() as db:
         rows = (
@@ -162,9 +170,13 @@ async def _recall_memory_ids(query: str, limit: int) -> list[tuple[UUID, float]]
     Ruling R23(p2): the recall's typed readiness errors are caught HERE, at the
     tool boundary, and the call answers from the SQL ordering instead — a tool
     call must never become a 5xx the MCP host cannot parse (MCP had no barrier
-    before this wiring; it must not gain one's 503 semantics). The embedding
-    contract mismatch is NOT caught: it is a data-integrity failure and keeps
-    raising its typed error, like every other tool here.
+    before this wiring; it must not gain one's 503 semantics). Ruling R25(p2):
+    a DEGRADED leg that surfaces no error (embed outage, untyped store
+    failure) gets the same treatment when the order it produced is empty —
+    the seam's ``degraded_reason`` is the discriminator, never the empty list.
+    The embedding contract mismatch is NOT caught by any clause here: it is a
+    data-integrity failure and keeps raising its typed error, like every other
+    tool in this module.
 
     Tests monkeypatch this function and return ``[(memory_id, score), ...]``
     pairs.
@@ -174,18 +186,27 @@ async def _recall_memory_ids(query: str, limit: int) -> list[tuple[UUID, float]]
         return []
     try:
         async with _session() as db:
-            return await MemoryRetriever(db, principal.user_id).recall_ids(
-                query, top_k=limit
-            )
-    except EmbeddingDimensionMismatch:
-        raise
+            recalled, degraded_reason = await MemoryRetriever(
+                db, principal.user_id
+            ).recall_ids(query, top_k=limit)
     except (IndexFreshnessTimeout, VectorUnavailableError) as exc:
         count_fallback(SQL_FALLBACK_PATH)
         log.warning(
             "MCP search answered from the SQL ordering: %s: %s",
             type(exc).__name__, exc,
         )
-    return await _sql_recall_ids(principal, limit)
+        return await _sql_recall_ids(principal, limit)
+    if degraded_reason is not None and not recalled:
+        # R25(p2): the recall degraded a leg and served nothing — an
+        # infrastructure failure, not a no-match. The caller must not read that
+        # as "no memories matched": same escape as the typed errors above, same
+        # counter, one ledger row downstream. A NON-empty order from a
+        # partially degraded pipeline is the recall's answer and is served
+        # as-is (that is the ordering the API would serve).
+        count_fallback(SQL_FALLBACK_PATH)
+        log.warning("MCP search answered from the SQL ordering: %s", degraded_reason)
+        return await _sql_recall_ids(principal, limit)
+    return recalled
 
 
 async def search_memory(query: str, limit: int = 8, include_history: bool = False) -> dict[str, Any]:
@@ -200,8 +221,10 @@ async def search_memory(query: str, limit: int = 8, include_history: bool = Fals
     Ranking is the shared recall's (ruling R22(p2)): the caller's tenant, the
     same dense/hybrid/lexical semantics as the API, inherited from the
     deployment's flags. ``include_history`` widens to superseded rows here;
-    with the recall path down (freshness barrier, vector outage) the answer
-    falls back to the SQL ordering instead of failing (ruling R23(p2)).
+    with the recall path down (freshness barrier, vector outage) or a leg
+    degraded (embed outage, store failure), the answer falls back to the SQL
+    ordering instead of failing or reading as an empty match (rulings
+    R23(p2)/R25(p2)).
     """
     principal = _current_principal()
     if principal is None:

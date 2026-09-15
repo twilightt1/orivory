@@ -12,6 +12,7 @@ all four states, a two-key precedence row, and an empty ``extra_metadata``.
 from __future__ import annotations
 
 import json
+import math
 import uuid
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -26,6 +27,7 @@ from sqlalchemy.pool import NullPool
 
 from app import database
 from app.api.v1.memories import list_memories
+from app.config import settings
 from app.database import Base
 from app.mcp_hub import tools as hub_tools
 from app.mcp_hub.identity import AgentPrincipal
@@ -389,7 +391,10 @@ async def test_mcp_search_ranks_by_the_shared_recall_semantics(
     out = await hub_tools.search_memory("semantic query")
 
     assert [r["id"] for r in out["results"]] == [str(semantic.id), str(salient.id)]
-    assert store.calls == [16], "the retriever's pool for top_k=8, not a SQL select"
+    # The pool for the tool's default limit=8, through the retriever's own
+    # rule — derived from settings, never hard-bound to 2.0 x 8.
+    pool = max(8, math.ceil(8 * settings.RETRIEVAL_RERANK_POOL_MULTIPLIER))
+    assert store.calls == [pool], "the retriever's pool, not a SQL select"
 
 
 async def test_mcp_search_tenant_isolated_even_when_foreign_ranks_best(
@@ -505,6 +510,111 @@ async def test_mcp_search_vector_outage_falls_back_to_sql_ordering(
     assert "error" not in out
     assert [r["id"] for r in out["results"]] == [str(salient.id), str(quiet.id)]
     assert fallback_counts()[hub_tools.SQL_FALLBACK_PATH] == 1
+
+
+async def test_mcp_search_fallback_serves_history_from_the_sql_order(
+    db, monkeypatch, recall_seams
+):
+    """M1: the fallback x ``include_history=True`` interaction — the widened
+    superseded row is served (history is the caller's ask) and it ranks by its
+    SALIENCE, because the served order is the SQL one; dirty rows never widen
+    in, on either call."""
+    owner = await _owner(db)
+    current = _aged(owner, "current", salience=0.30)
+    superseded = _aged(owner, "superseded", salience=0.95, meta={CM_SUPERSEDED_BY: "s"})
+    dirty = _aged(owner, "dirty", salience=0.99, meta={CM_DERIVED_DIRTY: True})
+    db.add_all([current, superseded, dirty])
+    await db.commit()
+    _as_reader(monkeypatch, owner)
+
+    async def _timeout(**_kwargs):
+        raise IndexFreshnessTimeout("pending writes")
+
+    monkeypatch.setattr(rmod, "await_freshness", _timeout)
+    _serve(monkeypatch, _Dense([]))  # never reached: the barrier raises first
+    reset_fallback_counts()
+
+    plain = await hub_tools.search_memory("body")
+    assert [r["id"] for r in plain["results"]] == [str(current.id)]
+
+    history = await hub_tools.search_memory("body", include_history=True)
+    assert [r["id"] for r in history["results"]] == [str(superseded.id), str(current.id)]
+    assert [r["state"] for r in history["results"]] == ["superseded", "current"]
+    assert fallback_counts()[hub_tools.SQL_FALLBACK_PATH] == 2
+
+
+async def test_mcp_search_embed_outage_falls_back_to_sql_ordering(
+    db, monkeypatch, recall_seams
+):
+    """R25(p2): the embed leg's outage is a degraded leg, not a no-match — the
+    seam says WHY the order is empty and the tool answers from the SQL
+    ordering instead of a confident ``results: []``."""
+    owner = await _owner(db)
+    salient = _aged(owner, "salient", salience=0.90)
+    quiet = _aged(owner, "quiet", salience=0.20)
+    db.add_all([salient, quiet])
+    await db.commit()
+    _as_reader(monkeypatch, owner)
+
+    async def _embed_down(_query):
+        raise ValueError("Failed to get embeddings: provider unreachable")
+
+    monkeypatch.setattr(rmod, "embed_query", _embed_down)
+    # Never reached: with no query vector the dense leg cannot run, and the
+    # page below would serve quiet first if it somehow did.
+    _serve(monkeypatch, _Dense([(quiet.id, 0.99)]))
+    reset_fallback_counts()
+
+    out = await hub_tools.search_memory("body")
+
+    assert "error" not in out
+    assert [r["id"] for r in out["results"]] == [str(salient.id), str(quiet.id)]
+    assert fallback_counts()[hub_tools.SQL_FALLBACK_PATH] == 1
+
+
+async def test_mcp_search_store_failure_falls_back_to_sql_ordering(
+    db, monkeypatch, recall_seams
+):
+    """R25(p2): the untyped ``search_memories`` failure gets the same shape —
+    an infrastructure failure must not be served as a no-match either."""
+    owner = await _owner(db)
+    salient = _aged(owner, "salient", salience=0.90)
+    quiet = _aged(owner, "quiet", salience=0.20)
+    db.add_all([salient, quiet])
+    await db.commit()
+    _as_reader(monkeypatch, owner)
+
+    async def _boom(_embedding, *, user_id, top_k=10, where=None):
+        raise RuntimeError("pgvector connection reset")
+
+    monkeypatch.setattr(rmod, "search_memories", _boom)
+    reset_fallback_counts()
+
+    out = await hub_tools.search_memory("body")
+
+    assert "error" not in out
+    assert [r["id"] for r in out["results"]] == [str(salient.id), str(quiet.id)]
+    assert fallback_counts()[hub_tools.SQL_FALLBACK_PATH] == 1
+
+
+async def test_mcp_search_genuine_no_match_stays_empty(db, monkeypatch, recall_seams):
+    """The discriminator is the leg state, never an empty list: the real
+    retriever on a healthy dense leg that matched nothing returns ``[]`` and
+    the SQL ordering is NOT consulted (the row below would win any SQL order)."""
+    owner = await _owner(db)
+    row = _aged(owner, "unrelated", salience=0.99)
+    db.add(row)
+    await db.commit()
+    _as_reader(monkeypatch, owner)
+    store = _Dense([])  # the dense leg ran and matched nothing
+    _serve(monkeypatch, store)
+    reset_fallback_counts()
+
+    out = await hub_tools.search_memory("body")
+
+    assert store.calls, "the healthy dense leg really ran"
+    assert out["results"] == []
+    assert fallback_counts().get(hub_tools.SQL_FALLBACK_PATH, 0) == 0
 
 
 async def test_mcp_timeline_labels_every_row(db, monkeypatch):

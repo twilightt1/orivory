@@ -118,6 +118,12 @@ class MemoryRetriever:
         # The RRF constant (ruling R11b(p2)); a seam so a test and the T7
         # ablation can pin a k without moving the deployment global.
         self.rrf_k = settings.RETRIEVAL_RRF_K if rrf_k is None else rrf_k
+        # R25(p2): WHY an empty served order is empty. ``None`` means every leg
+        # that ran answered — an empty result is then a genuine no-match, and
+        # no caller may swap in a different ordering for it. Set by the two
+        # degraded legs (embed failure, untyped store failure); read by
+        # ``recall_ids``, which is the surface that has to tell the difference.
+        self.degraded_reason: str | None = None
 
     # ── main entry point ─────────────────────────────────────────────────
 
@@ -137,6 +143,9 @@ class MemoryRetriever:
         rows stay hidden either way — never a served row, on any surface.
         """
         t0 = time.perf_counter()
+        # R25(p2): this call's answer only — a reused instance must not carry a
+        # previous call's degraded leg into an empty-but-healthy result.
+        self.degraded_reason = None
         stage_ms: dict[str, float] = dict.fromkeys(RECALL_TRACE_ZERO_KEYS, 0.0)
         # The candidate counters (T3): each key is written where its leg
         # produces a REAL number — never pre-filled, so an absent key means
@@ -213,6 +222,9 @@ class MemoryRetriever:
             stage_ms["embed_ms"] = embed_ms
             stage_ms["embed_compute"] = embed_ms
         if embed_error is not None:
+            # R25(p2): an empty order for THIS reason is not a no-match; the
+            # MCP seam surfaces the reason so the boundary can fall back.
+            self.degraded_reason = f"embedding_failed:{embed_error}"
             return self._empty_response(
                 query, rewritten, entities, llm_fallback, llm_reasoning,
                 context if include_personal_context else None,
@@ -271,6 +283,12 @@ class MemoryRetriever:
             counts["lexical"] = len(lexical_rows)
             dense_down = True
         except Exception as e:
+            # R25(p2): the store failed without a typed signal. The answer
+            # below can only be empty for an infrastructure reason — never a
+            # no-match — so the failed leg is recorded for the MCP seam. (With
+            # hybrid on, the lexical leg may still fill the pool; the seam's
+            # caller only falls back when the served order ends up empty.)
+            self.degraded_reason = f"search_failed:{type(e).__name__}"
             log.error("search_memories failed", extra={"error": str(e)})
         finally:
             stage_ms["search_ms"] = (time.perf_counter() - t_search) * 1000.0
@@ -678,7 +696,7 @@ class MemoryRetriever:
 
     async def recall_ids(
         self, query: str, top_k: int = 10
-    ) -> list[tuple[UUID, float]]:
+    ) -> tuple[list[tuple[UUID, float]], str | None]:
         """The ranked-ids view of :py:meth:`recall` — the shared id seam.
 
         Ruling R22(p2): the MCP hub serves the SAME ordering this class
@@ -686,6 +704,12 @@ class MemoryRetriever:
         re-implementing a second ranking. No personal-context block (the MCP
         payload has none) and superseded rows stay ELIGIBLE: that surface
         widens to them at hydration when its caller asks for history.
+
+        Ruling R25(p2): the second half is WHY the first is empty, when empty
+        for an infrastructure reason — the name of the failed leg (embed
+        outage, untyped store failure), or ``None`` when every leg that ran
+        answered. ``None`` with an empty list is a GENUINE no-match: the
+        discriminator is this leg state, never the empty list itself.
         """
         response = await self.recall(
             query,
@@ -693,7 +717,10 @@ class MemoryRetriever:
             include_personal_context=False,
             include_superseded=True,
         )
-        return [(UUID(str(r.id)), float(r.score)) for r in response.results]
+        return (
+            [(UUID(str(r.id)), float(r.score)) for r in response.results],
+            self.degraded_reason,
+        )
 
     # ── helpers ─────────────────────────────────────────────────────────
 

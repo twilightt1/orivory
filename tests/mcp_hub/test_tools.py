@@ -76,7 +76,12 @@ class _FakeDB:
         return None
 
     async def execute(self, _stmt):
-        return _FakeResult(self.rows)
+        # Mirror the statement's ORDER BY salience desc (the ordering the SQL
+        # fallback serves) instead of ignoring it: a fallback test can then
+        # seed rows in a DIFFERENT order and still assert the order the real
+        # statement produces. Stable, so equal saliences keep insertion order.
+        rows = sorted(self.rows, key=lambda row: -(getattr(row, "salience", 0.0) or 0.0))
+        return _FakeResult(rows)
 
     def add(self, obj):
         self.added.append(obj)
@@ -109,8 +114,13 @@ def _fake_recall(ids):
     return _recall
 
 
-def _stub_retriever(ids, *, error=None):
-    """Stands in for ``MemoryRetriever``: only ``recall_ids`` is on the seam."""
+def _stub_retriever(ids, *, error=None, degraded=None):
+    """Stands in for ``MemoryRetriever``: only ``recall_ids`` is on the seam.
+
+    ``recall_ids`` answers ``(ids, degraded_reason)`` (R25(p2)): ``degraded``
+    is the name of the failed leg when the served order is empty for an
+    infrastructure reason, ``None`` when every leg that ran answered.
+    """
     seen: dict = {}
 
     class _Stub:
@@ -122,7 +132,7 @@ def _stub_retriever(ids, *, error=None):
             seen["top_k"] = top_k
             if error is not None:
                 raise error
-            return [(mid, 0.9) for mid in ids]
+            return ([(mid, 0.9) for mid in ids], degraded)
 
     return _Stub, seen
 
@@ -460,9 +470,13 @@ async def test_search_barrier_timeout_falls_back_to_sql_order(reader, monkeypatc
     """R23(p2): the barrier's typed timeout never becomes a tool error — the
     call is answered from the SQL ordering, ledger and payload unchanged."""
     p, db = reader
-    first = _memory_row(uuid.uuid4(), p.user_id)
-    second = _memory_row(uuid.uuid4(), p.user_id)
-    db.rows = [first, second]
+    salient = _memory_row(uuid.uuid4(), p.user_id)
+    quiet = _memory_row(uuid.uuid4(), p.user_id)
+    quiet.salience = 0.2
+    # Seeded in the REVERSE of the SQL ordering: the fake applies the
+    # statement's salience-desc order, so the assertion below discriminates
+    # (equal saliences only ever pinned insertion order).
+    db.rows = [quiet, salient]
     stub, _ = _stub_retriever([], error=IndexFreshnessTimeout("pending writes"))
     monkeypatch.setattr(hub_tools, "MemoryRetriever", stub)
     reset_fallback_counts()
@@ -470,7 +484,7 @@ async def test_search_barrier_timeout_falls_back_to_sql_order(reader, monkeypatc
     out = await hub_tools.search_memory("q")
 
     assert "error" not in out
-    assert [r["id"] for r in out["results"]] == [str(first.id), str(second.id)]
+    assert [r["id"] for r in out["results"]] == [str(salient.id), str(quiet.id)]
     assert fallback_counts()[hub_tools.SQL_FALLBACK_PATH] == 1
     ledger = [o for o in db.added if type(o).__name__ == "MemoryAccessLog"]
     assert len(ledger) == 1 and ledger[0].detail["returned"] == 2
@@ -502,3 +516,70 @@ async def test_search_embedding_contract_mismatch_still_raises(reader, monkeypat
 
     with pytest.raises(EmbeddingDimensionMismatch):
         await hub_tools.search_memory("q")
+
+
+async def test_search_embed_outage_falls_back_to_sql_order(reader, monkeypatch):
+    """R25(p2): a degraded embed leg is not a confident ``results: []`` — the
+    seam names the failed leg and the SQL ordering answers instead, exactly
+    like the two typed readiness paths (same counter, same ledger row)."""
+    p, db = reader
+    salient = _memory_row(uuid.uuid4(), p.user_id)
+    quiet = _memory_row(uuid.uuid4(), p.user_id)
+    quiet.salience = 0.2
+    db.rows = [quiet, salient]  # reverse of the SQL ordering the fake applies
+    stub, _ = _stub_retriever([], degraded="embedding_failed:RuntimeError")
+    monkeypatch.setattr(hub_tools, "MemoryRetriever", stub)
+    reset_fallback_counts()
+
+    out = await hub_tools.search_memory("q")
+
+    assert "error" not in out
+    assert [r["id"] for r in out["results"]] == [str(salient.id), str(quiet.id)]
+    assert fallback_counts()[hub_tools.SQL_FALLBACK_PATH] == 1
+    ledger = [o for o in db.added if type(o).__name__ == "MemoryAccessLog"]
+    assert len(ledger) == 1 and ledger[0].detail["returned"] == 2
+
+
+async def test_search_genuine_no_match_is_not_replaced(reader, monkeypatch):
+    """The discriminator is the leg state, never an empty list: a healthy
+    recall that matched nothing stays ``[]`` — the SQL ordering answers a
+    degraded leg, it is not a second-chance ranking for a no-match."""
+    p, db = reader
+    db.rows = [_memory_row(uuid.uuid4(), p.user_id)]
+    stub, _ = _stub_retriever([], degraded=None)
+    monkeypatch.setattr(hub_tools, "MemoryRetriever", stub)
+
+    async def _tripwire(*_args, **_kwargs):
+        raise AssertionError("a genuine no-match must not reach the SQL ordering")
+
+    monkeypatch.setattr(hub_tools, "_sql_recall_ids", _tripwire)
+    reset_fallback_counts()
+
+    out = await hub_tools.search_memory("q")
+
+    assert "error" not in out
+    assert out["results"] == []
+    assert fallback_counts().get(hub_tools.SQL_FALLBACK_PATH, 0) == 0
+
+
+async def test_search_degraded_leg_with_an_answer_is_served(reader, monkeypatch):
+    """The fallback is for an EMPTY order: a partially degraded pipeline that
+    still ranked rows (e.g. the lexical leg filling the pool) serves the
+    recall's own answer — the one the API would serve — not the SQL ordering."""
+    p, db = reader
+    semantic = _memory_row(uuid.uuid4(), p.user_id)
+    semantic.salience = 0.05  # salience says LAST, like the healthy-path test
+    db.rows = [semantic]
+    stub, _ = _stub_retriever([semantic.id], degraded="search_failed:RuntimeError")
+    monkeypatch.setattr(hub_tools, "MemoryRetriever", stub)
+
+    async def _tripwire(*_args, **_kwargs):
+        raise AssertionError("a served order must not be replaced by the SQL one")
+
+    monkeypatch.setattr(hub_tools, "_sql_recall_ids", _tripwire)
+    reset_fallback_counts()
+
+    out = await hub_tools.search_memory("q")
+
+    assert [r["id"] for r in out["results"]] == [str(semantic.id)]
+    assert fallback_counts().get(hub_tools.SQL_FALLBACK_PATH, 0) == 0
