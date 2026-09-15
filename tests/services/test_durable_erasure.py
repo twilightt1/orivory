@@ -287,6 +287,9 @@ async def test_vector_store_delete_reports_failure(monkeypatch):
         async def delete(self, **_kwargs):
             return None
 
+        async def retrieve(self, **_kwargs):
+            return []  # absence read back (R17): the delete confirmed itself
+
     async def _up(_dim):
         return _Client(), "generation", None
 

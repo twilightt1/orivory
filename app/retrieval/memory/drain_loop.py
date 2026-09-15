@@ -19,6 +19,7 @@ import structlog
 
 from app.config import settings
 from app.retrieval.memory.outbox import drain_pending
+from app.services.erasure_service import reconcile_erasure_receipts
 
 log = structlog.get_logger()
 
@@ -69,13 +70,30 @@ async def drain_once(*, batch_size: int) -> dict:
         return await drain_pending(batch_size=batch_size)
 
 
+async def _reconcile_after_drain() -> None:
+    """Re-verify open erasure receipts after a round that landed work (R15/R16).
+
+    Opportunistic and bounded (50, open receipts only): the request-path
+    freshness barrier drains through :func:`drain_once` and must not pay for
+    this scan, so it lives on the loop. Never fatal — a reconcile failure must
+    not stop the drain.
+    """
+    try:
+        report = await reconcile_erasure_receipts()
+        if report["checked"]:
+            log.info("erasure receipts reconciled", **report)
+    except Exception as e:  # the loop must outlive any failure
+        log.warning("erasure receipt reconcile failed", error=str(e))
+
+
 async def run_drain_loop(*, interval: float, batch_size: int, stop: asyncio.Event) -> None:
     """Drain the outbox until ``stop`` is set. Never raises out of itself.
 
     A batch that applied anything is followed immediately by the next one (a
-    backlog drains at full speed); an idle batch then waits out ``interval`` or
-    wakes for the stop flag, whichever comes first. Every round logs its counts;
-    a drain-level error is a warning and the round after it runs as usual.
+    backlog drains at full speed) and by the erasure-receipt reconcile pass; an
+    idle batch then waits out ``interval`` or wakes for the stop flag, whichever
+    comes first. Every round logs its counts; a drain-level error is a warning
+    and the round after it runs as usual.
     """
     while not stop.is_set():
         try:
@@ -86,6 +104,8 @@ async def run_drain_loop(*, interval: float, batch_size: int, stop: asyncio.Even
             log.warning("outbox drain failed", error=str(e))
             applied = 0
         if applied:
+            # A landed batch is where a receipt's owed deletes get satisfied.
+            await _reconcile_after_drain()
             continue  # there may be more work right now: don't wait the interval
         try:
             await asyncio.wait_for(stop.wait(), timeout=interval)

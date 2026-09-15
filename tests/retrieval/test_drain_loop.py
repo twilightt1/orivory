@@ -237,6 +237,7 @@ async def test_a_productive_batch_drains_deep_without_waiting_the_interval(monke
     """``applied > 0`` means more work is likely: the next batch goes immediately."""
     reports = [1, 0]
     calls: list[int] = []
+    reconciled: list[int] = []
 
     async def fake_drain(*, batch_size):
         calls.append(batch_size)
@@ -248,7 +249,14 @@ async def test_a_productive_batch_drains_deep_without_waiting_the_interval(monke
             "failed": 0,
         }
 
+    async def fake_reconcile(**kwargs):
+        reconciled.append(1)
+        return {"checked": 0, "upgraded": 0, "still_unverified": 0}
+
     monkeypatch.setattr(drain_loop, "drain_pending", fake_drain)
+    # A productive round also triggers the erasure-receipt reconcile (R15); that
+    # pass owns its own suite, so it is stubbed here: this test pins the cadence.
+    monkeypatch.setattr(drain_loop, "reconcile_erasure_receipts", fake_reconcile)
     stop = asyncio.Event()
     task = asyncio.create_task(
         drain_loop.run_drain_loop(interval=30.0, batch_size=7, stop=stop)
@@ -260,6 +268,7 @@ async def test_a_productive_batch_drains_deep_without_waiting_the_interval(monke
         stop.set()
         await asyncio.wait_for(task, timeout=5)
     assert calls == [7, 7]  # the batch size is forwarded, and no 30s wait between them
+    assert reconciled == [1]  # once, after the productive round only
 
 
 async def test_a_drain_exception_is_logged_and_the_loop_keeps_going(env, owner, monkeypatch):
