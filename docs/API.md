@@ -2864,6 +2864,8 @@ Rollup precedence: `completed_with_errors` > `completed_with_residual` > `comple
 
 `vector_residual_checked: false` means the vector-store re-query was unavailable during verification (the DB delete still succeeded — Postgres is the source of truth). A `false` flag alone does not imply residual data.
 
+**Reconciliation.** Open receipts (`completed_unverified`) are re-checked by the reconcile pass (`POST /admin/erasure/reconcile`), OLDEST first (`created_at ASC`, ties broken by id; at most 200 per pass — FIFO, so a sustained erase load cannot starve an old receipt out of the window). A pass that reads the index clean rewrites the SAME receipt to `completed` with the re-verified evidence. A pass that still finds residual vectors does NOT relabel the receipt: it records what it observed in `detail` (`vector_residual_checked: true`, `vector_residual: [...]`) and leaves `status` alone, so the receipt stays open and re-checkable by a later pass — never frozen into the terminal `completed_with_residual`. A pass whose readback failed observed nothing and writes nothing at all: the receipt is byte-identical afterwards. The pass is upgrade-only: `completed`, `completed_with_residual` and `completed_with_errors` receipts are not even scanned, and no open receipt is ever downgraded.
+
 ### GET /api/v1/erasure-receipts
 
 List the current user's receipts, newest first.

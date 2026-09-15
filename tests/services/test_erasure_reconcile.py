@@ -10,6 +10,12 @@ Red-first (brief cases a-d):
   scanned;
 - (d) a receipt that recorded a residual keeps its ``*_with_residual`` status.
 
+Fix round 1 adds the pins the review asked for: the outage branch that is the
+ONLY thing between a Qdrant outage and a receipt stamped ``completed`` (I1),
+the residual observation written into an open receipt's detail (R19/M7), FIFO
+ordering + the scan window (M4/R20), a commit per receipt (M3) and a readback
+face that honours the ids it asks about (M8).
+
 The vector store is the only monkeypatched seam (the ``test_durable_erasure``
 pattern): every DB assertion below runs against the real service, sessions and
 outbox on this package's private temp SQLite file.
@@ -19,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import uuid
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -51,6 +58,33 @@ async def _receipt(receipt_id: uuid.UUID) -> ErasureReceipt:
     """Read one receipt back through a FRESH session (no identity-map staleness)."""
     async with database.AsyncSessionLocal() as session:
         return await session.get(ErasureReceipt, receipt_id)
+
+
+def _open_receipt(user_id: uuid.UUID, memory_id: uuid.UUID | None = None, *,
+                  at: datetime) -> ErasureReceipt:
+    """An open receipt in the shape the erase writes (for the ordering pins).
+
+    ``created_at`` is passed explicitly: the column's server default would put
+    every row in the same second and the FIFO pins need a total order.
+    """
+    memory_id = memory_id or uuid.uuid4()
+    return ErasureReceipt(
+        user_id=user_id,
+        requested_memory_ids=[str(memory_id)],
+        status="completed_unverified",
+        detail={"requested_by": "rest_api", "targets": [{
+            "memory_id": str(memory_id),
+            "status": "deleted",
+            "vectors_deleted": [str(memory_id)],
+            "vector_state": "pending",
+            "vector_residual": [],
+            "vector_residual_checked": False,
+            "db_residual": {"children": 0, "entity_links": 0, "source_links": 0,
+                            "cross_user_children": 0},
+            "index_pending": 1,
+        }]},
+        created_at=at,
+    )
 
 
 async def _outbox_rows() -> list[IndexOutbox]:
@@ -229,6 +263,256 @@ async def test_a_receipt_with_residual_keeps_its_residual_status(
     assert (await _receipt(residual.id)).status == "completed_with_residual"
 
 
+# ── fix round 1: the safety branch, the evidence, the window, the commits ───
+
+
+async def test_an_unreadable_store_at_reconcile_time_leaves_the_receipt_alone(
+    db, sessions, monkeypatch, store_down
+):
+    """I1/R19: the outage branch is the only thing between an outage and `completed`.
+
+    The erase-time readback already failed, the drain has since landed the owed
+    delete, and the store is unreachable AGAIN when reconcile asks: nothing was
+    observed, so nothing is written — and the receipt stays open, so the next
+    pass that can read still upgrades it.
+    """
+    uid = await _owner(db)
+    mem = _memory(uid)
+    db.add(mem)
+    await db.commit()
+
+    receipt = await erase_memories(db, uid, [mem.id], requested_by="rest_api")
+    before = copy.deepcopy(receipt.detail)
+
+    async def _unreachable(_memory_ids):
+        raise ConnectionError("qdrant down")
+
+    monkeypatch.setattr(erasure_service, "_vector_present_ids", _unreachable)
+    assert await reconcile_erasure_receipts() == {
+        "checked": 1, "upgraded": 0, "still_unverified": 1}
+
+    refused = await _receipt(receipt.id)
+    assert refused.status == "completed_unverified"  # never a completion on a failed read
+    assert refused.detail == before  # not one byte written by an unobserved pass
+
+    # Still open and re-checkable: the pass that CAN read upgrades it (R19).
+    async def _absent(_memory_ids):
+        return set()
+
+    monkeypatch.setattr(erasure_service, "_vector_present_ids", _absent)
+    assert await reconcile_erasure_receipts() == {
+        "checked": 1, "upgraded": 1, "still_unverified": 0}
+    assert (await _receipt(receipt.id)).status == "completed"
+
+
+async def test_a_residual_read_is_recorded_as_evidence_not_as_a_status(
+    db, sessions, monkeypatch, store_down
+):
+    """R19/M7: a residual found at reconcile time goes into `detail`, nothing else.
+
+    Relabelling to the terminal `completed_with_residual` would freeze a row
+    that is still re-checkable, so the status is left alone on purpose — the
+    observation is written where a later reader can see it instead.
+    """
+    uid = await _owner(db)
+    mem = _memory(uid)
+    db.add(mem)
+    await db.commit()
+
+    receipt = await erase_memories(db, uid, [mem.id], requested_by="rest_api")
+    before = copy.deepcopy(receipt.detail)
+
+    async def _present(_memory_ids):
+        return {str(mem.id)}
+
+    monkeypatch.setattr(erasure_service, "_vector_present_ids", _present)
+    assert await reconcile_erasure_receipts() == {
+        "checked": 1, "upgraded": 0, "still_unverified": 1}
+
+    refused = await _receipt(receipt.id)
+    assert refused.status == "completed_unverified"  # no terminal relabel
+
+    expected = copy.deepcopy(before)
+    expected["targets"][0]["vector_residual_checked"] = True
+    expected["targets"][0]["vector_residual"] = [str(mem.id)]
+    assert refused.detail == expected  # exactly those two keys; nothing else moved
+
+    # The receipt stayed open, so a later clean read still completes it.
+    async def _absent(_memory_ids):
+        return set()
+
+    monkeypatch.setattr(erasure_service, "_vector_present_ids", _absent)
+    assert (await reconcile_erasure_receipts())["upgraded"] == 1
+    assert (await _receipt(receipt.id)).status == "completed"
+
+
+async def test_an_unparseable_detail_is_scanned_and_refused_untouched(
+    db, sessions, monkeypatch
+):
+    """M7: a receipt whose recorded evidence is not UUIDs is never guessed at."""
+    async def _absent(_memory_ids):
+        return set()
+
+    monkeypatch.setattr(erasure_service, "_vector_present_ids", _absent)
+    uid = await _owner(db)
+    receipt = _open_receipt(uid, at=datetime.now(UTC))
+    receipt.detail["targets"][0]["vectors_deleted"] = ["not-a-uuid"]
+    db.add(receipt)
+    await db.commit()
+    before = copy.deepcopy(receipt.detail)
+
+    assert await reconcile_erasure_receipts() == {
+        "checked": 1, "upgraded": 0, "still_unverified": 1}
+
+    refused = await _receipt(receipt.id)
+    assert refused.status == "completed_unverified"
+    assert refused.detail == before
+
+
+async def test_reconcile_scans_oldest_first_and_clamps_the_window(
+    db, sessions, monkeypatch
+):
+    """M4/R20: FIFO ordering, and the window is `max(1, min(limit, 200))`."""
+    seen: list[str] = []
+
+    async def _absent(memory_ids):
+        seen.extend(memory_ids)
+        return set()
+
+    monkeypatch.setattr(erasure_service, "_vector_present_ids", _absent)
+    uid = await _owner(db)
+    stamp = datetime.now(UTC) - timedelta(hours=1)
+    receipts = []
+    for i in range(3):
+        receipt = _open_receipt(uid, at=stamp + timedelta(minutes=i))
+        db.add(receipt)
+        receipts.append(receipt)
+    await db.commit()
+    oldest_first = [r.detail["targets"][0]["memory_id"] for r in receipts]
+
+    # limit=1: the OLDEST is scanned — newest-first would have taken the last.
+    assert await reconcile_erasure_receipts(limit=1) == {
+        "checked": 1, "upgraded": 1, "still_unverified": 0}
+    assert seen == oldest_first[:1]
+
+    # The knob cannot exceed _MAX_LIMIT (200 — the documented endpoint maximum)…
+    assert erasure_service._MAX_LIMIT == 200
+    monkeypatch.setattr(erasure_service, "_MAX_LIMIT", 1)
+    assert await reconcile_erasure_receipts(limit=10 ** 6) == {
+        "checked": 1, "upgraded": 1, "still_unverified": 0}
+    assert (await _receipt(receipts[2].id)).status == "completed_unverified"  # windowed, not dropped
+    monkeypatch.setattr(erasure_service, "_MAX_LIMIT", 200)
+
+    # …and 0 floors to 1: a bad knob never skips an open receipt.
+    assert await reconcile_erasure_receipts(limit=0) == {
+        "checked": 1, "upgraded": 1, "still_unverified": 0}
+    assert seen == oldest_first  # FIFO across every pass
+
+
+async def test_reconcile_breaks_created_at_ties_by_id(db, sessions, monkeypatch):
+    """M4/R20: same-second receipts have a total order — none is unreachable."""
+    seen: list[str] = []
+
+    async def _absent(memory_ids):
+        seen.extend(memory_ids)
+        return set()
+
+    monkeypatch.setattr(erasure_service, "_vector_present_ids", _absent)
+    uid = await _owner(db)
+    stamp = datetime.now(UTC)
+    # Two receipts stamped the same second: their OWN ids decide the order.
+    receipt_ids = sorted((uuid.uuid4(), uuid.uuid4()), key=lambda value: value.hex)
+    first, second = (_open_receipt(uid, at=stamp) for _ in range(2))
+    first.id, second.id = receipt_ids
+    db.add_all([first, second])
+    await db.commit()
+
+    assert await reconcile_erasure_receipts(limit=1) == {
+        "checked": 1, "upgraded": 1, "still_unverified": 0}
+    assert seen == [first.detail["targets"][0]["memory_id"]]  # the lower id wins
+
+
+async def test_reconcile_commits_each_receipt_as_it_goes(db, sessions, monkeypatch, store_down):
+    """M3: per-receipt commits (the drain's shape), not one transaction per pass.
+
+    Two open receipts: while the SECOND one is being processed the first must
+    already be durable. A pass-long transaction is what a concurrent writer
+    waits out (5s busy timeout, then `database is locked`), and it is what a
+    single commit at the end would lose wholesale.
+    """
+    uid = await _owner(db)
+    receipts = []
+    for _ in range(2):
+        mem = _memory(uid)
+        db.add(mem)
+        await db.commit()
+        receipts.append(await erase_memories(db, uid, [mem.id], requested_by="rest_api"))
+    assert [r.status for r in receipts] == ["completed_unverified"] * 2
+
+    async def _absent(_memory_ids):
+        return set()
+
+    monkeypatch.setattr(erasure_service, "_vector_present_ids", _absent)
+    real = erasure_service._upgrade_receipt
+    processed: list[uuid.UUID] = []
+    committed_mid_pass: list[str] = []
+
+    async def _upgrade_watching_the_previous_receipt(session, receipt):
+        processed.append(receipt.id)
+        if len(processed) == 2:
+            async with sessions() as other:  # the drain writes mid-pass
+                other.add(ErasureReceipt(user_id=uid, status="completed_unverified",
+                                         detail={"targets": []}))
+                await other.commit()
+                # …and a reader already sees what THIS pass committed:
+                committed_mid_pass.append(
+                    (await other.get(ErasureReceipt, processed[0])).status)
+        return await real(session, receipt)
+
+    monkeypatch.setattr(erasure_service, "_upgrade_receipt",
+                        _upgrade_watching_the_previous_receipt)
+
+    assert await reconcile_erasure_receipts() == {
+        "checked": 2, "upgraded": 2, "still_unverified": 0}
+    assert committed_mid_pass == ["completed"]
+
+
+async def test_a_failed_receipt_cannot_take_the_earlier_upgrades_with_it(
+    db, sessions, monkeypatch, store_down
+):
+    """M3: each upgrade is committed as it lands — a later failure is not a lost pass."""
+    uid = await _owner(db)
+    receipts = []
+    for _ in range(2):
+        mem = _memory(uid)
+        db.add(mem)
+        await db.commit()
+        receipts.append(await erase_memories(db, uid, [mem.id], requested_by="rest_api"))
+    assert [r.status for r in receipts] == ["completed_unverified"] * 2
+
+    async def _absent(_memory_ids):
+        return set()
+
+    monkeypatch.setattr(erasure_service, "_vector_present_ids", _absent)
+    real = erasure_service._upgrade_receipt
+    processed: list[uuid.UUID] = []
+
+    async def _upgrade_boom_on_the_second(session, receipt):
+        processed.append(receipt.id)
+        if len(processed) == 2:
+            raise RuntimeError("the second receipt's scan blew up")
+        return await real(session, receipt)
+
+    monkeypatch.setattr(erasure_service, "_upgrade_receipt", _upgrade_boom_on_the_second)
+
+    with pytest.raises(RuntimeError):
+        await reconcile_erasure_receipts()
+    assert len(processed) == 2
+
+    assert (await _receipt(processed[0])).status == "completed"  # durable, not rolled back
+    assert (await _receipt(processed[1])).status == "completed_unverified"
+
+
 # ── R17: the memory delete confirms absence by readback ─────────────────────
 
 
@@ -240,8 +524,8 @@ async def test_delete_confirms_absence_by_readback(monkeypatch):
         async def delete(self, **_kwargs):
             return None
 
-        async def retrieve(self, **_kwargs):
-            return list(points)  # what survives the delete
+        async def retrieve(self, *, ids, **_kwargs):
+            return [point for point in points if str(point.id) in set(ids)]
 
     async def _open(_dim):
         return _Client(), "generation", None
@@ -252,6 +536,29 @@ async def test_delete_confirms_absence_by_readback(monkeypatch):
     assert await vector_store.delete_memories(["mem-1", "mem-2"]) is True
 
     points.append(SimpleNamespace(id="mem-1"))  # the point survived the delete
+    assert await vector_store.delete_memory("mem-1") is False
+    assert await vector_store.delete_memories(["mem-1", "mem-2"]) is False
+
+    points[:] = [SimpleNamespace(id="mem-2")]  # a survivor that is NOT the first id
+    assert await vector_store.delete_memories(["mem-1", "mem-2"]) is False
+    assert await vector_store.delete_memory("mem-1") is True  # this one really is gone
+
+
+async def test_a_delete_the_store_cannot_read_back_is_never_true(monkeypatch):
+    """R17/I1: no answer from the store is not an absence — unknown ≠ verified."""
+
+    class _Client:
+        async def delete(self, **_kwargs):
+            return None
+
+        async def retrieve(self, **_kwargs):
+            raise ConnectionError("qdrant down")  # the readback never answered
+
+    async def _open(_dim):
+        return _Client(), "generation", None
+
+    monkeypatch.setattr(vector_store, "_open_collection", _open)
+
     assert await vector_store.delete_memory("mem-1") is False
     assert await vector_store.delete_memories(["mem-1", "mem-2"]) is False
 

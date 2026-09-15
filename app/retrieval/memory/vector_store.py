@@ -353,7 +353,13 @@ async def delete_memories(memory_ids: list[str]) -> bool:
 
 
 def delete_memories_sync(memory_ids: list[str]) -> None:
-    """Synchronous batch delete — used by Celery ingestion (best-effort)."""
+    """Synchronous batch delete — used by Celery ingestion (best-effort).
+
+    Reads the batch back after the delete (the async face's shape) and logs a
+    survivor BY ID: the caller has no durable intent to retry with, so a missed
+    purge here would otherwise be a silent orphan point in the served
+    generation.
+    """
     if not memory_ids:
         return
     try:
@@ -362,6 +368,19 @@ def delete_memories_sync(memory_ids: list[str]) -> None:
             collection_name=generation,
             points_selector=qm.PointIdsList(points=list(memory_ids)),
         )
+        survivors = client.retrieve(
+            collection_name=generation, ids=list(memory_ids), with_payload=False
+        )
+        if survivors:
+            log.warning(
+                "Memory delete not confirmed (sync)",
+                extra={
+                    "n": len(memory_ids),
+                    "still_present": len(survivors),
+                    "memory_ids": [str(record.id) for record in survivors],
+                },
+            )
+            return
         log.info("Deleted memories from Qdrant (sync)", extra={"n": len(memory_ids)})
     except Exception as e:
         log.warning(
