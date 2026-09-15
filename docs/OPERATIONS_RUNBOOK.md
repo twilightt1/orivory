@@ -166,11 +166,16 @@ replays it against the latest SQL state until the vector store confirms it.
   SQL and already fresh). An outbox it cannot READ ends in the same typed 503,
   so an unreadable queue looks like a write still in flight — check the summary
   below before treating a 503 as transient.
-- **Several app processes (Qdrant server mode) are a known limitation.** Each
-  process runs its own loop, so the same batch can be drained twice. The claims
-  are idempotent (upserts by id, deletes with a readback, acks with a
-  predicate), so a duplicate is wasted work, never wrong data. One draining
-  process is the supported shape.
+- **Several app processes (Qdrant server mode) are a known limitation.** One
+  process is the supported shape: it drains by design (the loop, the boot's one
+  bounded batch and the 5s cadence above), and a second process drains the same
+  rows again. That is redundant WORK, never corruption: every claim is
+  idempotent by entity id — an upsert writes the row's point id and re-reads the
+  row after the write (rewriting the point from the refreshed row when the
+  revision moved on), a delete is read back before it is acked, and an ack is
+  predicated on the row's revision and generation. A duplicate therefore costs
+  embedding time and a redundant store call, and cannot leave a stale or
+  doubled point behind. Treat extra drainers as wasted budget, not as a risk.
 - **Reading it.** The diagnostics payload carries `index_outbox` (served by
   `/api/v1/admin/diagnostics` where the admin router is mounted):
   `by_status` — `pending` (still owed), `done`, and `blocked` (TERMINAL: an
