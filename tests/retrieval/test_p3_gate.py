@@ -563,6 +563,15 @@ async def test_a_commit_failure_mid_batch_drops_no_intent(live, monkeypatch):
     assert {row.status for row in rows.values()} == {"done", "pending"}
     assert all(row.status != "blocked" for row in rows.values())
     assert rows[first.hex].status == "done"  # its commit landed before the failure
+    # This class is NOT the transient one pinned above: the failing commit is the
+    # ack's own ``await db.commit()``, which sits OUTSIDE ``_apply``'s try/except
+    # (``outbox.py`` — the commit is after the outcome is decided), so nothing
+    # bumped ``attempts`` and no backoff was stamped: the row is due again on the
+    # very next pass. The transient class pins ``attempts == 1`` + a stamped
+    # ``next_attempt_at``; a persistent disk-full here would retry every pass
+    # (see the report's M1 note — production code untouched on purpose).
+    assert rows[second.hex].attempts == 0
+    assert rows[second.hex].next_attempt_at is None
     # The second row's write DID land (the store call ran); only the ack is owed.
     assert str(second) in _scroll_ids(generation)
 
@@ -668,10 +677,12 @@ async def test_the_drain_the_barrier_and_reconcile_never_reuse_the_request_sessi
     scan must each open their own session, and the request session must be left
     with nothing pending in it.
     """
-    recorder = _RecordingSessions(live.sessions)
+    recorder = _RecordingSessions(live.sessions)  # get_db, reconcile + the test's own reader
+    barrier_recorder = _RecordingSessions(live.sessions)  # the barrier's count reads
+    drain_recorder = _RecordingSessions(live.sessions)  # the drain's claims
     monkeypatch.setattr(database, "AsyncSessionLocal", recorder)  # get_db + reconcile
-    monkeypatch.setattr(outbox, "AsyncSessionLocal", recorder)  # the drain's claims
-    monkeypatch.setattr(freshness, "AsyncSessionLocal", recorder)  # the barrier's count
+    monkeypatch.setattr(freshness, "AsyncSessionLocal", barrier_recorder)  # the barrier's count
+    monkeypatch.setattr(outbox, "AsyncSessionLocal", drain_recorder)  # the drain's claims
 
     monkeypatch.setattr(memories_api, "index_new_memory", _store_down)
     created = await _create_memory(live.alice.id, "the request session must not carry this")
@@ -700,9 +711,13 @@ async def test_the_drain_the_barrier_and_reconcile_never_reuse_the_request_sessi
             retriever_module.embed_query, retriever_module.rewrite_query = real_embed, real_rewrite
 
         assert str(created.id) in {str(result.id) for result in response.results}
-        opened = recorder.created
-        # The barrier's count read + the drain's claim, both their own sessions…
-        assert len(opened) >= 2
+        # The barrier's count read + the drain's claim, EACH its own sessions —
+        # recorded per caller, because the test's own reader above ALSO goes
+        # through ``database.AsyncSessionLocal``: a shared count would be
+        # satisfied by that reader plus one of the two, which is not the claim.
+        assert len(barrier_recorder.created) >= 1
+        assert len(drain_recorder.created) >= 1
+        opened = [*barrier_recorder.created, *drain_recorder.created]
         # …and NOT the session the request is running on, by identity.
         assert all(session is not request_session for session in opened)
         assert not any(session is request_session for session in opened)
@@ -737,7 +752,17 @@ async def test_a_second_claimer_applies_the_same_batch_and_corrupts_nothing(live
     """
     generation = generation_name("memory")
     seeded = await _seed_pending(live, live.alice.id, [f"shared batch {i}" for i in range(8)])
-    real_upsert = outbox.upsert_memory
+    # The STORE boundary, counted independently of the appliers' own ``applied``
+    # counters: every write that reaches the real ``vector_store.upsert_memory``
+    # is appended here, whichever claimer — or thread — asked for it.
+    store_upsert = vector_store.upsert_memory
+    store_writes: list[str] = []
+
+    async def counting_upsert(memory):
+        store_writes.append(str(memory.id))
+        return await store_upsert(memory)
+
+    monkeypatch.setattr(vector_store, "upsert_memory", counting_upsert)
     claimed = threading.Event()
     release = threading.Event()
     main_thread = threading.get_ident()
@@ -746,7 +771,7 @@ async def test_a_second_claimer_applies_the_same_batch_and_corrupts_nothing(live
         if threading.get_ident() == main_thread and not release.is_set():
             claimed.set()  # the batch is claimed and in flight
             await asyncio.to_thread(release.wait, 30)
-        return await real_upsert(memory)
+        return await counting_upsert(memory)
 
     monkeypatch.setattr(outbox, "upsert_memory", hold_first_claimer)
 
@@ -759,7 +784,10 @@ async def test_a_second_claimer_applies_the_same_batch_and_corrupts_nothing(live
 
     assert first_report["claimed"] == 8 and reports[0]["claimed"] == 8
     assert first_report["applied"] == 8 and reports[0]["applied"] == 8
-    # …so the same eight intents were applied TWICE (16 writes) for 8 points.
+    # …so the same eight intents were applied TWICE, and the STORE saw it: 16
+    # calls reached ``vector_store.upsert_memory`` (eight per claimer) for 8
+    # points — a store-observable fact, not the appliers' own counters.
+    assert len(store_writes) == 16
     assert _point_count(generation) == 11  # 3 cutover + 8 seeded, never 16
     payloads = _payloads(generation)
     for memory_id in seeded:
@@ -778,6 +806,7 @@ async def test_a_second_claimer_applies_the_same_batch_and_corrupts_nothing(live
     reports.clear()
     await asyncio.to_thread(_second_claimer, 8, threading.Event(), reports)
     assert reports[0]["applied"] == 8  # the whole batch, re-applied by the other claimer
+    assert len(store_writes) == 24  # …and eight more real store writes on the wire
     assert _point_count(generation) == 11  # not one point more
     after = _payloads(generation)
     assert {str(memory_id): after[str(memory_id)] for memory_id in seeded} == before
@@ -802,6 +831,10 @@ def test_the_runbook_states_the_multi_process_limit_truthfully():
     assert "one process is the supported shape" in lowered
     assert "idempotent by entity id" in lowered
     assert "re-read" in lowered and "refreshed" in lowered  # the T5/R22 rewrite
+    # M5: the bullet names the two-writer coverage and the residual it does NOT
+    # cover — a blanket "cannot leave a stale point behind" is not the claim.
+    assert "accepted residual" in lowered
+    assert "third write" in lowered
 
 
 # ── R30: the gate runs in CI, in the P1b/P3 step's discipline ───────────────

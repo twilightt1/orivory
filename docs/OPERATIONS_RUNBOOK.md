@@ -174,8 +174,15 @@ replays it against the latest SQL state until the vector store confirms it.
   row after the write (rewriting the point from the refreshed row when the
   revision moved on), a delete is read back before it is acked, and an ack is
   predicated on the row's revision and generation. A duplicate therefore costs
-  embedding time and a redundant store call, and cannot leave a stale or
-  doubled point behind. Treat extra drainers as wasted budget, not as a risk.
+  embedding time and a redundant store call — the two-writer shape converges on
+  one point per entity (the point id is the entity's, not the write's) and the
+  post-write re-check rewrites it from the refreshed row when the revision has
+  moved on. That fence is not global: a THIRD write landing between an
+  applier's post-write re-read and its rewrite stays unfenced — the accepted
+  residual documented on `_settle_written_snapshot`
+  (`app/retrieval/memory/outbox.py`); closing it needs a revision-fenced write
+  Qdrant does not offer. Treat extra drainers as wasted budget, not as a risk
+  inside that documented bound.
 - **Reading it.** The diagnostics payload carries `index_outbox` (served by
   `/api/v1/admin/diagnostics` where the admin router is mounted):
   `by_status` — `pending` (still owed), `done`, and `blocked` (TERMINAL: an
