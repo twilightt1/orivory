@@ -450,6 +450,72 @@ async def test_c_a_chunk_backlog_does_not_hold_up_memory_recall(env, owner, monk
     assert waited < 0.05
 
 
+async def test_c_the_count_is_scoped_to_the_callers_own_tenant_key(env, owner, monkeypatch):
+    """Both faces of one key: nobody else's row, and really this one's own.
+
+    The barrier derives its key as ``uuid.UUID(user_id).hex``; the enqueue face
+    stores ``tenant_id`` through the same ``_entity_id`` spelling
+    (``app/retrieval/memory/outbox.py``). A foreign tenant's pending memory
+    intent must not hold this tenant's recall — and this tenant's own intent
+    must be FOUND under that key: a drift on either face (a dashed UUID, a bare
+    ``str(user_id)``) leaves the barrier blind to every pending write, i.e.
+    exactly the false no-match it exists to prevent.
+    """
+    stranger = uuid.uuid4()
+    await _activate_memory_manifest(env)
+    async with env() as db:
+        db.add(
+            IndexOutbox(
+                kind=outbox.KIND_MEMORY,
+                entity_id=uuid.uuid4().hex,
+                tenant_id=stranger.hex,
+                revision=1,
+                operation=outbox.OPERATION_UPSERT,
+                target_generation=outbox.TARGET_GENERATION,
+                status="pending",
+            )
+        )
+        await db.commit()
+    assert await _statuses() == ["pending"]  # a pending MEMORY intent — another tenant's
+
+    seen: list[str] = []
+    real_counts = freshness._memory_intent_counts
+
+    async def _record(tenant: str) -> dict[str, int]:
+        seen.append(tenant)
+        return await real_counts(tenant)
+
+    monkeypatch.setattr(freshness, "_memory_intent_counts", _record)
+
+    calls: list[int] = []
+
+    async def _spy(*, batch_size):
+        calls.append(batch_size)
+        raise AssertionError("the drain is not this test's business")
+
+    monkeypatch.setattr(drain_loop, "drain_once", _spy)
+
+    # (1) the stranger owes a write; THIS caller neither waits nor drains for it
+    waited = await freshness.await_freshness(user_id=str(owner), timeout=5.0)
+
+    assert calls == []
+    assert waited < 0.05
+    assert seen == [uuid.UUID(str(owner)).hex]  # the key the barrier derived
+
+    # (2) this caller's own write IS found under that same key: the barrier no
+    # longer returns fast — it goes to the single-flight door and fails closed
+    # once the budget is spent (the spy raises, so nothing is ever claimed).
+    # The stranger's row is still there, still not this caller's business.
+    await _write_memory(env, owner, CONTENT)
+    assert await real_counts(stranger.hex) == {"pending": 1}  # same spelling, other row
+
+    with pytest.raises(IndexFreshnessTimeout):
+        await freshness.await_freshness(user_id=str(owner), timeout=0.2)
+
+    assert calls and set(calls) == {settings.OUTBOX_DRAIN_BATCH_SIZE}
+    assert len(seen) >= 2 and set(seen) == {uuid.UUID(str(owner)).hex}
+
+
 # ── (d) the trace: milliseconds, once, from the barrier ─────────────────────
 
 

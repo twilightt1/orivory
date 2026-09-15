@@ -41,6 +41,7 @@ DRAIN_FAILED = "index.outbox_drain_failed"
 P3_SUITES = (
     "tests/services/test_erasure_service.py",
     "tests/services/test_diagnostics_outbox.py",
+    "tests/services/test_erasure_reconcile.py",
     "tests/lite/test_sqlite_schema_v3.py",
     "tests/lite/test_sqlite_sync_parity.py",
     "tests/lite/test_correction_roundtrip.py",

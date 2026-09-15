@@ -530,7 +530,7 @@ async def test_boot_drain_is_bounded_to_one_batch(db, owner, monkeypatch, tmp_pa
     assert [report["claimed"] for report in captured.reports()] == [50]
 
 
-async def test_boot_drain_keeps_intents_pending_when_chroma_is_down(
+async def test_boot_drain_keeps_intents_pending_when_the_vector_store_is_down(
     db, owner, monkeypatch, tmp_path
 ):
     """The ruling: a vector outage at boot leaves the intent pending, never blocks boot."""

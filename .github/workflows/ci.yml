@@ -90,11 +90,12 @@ jobs:
           # own private SQLite file and its own embedded-Qdrant folder, so no
           # compose service is involved. These are the P3 suites that had no CI
           # step of their own — the drain loop, the recall freshness barrier,
-          # the drain races, the erasure service, the lite schema/parity/
-          # bootstrap ladder, the correction roundtrip and the purge fence.
+          # the drain races, the erasure service and its receipt reconcile, the
+          # lite schema/parity/bootstrap ladder, the correction roundtrip and
+          # the purge fence.
           DATABASE_URL: sqlite+aiosqlite:////tmp/p3_ci.db
         run: |
-          python -m pytest --confcutdir=tests/services tests/services/test_erasure_service.py tests/services/test_diagnostics_outbox.py -q
+          python -m pytest --confcutdir=tests/services tests/services/test_erasure_service.py tests/services/test_diagnostics_outbox.py tests/services/test_erasure_reconcile.py -q
           python -m pytest --confcutdir=tests/lite tests/lite/test_sqlite_schema_v3.py tests/lite/test_sqlite_sync_parity.py tests/lite/test_correction_roundtrip.py tests/lite/test_sqlite_bootstrap.py -q
           python -m pytest --confcutdir=tests/retrieval tests/retrieval/test_drain_loop.py tests/retrieval/test_freshness_barrier.py tests/retrieval/test_drain_races.py tests/retrieval/test_p3_gate.py -q
           python -m pytest --confcutdir=tests/rag tests/rag/test_pipeline_purge_fence.py -q
@@ -251,8 +252,6 @@ jobs:
       JINA_RERANKER_MODEL: jina-reranker-v2-base-multilingual
       JINA_RERANKER_TOP_N: "5"
       EVALUATOR_FAILURE_MODE: warn_only
-      CELERY_BROKER_URL: redis://localhost:6379/1
-      CELERY_RESULT_BACKEND: redis://localhost:6379/2
       RATE_LIMIT_PER_MINUTE: "600"
       RATE_LIMIT_PER_DAY: "10000"
       FRONTEND_URL: http://localhost:5173
@@ -351,8 +350,6 @@ jobs:
       JINA_RERANKER_MODEL: jina-reranker-v2-base-multilingual
       JINA_RERANKER_TOP_N: "5"
       EVALUATOR_FAILURE_MODE: warn_only
-      CELERY_BROKER_URL: redis://localhost:6379/1
-      CELERY_RESULT_BACKEND: redis://localhost:6379/2
       RATE_LIMIT_PER_MINUTE: "600"
       RATE_LIMIT_PER_DAY: "10000"
       FRONTEND_URL: http://localhost:5173

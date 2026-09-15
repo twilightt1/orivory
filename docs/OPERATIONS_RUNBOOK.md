@@ -182,7 +182,12 @@ replays it against the latest SQL state until the vector store confirms it.
   residual documented on `_settle_written_snapshot`
   (`app/retrieval/memory/outbox.py`); closing it needs a revision-fenced write
   Qdrant does not offer. Treat extra drainers as wasted budget, not as a risk
-  inside that documented bound.
+  inside that documented bound. The sibling residual has the same upgrade
+  path: R22's repair is best-effort — when the repair write itself raises, the
+  retry re-reads, sees the revision has already moved on and acks the intent
+  `skipped`, so the older revision's payload stays ownerless, exactly the
+  pre-R22 outcome (no regression, no repair either, until a revision-fenced
+  write exists).
 - **Reading it.** The diagnostics payload carries `index_outbox` (served by
   `/api/v1/admin/diagnostics` where the admin router is mounted):
   `by_status` — `pending` (still owed), `done`, and `blocked` (TERMINAL: an
@@ -195,7 +200,12 @@ replays it against the latest SQL state until the vector store confirms it.
   duration. Every failed drain round also counts the
   `index.outbox_drain_failed` fallback (`app/observability/fallbacks.py`,
   log-grep `Fallback activated`): a rising rate means the retry path itself is
-  failing — look at Qdrant, not at the loop.
+  failing — look at Qdrant, not at the loop. An ack commit that keeps failing
+  is the same class at a higher cost: the row stays `pending`, so the next
+  round re-runs the write WHOLE — embedding included — every 5s until the
+  commit lands (no backoff by design, ruling R31; the interval bounds the
+  churn, the counter makes it visible, and nothing is lost — the retry
+  converges on the same point id).
 - **No retention policy in P3.** The outbox grows monotonically: nothing prunes
   `done` rows, and the summary's `by_status` / `by_kind` counts scan the whole
   table (no status predicate), so the table — and the cost of reading it — grow
