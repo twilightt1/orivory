@@ -18,7 +18,8 @@ Coverage (ruling R42): memory round trip across a close/reopen; migrate+resume
 of the same batch twice; the crash windows at commit, ack and flip; count/ID/
 revision coverage after cutover; tenant-injection negatives (search/delete/
 presence); correction dirty/old rows; erasure outage/retry/depth/derived;
-document reingest+delete orphans; the WAL backup restore drill; the rollback's
+document reingest+delete orphans; an unconfirmed chunk delete left PENDING (not
+acked); the WAL backup restore drill; the rollback's
 reconcile of post-cutover writes; the blocked second local owner; no
 multiworker fallback; and the "image needs no Chroma" path, proven in a CHILD
 interpreter whose ``import chromadb`` raises.
@@ -35,6 +36,7 @@ import importlib.util
 import math
 import os
 import random
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -861,24 +863,94 @@ async def test_document_reingest_and_delete_leave_no_orphan_vectors(live, monkey
     assert {str(chunk.id) for chunk in live.bob_chunks} <= _scroll_ids(generation)
 
 
-# ── 10. backup: the WAL is in the snapshot, the drill restores it ───────────
+# ── 10. a chunk delete that is not confirmed is never acked ─────────────────
+
+
+async def test_unconfirmed_chunk_delete_leaves_the_intent_pending(live, monkeypatch):
+    """The durable delete intent is the only record that the point still has to
+    go: while the store does not confirm it, the intent must stay pending (the
+    drain's backoff owns it) — acking it would strand the vector forever, with
+    nothing left in SQL to find it by."""
+    generation = generation_name("chunk")
+    chunk_id = live.alice_chunks[0].id
+    assert str(chunk_id) in _scroll_ids(generation)
+
+    # The delete path's own enqueue, in its own transaction.
+    async with live.sessions() as db:
+        assert await outbox.enqueue_chunk_delete(
+            db, chunk_ids=[chunk_id], tenant_id=live.alice.id) == []
+        await db.commit()
+
+    real_delete = outbox.delete_chunks
+
+    async def unconfirmed(_chunk_ids) -> bool:
+        return False  # the store took the call and never confirmed the delete
+
+    monkeypatch.setattr(outbox, "delete_chunks", unconfirmed)
+    report = await outbox.drain_pending()
+    assert (report["claimed"], report["applied"], report["failed"]) == (1, 0, 1)
+
+    row = next(row for row in await _intents(live) if row.entity_id == chunk_id.hex)
+    assert (row.operation, row.status) == ("delete", "pending")  # NOT acked
+    assert row.attempts == 1 and row.next_attempt_at is not None
+    assert row.last_error and row.last_error.startswith("VectorDeleteUnconfirmed"), \
+        row.last_error
+    assert str(chunk_id) in _scroll_ids(generation)  # the point is still there
+
+    # The store confirms on the retry: the SAME intent is what finishes it.
+    monkeypatch.setattr(outbox, "delete_chunks", real_delete)
+    async with live.sessions() as db:  # the backoff elapsed: same intent, due again
+        due = (await db.execute(select(IndexOutbox).where(
+            IndexOutbox.entity_id == chunk_id.hex))).scalars().one()
+        due.next_attempt_at = None
+        await db.commit()
+    report = await outbox.drain_pending()
+    assert report["applied"] == 1
+    assert str(chunk_id) not in _scroll_ids(generation)
+    assert [row.status for row in await _intents(live)
+            if row.entity_id == chunk_id.hex] == ["done"]
+
+
+# ── 11. backup: the WAL is in the snapshot, the drill restores it ───────────
 
 
 async def test_backup_takes_the_wal_and_the_drill_restores_into_a_new_dir(live, tmp_path):
     """A write that only ever lived in the WAL must be IN the backup, and the
     restore drill must report ready from a fresh target directory."""
-    late = await _create_memory(live.alice.id, "written after the last checkpoint")
-
-    # Flush the WAL into the main file, the way a clean shutdown would.
-    connection = sqlite3.connect(live.db_path)
+    # NOTHING checkpoints here — that is the pin. The backup must be the thing
+    # that takes the WAL (product side: checkpoint then VACUUM INTO), and for the
+    # WAL to still be holding the write something has to keep the file open:
+    # SQLite checkpoints and deletes the -wal when the LAST connection closes, so
+    # a second connection (a live app, a reader, a -wal left by a kill) is
+    # exactly the state this claim is about.
+    holder = sqlite3.connect(live.db_path)
+    # A read first: an idle connection only takes its WAL handle on first access,
+    # and without one SQLite still checkpoints-and-deletes the -wal when the
+    # writer's own connection closes.
+    holder.execute("SELECT count(*) FROM memories").fetchall()
     try:
-        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-    finally:
-        connection.close()
+        late = await _create_memory(live.alice.id, "written after the last checkpoint")
 
-    dest = tmp_path / "backups"
-    dest.mkdir()
-    report = live.cli.backup(dest_dir=dest)
+        # Prove the write is WAL-resident (a vacuous pin is worse than none)…
+        wal = Path(f"{live.db_path}-wal")
+        assert wal.exists() and wal.stat().st_size > 0, "the WAL is empty: pin is vacuous"
+        # …and that the main database file ALONE does not carry it: a backup that
+        # copied just that file would come back without the row asserted below.
+        main_only = tmp_path / "main-only.db"
+        shutil.copy(live.db_path, main_only)
+        connection = sqlite3.connect(str(main_only))
+        try:
+            assert connection.execute(
+                "SELECT count(*) FROM memories WHERE id = ?", (late.id.hex,)
+            ).fetchone()[0] == 0, "the late write already reached the main file"
+        finally:
+            connection.close()
+
+        dest = tmp_path / "backups"
+        dest.mkdir()
+        report = live.cli.backup(dest_dir=dest)
+    finally:
+        holder.close()
     snapshot = dest / f"{DB_NAME}.pre-p1b.bak"
     assert report["db_backup"] == str(snapshot) and snapshot.exists()
     assert Path(f"{snapshot}.manifest.json").exists()
@@ -904,7 +976,7 @@ async def test_backup_takes_the_wal_and_the_drill_restores_into_a_new_dir(live, 
     assert drill["checks"]["absence"]["ok"] is True
 
 
-# ── 11. rollback reconciles the writes made AFTER the cutover ───────────────
+# ── 12. rollback reconciles the writes made AFTER the cutover ───────────────
 
 
 async def test_rollback_reconciles_writes_made_after_cutover(
@@ -981,7 +1053,7 @@ async def test_rollback_reconciles_writes_made_after_cutover(
     assert {str(chunk.id) for chunk in live.bob_chunks}.isdisjoint(chunks)
 
 
-# ── 12. one owner per folder; no multiworker fallback ───────────────────────
+# ── 13. one owner per folder; no multiworker fallback ───────────────────────
 
 
 async def test_a_second_local_owner_is_blocked(live):
@@ -1020,7 +1092,7 @@ async def test_no_multiworker_fallback_for_the_local_owner(env, monkeypatch):
         main._refuse_multi_owner_local_qdrant()
 
 
-# ── 13. the image needs no Chroma ───────────────────────────────────────────
+# ── 14. the image needs no Chroma ───────────────────────────────────────────
 
 CHILD_SCRIPT = '''
 import asyncio
@@ -1087,6 +1159,12 @@ async def _fake_embed(texts):
     return [_vector(text) for text in texts]
 
 
+def _fake_embed_sync(texts):
+    """The sync twin: the async fake handed to ``embed_texts_sync`` would be a
+    never-awaited coroutine — truthy, and silently unembedded."""
+    return [_vector(text) for text in texts]
+
+
 async def main() -> None:
     _blocker_is_real()
     assert "chromadb" not in sys.modules
@@ -1101,7 +1179,7 @@ async def main() -> None:
     database.AsyncSessionLocal = sessions
     outbox.AsyncSessionLocal = sessions
     vector_store.embed_texts = _fake_embed
-    vector_store.embed_texts_sync = _fake_embed
+    vector_store.embed_texts_sync = _fake_embed_sync
 
     await database.bootstrap_sqlite()  # fresh image: schema + the active rows
 

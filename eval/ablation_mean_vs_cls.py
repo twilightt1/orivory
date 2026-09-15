@@ -39,7 +39,11 @@ if str(ROOT) not in sys.path:
 
 # The stores this measurement uses: a throwaway embedded Qdrant folder and the
 # local arctic contract. Set BEFORE any app import (settings read the env once).
-_QDRANT_DIR = Path(tempfile.mkdtemp(prefix="ablation-mean-vs-cls-"))
+# A TemporaryDirectory, not mkdtemp: the SKIP path returns before main()'s own
+# cleanup, so the interpreter-exit finalizer is what takes that one with it.
+_TMPDIR = tempfile.TemporaryDirectory(prefix="ablation-mean-vs-cls-",
+                                     ignore_cleanup_errors=True)
+_QDRANT_DIR = Path(_TMPDIR.name)
 os.environ.setdefault("LITE_MODE", "1")            # the contract the ablation measures
 os.environ["QDRANT_MODE"] = "local"
 os.environ["QDRANT_LOCAL_PATH"] = str(_QDRANT_DIR)

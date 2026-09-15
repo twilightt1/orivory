@@ -18,8 +18,13 @@ green. Locally: ``docker compose up -d postgres`` (host port from
 
 The vector side is an embedded Qdrant folder (no server needed): the claim under
 test is the PG pointer path, and the SQLite suites already own the Qdrant
-readback. Everything unsupported here is deleted again in teardown, so a shared
-test database is left as it was found.
+readback. The smoke OWNS the database it runs against — the cutover retires
+every other active generation row for the kind and the audit counts every
+eligible row, so both are only this smoke's own claim on an empty (scratch)
+database, which is also what makes the documented recipe above the recipe. A
+database that already holds state gets a SKIP naming what it found, before any
+write: the pointer is never touched (see ``_require_scratch_database``). Every
+row the smoke does create is deleted again in teardown, scoped to its own ids.
 """
 from __future__ import annotations
 
@@ -27,7 +32,7 @@ import uuid
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import create_engine, delete, select
+from sqlalchemy import create_engine, delete, func, select
 from sqlalchemy.orm import sessionmaker
 
 from app import database
@@ -85,6 +90,34 @@ def _fake_embed_sync(texts: list[str]) -> list[list[float]]:
     return [_vector(text) for text in texts]
 
 
+def _require_scratch_database(sessions) -> None:
+    """Skip unless the database is EMPTY of the state this smoke would own.
+
+    Every claim below is about rows the smoke creates, but two of the CLI's
+    steps are database-global by construction: ``cutover`` retires every other
+    active generation row for the kind, and ``verify`` audits every eligible SQL
+    row against the generation. On a database that has ever held data those turn
+    into a confusing set-diff failure halfway through — a developer following the
+    recipe against a real/dev database would not know what hit them. Answer with
+    a SKIP that names what it found instead, and do it BEFORE the first write so
+    the pointer is never touched (the fail-closed ordering the smoke had is kept,
+    just moved to the front).
+    """
+    counts = {
+        "index_generations": select(func.count()).select_from(IndexGeneration),
+        "memories": select(func.count()).select_from(Memory),
+        "document_chunks": select(func.count()).select_from(DocumentChunk),
+    }
+    with sessions() as db:
+        held = {name: db.execute(stmt).scalar_one() for name, stmt in counts.items()}
+    found = ", ".join(f"{name}={count}" for name, count in held.items() if count)
+    if found:
+        pytest.skip(
+            f"the pg smoke needs a scratch database — found {found}; "
+            "point DATABASE_URL at an empty database"
+        )
+
+
 @pytest.fixture
 def pg(tmp_path, monkeypatch, migrate_cli):
     """A real Postgres database (schema ensured) + a temp embedded Qdrant."""
@@ -116,6 +149,11 @@ def pg(tmp_path, monkeypatch, migrate_cli):
     engine = create_engine(url, pool_pre_ping=True)
     Base.metadata.create_all(engine)  # idempotent: CI's migrate step already did it
     sessions = sessionmaker(bind=engine, expire_on_commit=False, autoflush=False)
+
+    # Before the first write: on a database with pre-existing state the smoke
+    # skips (with the counts it found) instead of failing halfway, and it never
+    # gets as far as moving the pointer.
+    _require_scratch_database(sessions)
 
     user_id, memory_id, conversation_id, document_id, chunk_id = (
         uuid.uuid4(), uuid.uuid4(), uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
@@ -180,13 +218,21 @@ def test_pg_expand_backfill_and_cutover_flip_the_pointer(pg):
     # generation nobody built.
     cli._expand()
     after_expand = _generations(pg)
-    assert set(after_expand) == {
-        ("memory", pg.memory_generation), ("chunk", pg.chunk_generation)}
-    assert not any(row.is_active for row in after_expand.values())
+    expected = {("memory", pg.memory_generation), ("chunk", pg.chunk_generation)}
+    own = {key: row for key, row in after_expand.items() if key in expected}
+    assert set(own) == expected
+    assert not any(row.is_active for row in own.values())
+    # Scoping the claim to its OWN rows costs nothing here (the scratch
+    # precondition already guarantees an empty manifest) and keeps the
+    # fail-closed ordering: a foreign row still fails BEFORE the pointer can
+    # move, just below the line that names which rows were expected.
+    assert set(after_expand) == set(own), f"foreign generation rows: {set(after_expand) - set(own)}"
     assert cli.active_generation_name(pg.sessions(), "memory") is None
     assert outbox.active_generation_sync()[0] == vector_store.COLLECTION_NAME
 
-    # ── the backfill: keyset by primary key, into the named generation.
+    # ── the backfill: keyset by primary key, into the named generation. The
+    # counts are this smoke's own rows — one memory, one child chunk — because
+    # the database it runs against is empty by precondition.
     memory_report = cli.backfill(kind="memory", batch=2)
     chunk_report = cli.backfill(kind="chunk", batch=2)
     assert (memory_report["generation"], memory_report["upserted"]) == (pg.memory_generation, 1)
