@@ -6,6 +6,7 @@ the client calls are pinned here with fakes; the real-store behaviour
 (recall parity, filters, the manifest guard) lives in
 ``tests/retrieval/test_qdrant_parity.py``.
 """
+import logging
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 from uuid import uuid4
@@ -258,9 +259,28 @@ class TestDeleteMemoriesSync:
 
         vector_store.delete_memories_sync(memory_ids)
 
-        (name, kwargs), = client.calls
+        (name, kwargs), (rname, rkwargs) = client.calls
         assert name == "delete"
         assert list(kwargs["points_selector"].points) == memory_ids
+        # M1: the batch is read back — and the readback asks about the ids it
+        # just deleted, never a subset.
+        assert rname == "retrieve"
+        assert rkwargs["ids"] == memory_ids
+        assert rkwargs["with_payload"] is False
+
+    def test_delete_memories_sync_warns_about_a_survivor(self, monkeypatch, caplog):
+        """M1: a missed purge is logged BY ID — the caller has no intent to retry."""
+        memory_ids = [str(uuid4()) for _ in range(3)]
+        client = _FakeClient(records=[SimpleNamespace(id=memory_ids[1])])
+        _sync_face(monkeypatch, client)
+
+        with caplog.at_level(logging.WARNING, logger="app.retrieval.memory.vector_store"):
+            vector_store.delete_memories_sync(memory_ids)
+
+        (record,) = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert record.getMessage() == "Memory delete not confirmed (sync)"
+        assert record.memory_ids == [memory_ids[1]]
+        assert record.still_present == 1
 
     def test_delete_memories_sync_empty_list(self, monkeypatch):
         client = _FakeClient()

@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.models.document import Document
+from app.models.index_outbox import IndexOutbox
 from app.services.health_service import CheckPayload, run_readiness_checks
 
 DOCUMENT_TERMINAL_FAILURE_STATUSES = ("failed", "error")
@@ -15,6 +16,12 @@ DOCUMENT_IN_FLIGHT_STATUSES = ("pending", "processing")
 RECENT_DOCUMENT_LIMIT = 5
 STUCK_AFTER_MINUTES = 15
 VERSION = "1.1.0"
+
+# The durable index outbox's own vocabularies (``models/index_outbox.py``):
+# status pending|done|blocked, kind memory|chunk. Seeded so a class that
+# currently has no rows is still a visible zero in the payload.
+OUTBOX_STATUSES = ("pending", "done", "blocked")
+OUTBOX_KINDS = ("memory", "chunk")
 
 
 _check_celery = None  # type: ignore[assignment]  # dormant on the slim branch: no broker, see build_diagnostics.
@@ -109,6 +116,57 @@ async def get_document_ingestion_summary(db: AsyncSession) -> dict[str, Any]:
     }
 
 
+async def get_index_outbox_summary(db: AsyncSession) -> dict[str, Any]:
+    """The durable index outbox at a glance: what is still owed to the vector store.
+
+    Counts by BOTH status and kind, plus the two age signals an operator needs
+    (``stuck_pending`` past the same 15-minute threshold as document ingestion,
+    and ``oldest_pending_at`` — the ISO timestamp of the oldest pending write's
+    ``created_at``, null when nothing is pending).
+
+    ``blocked`` is part of the summary on purpose (ruling C2): a terminally
+    blocked intent (an embedding-contract mismatch, a generation the cutover
+    superseded) never lands and is not pending, so the recall freshness barrier
+    has nothing to wait for — a recall for that tenant can answer ``200 []``
+    for a write that will never be indexed. Pending-only numbers would read as
+    "still in flight" forever.
+    """
+    by_status: dict[str, int] = dict.fromkeys(OUTBOX_STATUSES, 0)
+    status_rows = await db.execute(
+        select(IndexOutbox.status, func.count())
+        .select_from(IndexOutbox)
+        .group_by(IndexOutbox.status)
+    )
+    for status, count in status_rows.all():
+        by_status[str(status)] = int(count or 0)
+
+    by_kind: dict[str, int] = dict.fromkeys(OUTBOX_KINDS, 0)
+    kind_rows = await db.execute(
+        select(IndexOutbox.kind, func.count())
+        .select_from(IndexOutbox)
+        .group_by(IndexOutbox.kind)
+    )
+    for kind, count in kind_rows.all():
+        by_kind[str(kind)] = int(count or 0)
+
+    stuck_cutoff = datetime.now(UTC) - timedelta(minutes=STUCK_AFTER_MINUTES)
+    stuck = await db.scalar(
+        select(func.count())
+        .select_from(IndexOutbox)
+        .where(IndexOutbox.status == "pending", IndexOutbox.created_at < stuck_cutoff)
+    )
+    oldest = await db.scalar(
+        select(func.min(IndexOutbox.created_at)).where(IndexOutbox.status == "pending")
+    )
+    return {
+        "by_status": by_status,
+        "by_kind": by_kind,
+        "stuck_pending": int(stuck or 0),
+        "oldest_pending_at": _serialize_datetime(oldest),
+        "stuck_after_minutes": STUCK_AFTER_MINUTES,
+    }
+
+
 async def build_diagnostics(db: AsyncSession) -> dict[str, Any]:
     # ponytail: no broker on the slim branch — the celery check is a dormant
     # key so the payload shape (and the secret-safety/API tests) holds.
@@ -122,4 +180,5 @@ async def build_diagnostics(db: AsyncSession) -> dict[str, Any]:
         "checks": checks,
         "config": build_config_summary(),
         "ingestion": await get_document_ingestion_summary(db),
+        "index_outbox": await get_index_outbox_summary(db),
     }

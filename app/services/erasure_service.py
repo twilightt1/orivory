@@ -503,6 +503,156 @@ async def list_receipts(
     return list(rows), total
 
 
+# ── reconciliation: the drain's progress revises open receipts (R16) ────────
+
+# Receipt statuses reconcile may revise. Everything else is terminal: a
+# verified receipt is never downgraded, and a residual/error verdict is never
+# rewritten from a later, weaker read.
+_OPEN_RECEIPT_STATUSES = ("pending", ERASURE_STATUS_UNVERIFIED)
+
+
+def _receipt_ids(targets: list[dict[str, Any]]) -> list[uuid.UUID] | None:
+    """The ids these receipt targets recorded, ``None`` when the detail is unusable.
+
+    ``vectors_deleted`` is the per-target evidence the erase wrote (every id of
+    the closure it purged), so reconciliation re-checks exactly what was erased.
+    """
+    ids: list[uuid.UUID] = []
+    for target in targets:
+        for value in target.get("vectors_deleted") or []:
+            try:
+                ids.append(uuid.UUID(str(value)))
+            except (ValueError, TypeError, AttributeError):
+                return None
+    return ids
+
+
+async def reconcile_erasure_receipts(*, limit: int = 50) -> dict[str, int]:
+    """Re-verify open receipts after the drain lands their owed deletes (R16).
+
+    Upgrade-only and bounded: only receipts still in ``pending`` /
+    ``completed_unverified`` are scanned — OLDEST first (R20, ties broken by
+    id: newest-first starves an old open receipt out of the window under
+    sustained erase load) with ``limit`` clamped like ``list_receipts`` — and
+    one is rewritten to ``completed`` ONLY when the re-read is clean: every
+    affected vector absent AND no DB residual rows.
+
+    A pass that DOES find residual vectors records what it observed in the
+    detail (``vector_residual_checked`` / ``vector_residual``, R19) and leaves
+    the status alone — never relabelled to the terminal
+    ``completed_with_residual``, so the receipt stays open and re-checkable. A
+    pass whose readback failed observed nothing and writes nothing. Either way
+    reconcile never downgrades, never invents a status, and a terminal receipt
+    is not even scanned. Returns ``{"checked", "upgraded", "still_unverified"}``.
+
+    Runs on its own session: the drain loop and the admin endpoint call it
+    without one (ruling R15 keeps it off the request-path barrier). Each
+    receipt is committed as it goes (the drain's shape): a pass holds no
+    transaction across the next receipt, so a concurrent writer is never left
+    waiting on it and a failure on a later receipt cannot take the earlier
+    upgrades — or the evidence they wrote — with it.
+    """
+    # Late import: the test fixtures' sessionmaker lives on the module.
+    from app.database import AsyncSessionLocal
+
+    async with AsyncSessionLocal() as db:
+        rows = (await db.execute(
+            select(ErasureReceipt)
+            .where(ErasureReceipt.status.in_(_OPEN_RECEIPT_STATUSES))
+            .order_by(ErasureReceipt.created_at.asc(), ErasureReceipt.id.asc())
+            .limit(max(1, min(limit, _MAX_LIMIT)))
+        )).scalars().all()
+        # Close the scan's transaction before the per-receipt work below: a
+        # pass-long transaction is what a concurrent writer waits out (5s busy
+        # timeout, then `database is locked`) and what loses every upgrade the
+        # pass made when a later receipt raises (M3).
+        await db.commit()
+        upgraded = 0
+        for receipt in rows:
+            upgraded += await _upgrade_receipt(db, receipt)
+            await db.commit()  # one commit per receipt (outbox._apply's shape)
+    return {
+        "checked": len(rows),
+        "upgraded": upgraded,
+        "still_unverified": len(rows) - upgraded,
+    }
+
+
+def _residual_evidence(targets: list[dict[str, Any]], present: set[str]) -> list[dict[str, Any]]:
+    """R19: what THIS pass observed, written into the detail of an open receipt."""
+    evidence: list[dict[str, Any]] = []
+    for target in targets:
+        ids = [str(value) for value in target.get("vectors_deleted") or []]
+        if target.get("status") != "deleted" or not ids:
+            evidence.append(target)  # nothing was deleted here: nothing observed
+            continue
+        evidence.append({
+            **target,
+            "vector_residual_checked": True,
+            "vector_residual": sorted(v for v in ids if v in present),
+        })
+    return evidence
+
+
+async def _upgrade_receipt(db: AsyncSession, receipt: ErasureReceipt) -> bool:
+    """Rewrite ONE open receipt to ``completed`` when the re-read is clean.
+
+    Clean means: every affected vector is absent AND every residual count is
+    zero. Anything else (a residual still present, an unreachable store,
+    leftover rows) returns ``False`` — the receipt keeps the status it has:
+    never a downgrade, and never a completion on a failed read. R19: a pass
+    that OBSERVED residuals writes that observation into the detail and leaves
+    the status alone (the row stays open and re-checkable); a pass whose
+    readback failed observed nothing, so the row stays byte-identical.
+    """
+    targets = list((receipt.detail or {}).get("targets") or [])
+    affected = _receipt_ids(targets)
+    if not affected:
+        return False  # nothing recorded to verify: never guess what was erased
+    present = await _verify_absent(affected)  # None = the store did not answer
+    if present is None:
+        return False  # unreadable store: no observation, so no evidence to write
+    if present:
+        receipt.detail = {
+            **(receipt.detail or {}),
+            "targets": _residual_evidence(targets, present),
+        }
+        return False  # evidence, not a verdict: the receipt stays open (R19)
+    rechecked: list[dict[str, Any]] = []
+    for target in targets:
+        ids = _receipt_ids([target])
+        if target.get("status") != "deleted" or not ids:
+            rechecked.append(target)  # a non-deleted target verified no vector
+            continue
+        counts = await _db_residual_counts(
+            db,
+            ids,
+            # Cross-user rows were counted BEFORE the delete and cannot be
+            # re-counted now: preserve what the erase recorded (R29c).
+            cross_user_children=int(
+                (target.get("db_residual") or {}).get("cross_user_children", 0)
+            ),
+        )
+        if sum(counts.values()):
+            return False  # a residual is not a completion
+        rechecked.append({
+            **target,
+            "vector_state": VECTOR_STATE_VERIFIED,
+            "vector_residual": [],
+            "vector_residual_checked": True,
+            "db_residual": counts,
+            "index_pending": await _pending_delete_intents(db, ids),
+        })
+    receipt.status = ERASURE_STATUS_COMPLETED
+    receipt.detail = {
+        **(receipt.detail or {}),
+        "targets": rechecked,
+        "verification": VECTOR_STATE_VERIFIED,
+        "index_pending": sum(int(t.get("index_pending") or 0) for t in rechecked),
+    }
+    return True
+
+
 __all__ = [
     "ERASURE_STATUS_COMPLETED",
     "ERASURE_STATUS_ERRORS",
@@ -515,4 +665,5 @@ __all__ = [
     "VECTOR_STATE_VERIFIED",
     "erase_memories",
     "list_receipts",
+    "reconcile_erasure_receipts",
 ]

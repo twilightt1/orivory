@@ -6,6 +6,10 @@ mypy>=1.11.1
 isort>=5.13.2
 httpx>=0.27.0
 
+# Test-only: the suites parse compose/CI YAML directly (until now it arrived
+# transitively via uvicorn[standard]).
+PyYAML>=6.0
+
 # Offline RAG analysis (Jupyter + viz)
 jupyter>=1.0.0
 pandas>=2.0.0

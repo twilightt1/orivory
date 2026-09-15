@@ -33,7 +33,7 @@ from app.database import Base, sync_session
 from app.models.index_outbox import IndexOutbox
 from app.models.memory import Memory
 from app.models.user import User
-from app.retrieval.memory import outbox
+from app.retrieval.memory import freshness, outbox
 
 GATE_DB = "p1a-gate.sqlite"
 
@@ -84,6 +84,7 @@ def _open_engines(url: str, monkeypatch):
     monkeypatch.setattr(database, "IS_SQLITE", True)
     monkeypatch.setattr(database, "AsyncSessionLocal", sessions)
     monkeypatch.setattr(outbox, "AsyncSessionLocal", sessions)  # the drain's own sessionmaker
+    monkeypatch.setattr(freshness, "AsyncSessionLocal", sessions)  # the R14 barrier's count
     monkeypatch.setattr(
         database, "_get_sync_sessionmaker",
         lambda: sessionmaker(bind=sync_eng, expire_on_commit=False, autoflush=False),
@@ -282,6 +283,16 @@ async def test_tenant_injection_source_ref_cannot_touch_or_leak_foreign_projecti
     assert {row.tenant_id for row in intents} == {owner.hex}
     assert foreign.id.hex not in {row.entity_id for row in intents}
 
+    # The P3 freshness barrier waits for THIS tenant's pending intents before
+    # it recalls, and this suite has no live vector backend: let the reingest's
+    # intents LAND in the recording store (the suite's one stub) so the recall
+    # measures the injection guard, not the queue.
+    store = _RecordingVectors()
+    monkeypatch.setattr(outbox, "upsert_memory", store.upsert)
+    monkeypatch.setattr(outbox, "delete_memory", store.delete)
+    assert (await outbox.drain_pending())["failed"] == 0
+    assert [r for r in await _outbox_rows() if r.status == "pending"] == []
+
     # The injection cannot leak back through my recall either.
     response = await _recall(db, owner, [result.doc_memory_id, str(foreign.id)], monkeypatch)
     returned = {str(r.id) for r in response.results}
@@ -333,6 +344,15 @@ async def test_correction_old_and_dirty_absent_from_context_and_rerank(db, owner
         select(Memory.id).where(Memory.user_id == owner, current_memory_predicate())
     )).scalars().all())
     assert visible == {new.id, unrelated.id}
+
+    # The P3 freshness barrier waits for this tenant's pending intents before
+    # it recalls: land the correction's own intents (recording store — the
+    # suite's one stub) so the eligibility filter is what this test measures.
+    store = _RecordingVectors()
+    monkeypatch.setattr(outbox, "upsert_memory", store.upsert)
+    monkeypatch.setattr(outbox, "delete_memory", store.delete)
+    assert (await outbox.drain_pending())["failed"] == 0
+    assert [r for r in await _outbox_rows() if r.status == "pending"] == []
 
     # The store still holds the stale vectors; the eligibility filter must drop
     # them BEFORE the reranker is handed anything.

@@ -23,11 +23,18 @@ curl -fsS -H "Authorization: Bearer $ADMIN_ACCESS_TOKEN" \
 
 The response includes:
 
-- dependency checks for Postgres, Redis, MinIO, Qdrant, and Celery
+- dependency checks (Postgres/SQLite, Redis, MinIO/storage, Qdrant, MCP hub —
+  plus a dormant `celery` key kept for payload compatibility: the slim branch
+  has no broker)
 - secret-safe config summary such as model names, rate limits, and MinIO bucket
 - ingestion counts by status
 - recent failed documents
 - documents stuck in `pending` or `processing` longer than the configured threshold
+- the index outbox (`index_outbox`): counts by status and by kind,
+  `stuck_pending` (pending longer than 15 minutes) and `oldest_pending_at` —
+  see [Background indexing (P3)](#background-indexing-p3). `blocked` counts are
+  terminal intents that will never land; they are part of the summary on
+  purpose.
 
 `status: degraded` means at least one dependency check failed. The endpoint intentionally excludes secrets such as JWT keys, provider API keys, DB URLs, Redis URLs, and MinIO secret keys.
 
@@ -37,12 +44,6 @@ API logs:
 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.prod.yml logs -f app
-```
-
-Celery worker logs:
-
-```bash
-docker compose -f docker-compose.yml -f docker-compose.prod.yml logs -f celery_worker
 ```
 
 Infrastructure logs:
@@ -59,16 +60,10 @@ Restart API only:
 docker compose -f docker-compose.yml -f docker-compose.prod.yml restart app
 ```
 
-Restart ingestion worker:
-
-```bash
-docker compose -f docker-compose.yml -f docker-compose.prod.yml restart celery_worker
-```
-
 Restart all app services without deleting data:
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d app celery_worker celery_beat
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d app
 ```
 
 ## Investigate `/ready` Degraded
@@ -119,14 +114,20 @@ Symptoms:
 - uploaded document stays `pending` or `processing`
 - chat does not retrieve newly uploaded content
 
+Ingestion runs INLINE in the API process (there is no worker, queue or broker
+to inspect): an upload returns once `process_document_sync` has parsed and
+indexed the file, so a run that is wedged is wedged inside the API.
+
 Checklist:
 
-1. Check Celery worker logs.
+1. Check the API logs — the ingestion run logs its stages there.
 2. Confirm Redis is healthy.
 3. Confirm MinIO object exists.
 4. Confirm Qdrant health.
 5. Confirm provider keys are configured.
-6. Restart `celery_worker` if the worker is wedged.
+6. Restart the API if the run is wedged. Anything the ingestion enqueued into
+   `index_outbox` survives the restart and is replayed by the background drain
+   (see [Background indexing (P3)](#background-indexing-p3)).
 
 Useful commands:
 
@@ -134,8 +135,87 @@ Useful commands:
 curl -fsS -H "Authorization: Bearer $ADMIN_ACCESS_TOKEN" \
   http://localhost:8000/api/v1/admin/diagnostics
 
-docker compose -f docker-compose.yml -f docker-compose.prod.yml logs --tail=200 celery_worker
-docker compose -f docker-compose.yml -f docker-compose.prod.yml restart celery_worker
+docker compose -f docker-compose.yml -f docker-compose.prod.yml logs --tail=200 app
+docker compose -f docker-compose.yml -f docker-compose.prod.yml restart app
+```
+
+## Background indexing (P3)
+
+Every canonical write stamps a durable `index_outbox` intent in the SAME SQL
+commit as the row (document chunks and memories). A write whose vector write
+failed stays owed there, and the background drain loop
+(`app/retrieval/memory/drain_loop.py`, started and stopped by the app lifespan)
+replays it against the latest SQL state until the vector store confirms it.
+
+- **One loop, both dialects.** P1b's SQLite-only gate and boot-only role are
+  gone: a Postgres deployment replays its backlog through the same loop, and
+  the boot's one bounded batch replays there too — a restart is a warm start.
+  Write-through is unaffected — every write still embeds inline; the loop owns
+  the RETRY path.
+- **Settings.** `OUTBOX_DRAIN_ENABLED` (default `true`),
+  `OUTBOX_DRAIN_INTERVAL_SECONDS` (default `5`) between idle rounds, and
+  `OUTBOX_DRAIN_BATCH_SIZE` (default `50`). A round that applied anything runs
+  the next one immediately, so a backlog drains at full speed. Set
+  `OUTBOX_DRAIN_ENABLED=false` only to quiesce a store for a cutover: memory
+  recall then stops waiting for its own writes.
+- **Memory recall is guarded, and fails closed.** `MemoryRetriever.recall`
+  waits for the calling tenant's pending intents, bounded by
+  `RECALL_FRESHNESS_BUDGET_SECONDS` (default `2.0`), and answers
+  `503 {"error": "index_freshness_timeout"}` rather than an empty result for a
+  write that has not landed. The guard covers memory recall only (MCP reads are
+  SQL and already fresh). An outbox it cannot READ ends in the same typed 503,
+  so an unreadable queue looks like a write still in flight — check the summary
+  below before treating a 503 as transient.
+- **Several app processes (Qdrant server mode) are a known limitation.** One
+  process is the supported shape: it drains by design (the loop, the boot's one
+  bounded batch and the 5s cadence above), and a second process drains the same
+  rows again. That is redundant WORK, never corruption: every claim is
+  idempotent by entity id — an upsert writes the row's point id and re-reads the
+  row after the write (rewriting the point from the refreshed row when the
+  revision moved on), a delete is read back before it is acked, and an ack is
+  predicated on the row's revision and generation. A duplicate therefore costs
+  embedding time and a redundant store call — the two-writer shape converges on
+  one point per entity (the point id is the entity's, not the write's) and the
+  post-write re-check rewrites it from the refreshed row when the revision has
+  moved on. That fence is not global: a THIRD write landing between an
+  applier's post-write re-read and its rewrite stays unfenced — the accepted
+  residual documented on `_settle_written_snapshot`
+  (`app/retrieval/memory/outbox.py`); closing it needs a revision-fenced write
+  Qdrant does not offer. Treat extra drainers as wasted budget, not as a risk
+  inside that documented bound. The sibling residual has the same upgrade
+  path: R22's repair is best-effort — when the repair write itself raises, the
+  retry re-reads, sees the revision has already moved on and acks the intent
+  `skipped`, so the older revision's payload stays ownerless, exactly the
+  pre-R22 outcome (no regression, no repair either, until a revision-fenced
+  write exists).
+- **Reading it.** The diagnostics payload carries `index_outbox` (served by
+  `/api/v1/admin/diagnostics` where the admin router is mounted):
+  `by_status` — `pending` (still owed), `done`, and `blocked` (TERMINAL: an
+  embedding-contract mismatch or a generation the cutover superseded; it will
+  never land, so no recall will ever wait for it — a contract mismatch needs the
+  contract fixed plus a reindex, a superseded generation was covered by the
+  migration's backfill); `by_kind` — `memory` / `chunk`; `stuck_pending` —
+  pending longer than 15 minutes; `oldest_pending_at` — the ISO timestamp of
+  the oldest pending write's `created_at` (null when nothing is pending), not a
+  duration. Every failed drain round also counts the
+  `index.outbox_drain_failed` fallback (`app/observability/fallbacks.py`,
+  log-grep `Fallback activated`): a rising rate means the retry path itself is
+  failing — look at Qdrant, not at the loop. An ack commit that keeps failing
+  is the same class at a higher cost: the row stays `pending`, so the next
+  round re-runs the write WHOLE — embedding included — every 5s until the
+  commit lands (no backoff by design, ruling R31; the interval bounds the
+  churn, the counter makes it visible, and nothing is lost — the retry
+  converges on the same point id).
+- **No retention policy in P3.** The outbox grows monotonically: nothing prunes
+  `done` rows, and the summary's `by_status` / `by_kind` counts scan the whole
+  table (no status predicate), so the table — and the cost of reading it — grow
+  with every write. Fine at current scale; the upgrade path is a prune/retention
+  policy for `done` rows (plus a status-predicated index if that scan ever
+  matters).
+
+```bash
+curl -fsS -H "Authorization: Bearer $ADMIN_ACCESS_TOKEN" \
+  http://localhost:8000/api/v1/admin/diagnostics | python -m json.tool
 ```
 
 ## P1b cutover (SQLite / lite deployments)
@@ -169,8 +249,17 @@ generation pointer says:
   rebuilds the vectors, so no recall is lost permanently.
 
 > On a full-stack/Postgres or unchanged-contract install an un-migrated
-> deployment serves EMPTY vector results; the read-path guard that makes it
-> fail loud on every path arrives with P3's freshness barrier.
+> deployment serves EMPTY vector results — nothing is pending, so nothing is
+> waiting on anything. P3's freshness barrier closes the OTHER hole, the
+> in-flight write, and it does so on the memory-recall path only (ruling R11;
+> the MCP reads are SQL and already fresh): if this tenant has pending intents
+> that do not land inside `RECALL_FRESHNESS_BUDGET_SECONDS`, recall answers
+> `503 {"error": "index_freshness_timeout"}` instead of a false no-match —
+> fail-closed (R14), never a `200` with `[]`. An outbox database the barrier
+> cannot read produces the same typed 503, so it reads like a write that is
+> still in flight: check `index_outbox` in the diagnostics payload (see
+> [Background indexing (P3)](#background-indexing-p3)) before calling a 503
+> transient.
 
 ### Sequence (run inside the app stack)
 
@@ -248,14 +337,16 @@ All of these are written next to the SQLite file (`<db>` = the database path):
 | `<db>.p1b-expand-record.json` | `expand` (inside backfill/cutover) | the pointer the install served before the expand; the rollback report's `rollback_from` fallback |
 | `<db>.p1b-rollback-marker.json` | `cutover` | `active` + `cutover_at`, written AFTER the transaction commits (it can be missing if the process died in that window; the expand record is then the fallback) |
 
-### Postgres deployments: no boot drain in P1b
+### Postgres deployments: the drain is not boot-only any more
 
-The boot drain is SQLite-only. A Postgres deployment has **no** startup drain of
-`index_outbox`: pending index intents accumulate until P3 ships the
-worker-side drain, so after a vector-store outage the intents stay queued
-(durably) instead of being replayed at boot. Write-through is unaffected —
-every write still embeds inline on the write path; only the retry path is
-deferred. `/ready` shows the store red until it is back.
+P1b's boot drain was SQLite-only, so a Postgres deployment replayed nothing at
+startup and pending `index_outbox` intents accumulated between restarts. P3
+removed the SQLite-only gate and the boot-only role — not the boot batch: the
+background drain loop runs on BOTH dialects, and the boot's one bounded batch
+now replays on both too — see
+[Background indexing (P3)](#background-indexing-p3). Write-through
+is unaffected (every write still embeds inline on the write path); only the
+retry path was ever deferred, and it is no longer deferred by dialect.
 
 ### Suppression / GC semantics of projection points
 
@@ -295,20 +386,4 @@ python eval/run_eval.py --mode live-api \
   --access-token "$ACCESS_TOKEN" \
   --sample-docs sample_docs \
   --output-dir eval/results
-```
-
-## Flower
-
-Flower is behind the `ops` profile in production compose.
-
-Start it only when needed:
-
-```bash
-docker compose -f docker-compose.yml -f docker-compose.prod.yml --profile ops up -d flower
-```
-
-Stop it after use:
-
-```bash
-docker compose -f docker-compose.yml -f docker-compose.prod.yml stop flower
 ```

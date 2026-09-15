@@ -54,8 +54,10 @@ async def safe_upsert_to_index(memory: Memory) -> bool:
 async def safe_delete_from_index(memory_id: UUID | str) -> bool:
     """Remove a memory's vector from the index. Never raises.
 
-    Returns whether the backend confirmed the delete, so a caller that owns a
-    durable intent (the outbox drain) can tell a purge from an outage.
+    ``True`` is the only proof the absence happened (R17). ``False`` covers a
+    purge that did not land, a point that survived the delete, and a store that
+    could not be read back alike — so a caller that owns a durable intent (the
+    outbox drain) retries on ``False`` instead of reading it as a purge.
     """
     try:
         from app.retrieval.memory.vector_store import delete_memory

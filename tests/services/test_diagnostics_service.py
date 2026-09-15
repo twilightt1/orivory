@@ -95,8 +95,12 @@ async def test_build_diagnostics_degrades_when_dependency_fails(monkeypatch):
     async def fake_ingestion(_db):
         return {"counts": {}, "recent_failures": [], "stuck_processing": []}
 
+    async def fake_outbox(_db):
+        return {"by_status": {"pending": 0, "done": 0, "blocked": 0}, "by_kind": {}}
+
     monkeypatch.setattr(diagnostics_service, "run_readiness_checks", fake_readiness)
     monkeypatch.setattr(diagnostics_service, "get_document_ingestion_summary", fake_ingestion)
+    monkeypatch.setattr(diagnostics_service, "get_index_outbox_summary", fake_outbox)
 
     result = await diagnostics_service.build_diagnostics(object())
 
@@ -104,3 +108,4 @@ async def test_build_diagnostics_degrades_when_dependency_fails(monkeypatch):
     assert result["checks"]["redis"]["status"] == "failed"
     assert result["checks"]["celery"]["status"] == "dormant"
     assert result["config"]["celery_queues"] == ["default", "ingestion", "email"]
+    assert result["index_outbox"]["by_status"]["blocked"] == 0  # C2: the class is in the payload

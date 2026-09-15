@@ -136,27 +136,16 @@ Expected healthy response:
 
 If any dependency fails, `/ready` returns `503` with `status: degraded`.
 
-### 3. Start Celery workers
+### 3. Nothing else to start
 
-Document ingestion requires a worker:
-
-```powershell
-celery -A app.tasks.celery_app worker -Q default,ingestion,email -c 4 -l INFO
-```
-
-On Windows, if prefork has issues, use solo pool:
-
-```powershell
-celery -A app.tasks.celery_app worker --loglevel=info -Q email,ingestion,default --pool=solo
-```
-
-Flower is available at <http://localhost:5555> when the Flower service is up.
-
-### 4. Start Celery Beat (optional)
-
-```powershell
-celery -A app.tasks.celery_app beat -l INFO --scheduler celery.beat:PersistentScheduler
-```
+Ingestion and the background index drain run INSIDE the API process (P3):
+there is no worker, beat, broker or queue to launch and none to watch. Uploads
+are ingested inline, and the writes that did not land are replayed by the
+outbox drain loop (`OUTBOX_DRAIN_INTERVAL_SECONDS`, default 5s) — memory recall
+waits for its own tenant's pending writes, bounded by
+`RECALL_FRESHNESS_BUDGET_SECONDS`, and answers a typed 503 rather than an empty
+result when they cannot land. See
+[OPERATIONS_RUNBOOK.md](OPERATIONS_RUNBOOK.md#background-indexing-p3).
 
 ---
 
@@ -165,9 +154,9 @@ celery -A app.tasks.celery_app beat -l INFO --scheduler celery.beat:PersistentSc
 ### CI-safe tests that do not need infrastructure
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest --confcutdir=tests/api tests/api/test_health_api.py tests/api/test_sse.py tests/api/test_chat_streaming.py tests/api/test_admin_diagnostics.py -q
+.\.venv\Scripts\python.exe -m pytest --confcutdir=tests/api tests/api/test_health_api.py tests/api/test_sse.py tests/api/test_admin_diagnostics.py -q
 .\.venv\Scripts\python.exe -m pytest --confcutdir=tests/services tests/services/test_health_service.py tests/services/test_diagnostics_service.py -q
-.\.venv\Scripts\python.exe -m pytest --confcutdir=tests/rag tests/rag/test_graph_routing.py tests/rag/test_evaluation.py tests/rag/test_integration.py tests/rag/test_ai_hardening.py -q
+.\.venv\Scripts\python.exe -m pytest --confcutdir=tests/rag tests/rag -q
 .\.venv\Scripts\python.exe -m pytest --confcutdir=tests/eval tests/eval/test_eval_metrics.py tests/eval/test_live_api_eval.py -q
 .\.venv\Scripts\python.exe -m pytest --confcutdir=tests/config tests/config/test_settings_validation.py -q
 ```
@@ -204,8 +193,9 @@ docker compose down -v
 ### Live API RAG evaluation
 
 Live API evaluation exercises the real API, document upload/ingestion, SSE chat
-streaming, returned sources, and trace metadata. Start the API and Celery worker
-first, then run one of these commands:
+streaming, returned sources, and trace metadata. Start the API first —
+ingestion and the index drain live inside that process (no worker to start).
+Then run one of these commands:
 
 ```powershell
 .\.venv\Scripts\python.exe eval/run_eval.py --mode live-api `
@@ -243,7 +233,7 @@ pytest tests/ -v
 Targeted lint (matches CI):
 
 ```powershell
-.\.venv\Scripts\python.exe -m ruff check app/main.py app/config.py app/agents app/services/health_service.py app/services/diagnostics_service.py app/storage.py app/tasks/ingestion_tasks.py app/retrieval app/api/v1/chat.py app/api/v1/sse.py app/api/v1/admin.py eval/run_eval.py eval/live_api_eval.py eval/metrics.py eval/reporting.py tests/api/test_health_api.py tests/api/test_sse.py tests/api/test_chat_streaming.py tests/api/test_admin_diagnostics.py tests/api/conftest.py tests/rag/test_graph_routing.py tests/rag/test_evaluation.py tests/rag/test_integration.py tests/rag/test_ai_hardening.py tests/rag/conftest.py tests/services/test_health_service.py tests/services/test_diagnostics_service.py tests/services/conftest.py tests/eval/test_eval_metrics.py tests/eval/test_live_api_eval.py tests/config/test_settings_validation.py tests/integration
+.\.venv\Scripts\python.exe -m ruff check app/main.py app/config.py app/agents app/services/health_service.py app/services/diagnostics_service.py app/storage.py app/retrieval app/api/v1/chat.py app/api/v1/sse.py app/api/v1/admin.py eval/run_eval.py eval/live_api_eval.py eval/metrics.py eval/reporting.py tests/api/test_health_api.py tests/api/test_sse.py tests/api/test_admin_diagnostics.py tests/api/conftest.py tests/rag/test_ai_hardening.py tests/rag/conftest.py tests/services/test_health_service.py tests/services/test_diagnostics_service.py tests/services/conftest.py tests/eval/test_eval_metrics.py tests/eval/test_live_api_eval.py tests/config/test_settings_validation.py tests/integration
 ```
 
 Full-repo lint (stricter, mirrors the Phase 1-3 remediation pass):

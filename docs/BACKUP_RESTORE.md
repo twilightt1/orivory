@@ -10,7 +10,7 @@ Redis is used for queues/cache/session-like data and is usually not the primary 
 | Postgres | users, conversations, messages, document metadata, chunks | Critical |
 | MinIO | uploaded source documents | Critical |
 | Qdrant | vector index | Important, rebuildable from docs/chunks |
-| Redis | Celery queues, cache, refresh tokens, rate limits | Optional / operational |
+| Redis | cache, refresh tokens, rate limits | Optional / operational |
 
 ## Postgres Backup
 
@@ -30,7 +30,7 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml exec postgres pg
 Stop app services first:
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.prod.yml stop app celery_worker celery_beat
+docker compose -f docker-compose.yml -f docker-compose.prod.yml stop app
 ```
 
 Restore:
@@ -76,7 +76,7 @@ Qdrant stores persistent index data in the `qdrantdata` Docker volume
 Snapshot the volume while writes are stopped:
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.prod.yml stop app celery_worker
+docker compose -f docker-compose.yml -f docker-compose.prod.yml stop app
 docker run --rm -v orivory_qdrantdata:/data -v "$PWD/backups":/backup alpine \
   tar czf /backup/qdrantdata_backup.tgz -C /data .
 ```
@@ -102,24 +102,23 @@ pointers live in the database, so restore both or re-run `cutover`.
 
 ## Redis Notes
 
-Redis contains Celery queue state, cache, refresh tokens, and rate limit keys.
+Redis contains cache, refresh tokens, and rate limit keys.
 In most deployments, do not rely on Redis as the backup source of truth.
 
 If Redis is lost:
 
-- active Celery jobs may need to be retried
 - users may need to log in again
 - BM25/parent caches can rebuild through ingestion paths
 
 ## Safe Restore Order
 
-1. Stop API and Celery workers.
+1. Stop the API.
 2. Restore Postgres.
 3. Restore MinIO.
 4. Restore Qdrant if available.
 5. Start infrastructure.
 6. Run migrations.
-7. Start API and Celery.
+7. Start the API.
 8. Check `/ready`.
 9. Run offline or live API eval smoke.
 

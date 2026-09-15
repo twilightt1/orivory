@@ -79,7 +79,10 @@ async def _empty_search(*_args, **_kwargs):
 
 
 @pytest.mark.asyncio
-async def test_trace_has_new_stage_keys_and_total(monkeypatch):
+async def test_trace_has_new_stage_keys_and_total(monkeypatch, barrier_outbox):
+    # ``barrier_outbox``: recall's R14 freshness barrier reads the outbox
+    # through its own sessionmaker; a real (empty) one keeps the count read
+    # succeeding — see tests/retrieval/conftest.py.
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
@@ -103,7 +106,7 @@ async def test_trace_has_new_stage_keys_and_total(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_embed_failure_returns_empty_response_with_trace_timings(monkeypatch):
+async def test_embed_failure_returns_empty_response_with_trace_timings(monkeypatch, barrier_outbox):
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
@@ -130,7 +133,7 @@ async def test_embed_failure_returns_empty_response_with_trace_timings(monkeypat
 
 
 @pytest.mark.asyncio
-async def test_embed_mismatch_propagates_instead_of_empty_response(monkeypatch, tmp_path):
+async def test_embed_mismatch_propagates_instead_of_empty_response(monkeypatch, tmp_path, barrier_outbox):
     """A contract mismatch is a readiness failure — never flattened to empty."""
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 't7_scoring.db'}")
     async with engine.begin() as conn:

@@ -164,13 +164,12 @@ promote these to GitHub issues with the `good first issue` label.
 | # | Task | Files | Done when |
 |---|---|---|---|
 | 1 | Startup embedding-dim check (fail-fast at boot, today the guard only fires on next write/query) | `app/retrieval/embedder.py`, `app/main.py` lifespan | Mismatched `EMBED_*` config vs the active vector-store generation refuses boot with a clear message; test with fake collection |
-| 2 | Sync httpx client for the graph builder (today `llm_client` rebuilds per Celery task and leaks the old client — see code comment) | `app/agents/llm_client.py`, `app/tasks/graph_tasks.py` | Builder uses its own sync client; no rebuild-per-task; existing `tests/agents/test_llm_client_loop.py` still green |
-| 3 | HTTP-level behavioral security tests (ROADMAP #2 remainder: cross-user 404, ledger scoping over real HTTP) | `tests/api/`, `tests/conftest.py` | Matrix of user-A vs user-B resource access over ASGI transport, all 403/404 as appropriate |
-| 4 | Migrate raw `fetch(` calls to the shared `apiClient` | `frontend/src/app/settings/page.tsx`, `forgot-password`, `login`, `share/[id]`, `ProactiveInsightToast/Widget`, `ReferralDashboard`, `AuthProvider` | No direct `fetch(` outside `lib/api-client.ts`; `tsc --noEmit` clean |
-| 5 | Convert one legacy eval one-shot into an entrypoint CLI | `eval/run_real_sample.py` (or siblings listed in `eval/README.md`) | Same outputs via argparse flags; README table updated; no new scripts |
-| 6 | Document cost-ledger multi-worker limitation | `app/observability/` cost tracker + `docs/OPERATIONS_RUNBOOK.md` | Limitation + workaround (single worker / external DB) written where an operator will find it |
+| 2 | HTTP-level behavioral security tests (ROADMAP #2 remainder: cross-user 404, ledger scoping over real HTTP) | `tests/api/`, `tests/conftest.py` | Matrix of user-A vs user-B resource access over ASGI transport, all 403/404 as appropriate |
+| 3 | Migrate raw `fetch(` calls to the shared `apiClient` | `frontend/src/app/settings/page.tsx`, `forgot-password`, `login`, `share/[id]`, `ProactiveInsightToast/Widget`, `ReferralDashboard`, `AuthProvider` | No direct `fetch(` outside `lib/api-client.ts`; `tsc --noEmit` clean |
+| 4 | Convert one legacy eval one-shot into an entrypoint CLI | `eval/run_real_sample.py` (or siblings listed in `eval/README.md`) | Same outputs via argparse flags; README table updated; no new scripts |
+| 5 | Document cost-ledger multi-worker limitation | `app/observability/` cost tracker + `docs/OPERATIONS_RUNBOOK.md` | Limitation + workaround (single worker / external DB) written where an operator will find it |
 
-Rules for all six: TDD (RED test first), `ruff` clean, no new infra.
+Rules for all five: TDD (RED test first), `ruff` clean, no new infra.
 
 ---
 

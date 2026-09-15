@@ -500,6 +500,26 @@ async def reindex_memories(
         )
 
 
+class ErasureReconcileResponse(BaseModel):
+    checked: int
+    upgraded: int
+    still_unverified: int
+
+
+@router.post("/erasure/reconcile", response_model=ErasureReconcileResponse)
+async def reconcile_erasure(admin_user: User = Depends(require_admin)) -> ErasureReconcileResponse:
+    """Re-verify open erasure receipts (upgrade-only).
+
+    Re-reads vector absence + residual DB rows for receipts still in
+    ``pending`` / ``completed_unverified`` and rewrites only the clean ones to
+    ``completed``. Same dict as ``erasure_service.reconcile_erasure_receipts``;
+    no target entity to audit — the receipts it revises carry their own record.
+    """
+    from app.services.erasure_service import reconcile_erasure_receipts
+
+    return ErasureReconcileResponse(**await reconcile_erasure_receipts())
+
+
 class QualityTrendResponse(BaseModel):
     window_hours: int
     generated_at: str | None = None

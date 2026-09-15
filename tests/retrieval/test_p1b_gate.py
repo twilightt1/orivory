@@ -69,7 +69,7 @@ from app.retrieval.embedding_fingerprint import (
     ARCTIC_CLS_FINGERPRINT,
     generation_name,
 )
-from app.retrieval.memory import outbox, vector_store
+from app.retrieval.memory import freshness, outbox, vector_store
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CLI_PATH = REPO_ROOT / "scripts" / "migrate_qdrant.py"
@@ -159,6 +159,7 @@ def _bind_engines(url: str, monkeypatch):
     monkeypatch.setattr(database, "IS_SQLITE", True)
     monkeypatch.setattr(database, "AsyncSessionLocal", sessions)
     monkeypatch.setattr(outbox, "AsyncSessionLocal", sessions)  # the drain's own
+    monkeypatch.setattr(freshness, "AsyncSessionLocal", sessions)  # the R14 barrier's count
     monkeypatch.setattr(
         database,
         "_get_sync_sessionmaker",

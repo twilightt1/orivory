@@ -43,8 +43,9 @@ unifies them.
 - **BM25 + reranking** — hybrid recall: vector candidates + keyword
   candidates fused, then reranked.
 - **Salience loop** — memories used in answers get bumped; untouched ones
-  decay (periodic Celery beat). Ranking is salience × recency × relevance
-  (the Generative-Agents scoring, reinforced on access).
+  decay. Ranking is salience × recency × relevance (the Generative-Agents
+  scoring, reinforced on access); the decay is computed when a memory is
+  scored, not by a periodic job (the slim branch has no beat/scheduler).
 - **Knowledge graph** — `entities` / `relations` extracted per memory;
   graph snapshot/related endpoints power the UI; graph context feeds RAG.
 - **Forgetting (suppression/GC)** — a forgotten source gets a
@@ -164,7 +165,7 @@ by characters before the LLM call; the fallback answer is an explicit
 - Postgres 16 (SQLAlchemy 2.0 async + Alembic), Redis 7 (cache/queue),
   Qdrant (vectors), MinIO (attachments).
 - Migrations are part of `docker compose up`: the one-shot `migrate`
-  service runs `alembic upgrade head`, and `app`/`celery_worker` gate on
+  service runs `alembic upgrade head`, and `app` gates on
   `service_completed_successfully` — a server can never start against a
   table-less database. Migrations were dry-run-verified on disposable
   Postgres 16 (upgrade / downgrade / re-upgrade / INSERT probes).
@@ -188,10 +189,19 @@ by characters before the LLM call; the fallback answer is an explicit
   cutover`, app stopped throughout — is in
   [OPERATIONS_RUNBOOK.md](OPERATIONS_RUNBOOK.md), and the one-release swap-back
   in [ROLLBACK_P1B.md](ROLLBACK_P1B.md).
-- **Boot drain.** SQLite (lite) replay of pending `index_outbox` intents runs at
-  startup; **Postgres deployments have no boot drain in P1b** — intents
-  accumulate until P3 ships the worker-side drain. Write-through is unaffected
-  (every write still embeds inline); only retries are deferred.
+- **Index drain (P3).** A background drain loop replays pending
+  `index_outbox` intents against the vector store, and it runs on **both**
+  dialects — a Postgres deployment no longer accumulates a backlog waiting for
+  a restart (P1b's SQLite-only gate and boot-only role are gone; the boot still
+  replays one bounded batch as a warm start). One round every
+  `OUTBOX_DRAIN_INTERVAL_SECONDS` (default 5s), or immediately after a batch
+  that applied anything, so a backlog drains at full speed. Write-through is
+  unaffected (every write still embeds inline); the loop owns the RETRY path.
+  Memory recall is guarded by the freshness barrier: it waits for the calling
+  tenant's own pending intents, bounded by `RECALL_FRESHNESS_BUDGET_SECONDS`
+  (default 2.0s), and **fails closed** with a typed 503
+  (`index_freshness_timeout`) instead of answering an empty result for a write
+  that has not landed. Operationally: [OPERATIONS_RUNBOOK.md](OPERATIONS_RUNBOOK.md).
 
 ## 8. REST surface map
 

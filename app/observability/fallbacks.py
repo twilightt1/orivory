@@ -15,6 +15,7 @@ Canonical path names (keep stable; dashboards alert on them):
   retrieval.rerank_failed        Jina/reranker error, vector order kept
   retrieval.bm25_rebuild_failed  BM25 lazy rebuild failed, stale index used
   crag.grading_failed            Doc grading error, defaulted IRRELEVANT
+  index.outbox_drain_failed      drain round raised; intents stay pending for the retry
 """
 from __future__ import annotations
 

@@ -290,6 +290,11 @@ async def get_memory_ids_present(memory_ids: list[str]) -> set[str]:
 async def delete_memory(memory_id: str) -> bool:
     """Remove a memory's vector from the active generation.
 
+    ``True`` only when absence was READ BACK (the ``delete_chunks`` shape): the
+    durable outbox acks a delete intent ``done`` from this result, so a delete
+    that cannot confirm the point is gone must stay unconfirmed and be retried
+    (``VectorDeleteUnconfirmed``).
+
     Deliberately UNGUARDED by the contract check: erasure must still work when
     a generation's contract is stale, and the durable outbox acks a delete
     intent ``done`` from this result — ``False`` keeps it pending and retried.
@@ -302,6 +307,12 @@ async def delete_memory(memory_id: str) -> bool:
         await client.delete(
             collection_name=generation, points_selector=qm.PointIdsList(points=[memory_id])
         )
+        survivors = await client.retrieve(
+            collection_name=generation, ids=[memory_id], with_payload=False
+        )
+        if survivors:
+            log.warning("Memory delete not confirmed", extra={"memory_id": memory_id})
+            return False
         log.info("Deleted memory from Qdrant", extra={"memory_id": memory_id})
         return True
     except Exception as e:
@@ -323,6 +334,14 @@ async def delete_memories(memory_ids: list[str]) -> bool:
             collection_name=generation,
             points_selector=qm.PointIdsList(points=list(memory_ids)),
         )
+        survivors = await client.retrieve(
+            collection_name=generation, ids=list(memory_ids), with_payload=False
+        )
+        if survivors:
+            log.warning(
+                "Memory delete not confirmed", extra={"still_present": len(survivors)}
+            )
+            return False
         log.info("Deleted memories from Qdrant", extra={"n": len(memory_ids)})
         return True
     except Exception as e:
@@ -334,7 +353,13 @@ async def delete_memories(memory_ids: list[str]) -> bool:
 
 
 def delete_memories_sync(memory_ids: list[str]) -> None:
-    """Synchronous batch delete — used by Celery ingestion (best-effort)."""
+    """Synchronous batch delete — used by Celery ingestion (best-effort).
+
+    Reads the batch back after the delete (the async face's shape) and logs a
+    survivor BY ID: the caller has no durable intent to retry with, so a missed
+    purge here would otherwise be a silent orphan point in the served
+    generation.
+    """
     if not memory_ids:
         return
     try:
@@ -343,6 +368,19 @@ def delete_memories_sync(memory_ids: list[str]) -> None:
             collection_name=generation,
             points_selector=qm.PointIdsList(points=list(memory_ids)),
         )
+        survivors = client.retrieve(
+            collection_name=generation, ids=list(memory_ids), with_payload=False
+        )
+        if survivors:
+            log.warning(
+                "Memory delete not confirmed (sync)",
+                extra={
+                    "n": len(memory_ids),
+                    "still_present": len(survivors),
+                    "memory_ids": [str(record.id) for record in survivors],
+                },
+            )
+            return
         log.info("Deleted memories from Qdrant (sync)", extra={"n": len(memory_ids)})
     except Exception as e:
         log.warning(
