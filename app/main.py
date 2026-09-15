@@ -13,6 +13,7 @@ from app.api.v1.router import api_router
 from app.config import settings
 from app.middleware.logging_middleware import LoggingMiddleware
 from app.retrieval.embedder import EmbeddingDimensionMismatch
+from app.retrieval.memory.outbox import IndexFreshnessTimeout
 from app.retrieval.vector_retriever import VectorUnavailableError
 
 log = structlog.get_logger()
@@ -162,8 +163,9 @@ app.add_middleware(
 app.include_router(api_router)
 
 
-# Typed readiness errors: an embedding contract mismatch or an unreachable
-# vector store must answer 503 with a machine-readable body — never an
+# Typed readiness errors: an embedding contract mismatch, an unreachable
+# vector store, or a recall that waited out its freshness budget for a write
+# still in flight must answer 503 with a machine-readable body — never an
 # unhandled 500 and never a silent empty 200 (see MemoryRetriever.recall).
 @app.exception_handler(EmbeddingDimensionMismatch)
 async def _embedding_contract_mismatch_handler(
@@ -185,6 +187,23 @@ async def _vector_unavailable_handler(
         {"error": "vector_unavailable"},
         status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
     )
+
+
+@app.exception_handler(IndexFreshnessTimeout)
+async def _index_freshness_timeout_handler(
+    _request: Request, exc: IndexFreshnessTimeout
+) -> JSONResponse:
+    """A recall waited out its budget for this tenant's pending index intents.
+
+    ``results: []`` would be a false no-match for a memory that was just
+    written, so this is a readiness answer instead.
+    """
+    log.warning("Recall freshness budget exhausted", error=str(exc))
+    return JSONResponse(
+        {"error": "index_freshness_timeout"},
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+    )
+
 
 if settings.MCP_HUB_ENABLED:
     from starlette.routing import Route

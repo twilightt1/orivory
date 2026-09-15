@@ -33,6 +33,14 @@ class Settings(BaseSettings):
     OUTBOX_DRAIN_INTERVAL_SECONDS: float = 5.0
     OUTBOX_DRAIN_BATCH_SIZE: int = 50
 
+    # ── Recall freshness barrier (P3) ─────────────────────────────────────────
+    # A recall waits up to this long for its OWN tenant's pending index intents
+    # to land before it searches (app/retrieval/memory/freshness.py): a memory
+    # written moments ago must never read as a no-match. Past the budget the
+    # recall answers 503 `index_freshness_timeout` — deliberately, since an
+    # empty 200 would be that false no-match.
+    RECALL_FRESHNESS_BUDGET_SECONDS: float = 2.0
+
     # The port the API listens on. `scripts/migrate_qdrant.py` probes it (plus
     # its `migrate.lock`) to refuse to run while the app is alive — the P1b
     # migration needs a quiesced store (spec §6.2 step 2, ruling R25). The

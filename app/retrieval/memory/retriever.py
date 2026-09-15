@@ -3,6 +3,9 @@ Phase 3 — ``MemoryRetriever``: the orchestrator for personal-context recall.
 
 Pipeline (one call to :py:meth:`MemoryRetriever.recall`):
 
+    0. Wait — bounded — for this tenant's own pending index intents (the
+       freshness barrier), so a memory written moments ago is not read as a
+       no-match.
     1. Fetch personal context (pinned + last 7 days + last 20).
     2. LLM rewrite the query + extract entities (1 call; best-effort).
     3. Embed the rewritten query (1 call; falls back to original).
@@ -13,9 +16,10 @@ Pipeline (one call to :py:meth:`MemoryRetriever.recall`):
     7. Sort by combined score, return top_k.
     8. Build the ``RecallTrace`` with timings + fallbacks used.
 
-Every step degrades gracefully, EXCEPT two typed signals that must never be
-served as an empty result: an embedding contract mismatch and an unreachable
-vector store. Those propagate to the API as a 503 readiness error (see
+Every step degrades gracefully, EXCEPT three typed signals that must never be
+served as an empty result: an embedding contract mismatch, an unreachable
+vector store, and a freshness barrier that timed out (a write still in flight
+is not a no-match). Those propagate to the API as a 503 readiness error (see
 ``app.main`` handlers). Everything else (LLM down, DB read errors) still
 returns a 200 with an empty ``results`` list and a trace indicating what was
 attempted.
@@ -38,6 +42,7 @@ from app.retrieval.embedder import EmbeddingDimensionMismatch, embed_query
 from app.retrieval.memory.context import fetch_personal_context
 from app.retrieval.memory.correction import needs_rewrite as _needs_rewrite
 from app.retrieval.memory.correction import state_of as _state_of
+from app.retrieval.memory.freshness import await_freshness
 from app.retrieval.memory.query_rewriter import rewrite_query
 from app.retrieval.memory.scoring import entity_boost, time_decay_score
 from app.retrieval.memory.vector_store import search_memories
@@ -99,6 +104,22 @@ class MemoryRetriever:
             "search_ms": 0.0,
             "hydrate_ms": 0.0,
         }
+
+        # 0) Freshness barrier (P3, ruling R1): wait — bounded — for THIS
+        # tenant's own pending index intents before anything reads the index,
+        # so a memory written moments ago is never served as a no-match. The
+        # wait is claimed through the drain loop's single-flight door; its
+        # IndexFreshnessTimeout is deliberately NOT caught here — like the two
+        # contract errors below it is a readiness failure, and the API answers
+        # it with the typed 503 body (ruling R10). ``queue_wait`` records the
+        # barrier's own measurement, in milliseconds, exactly once.
+        stage_ms["queue_wait"] = (
+            await await_freshness(
+                user_id=str(self.user_id),
+                timeout=settings.RECALL_FRESHNESS_BUDGET_SECONDS,
+            )
+            * 1000.0
+        )
 
         # 1) Personal context
         context: list[Memory] = []

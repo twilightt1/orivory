@@ -80,6 +80,18 @@ class VectorDeleteUnconfirmed(RuntimeError):
     """
 
 
+class IndexFreshnessTimeout(Exception):
+    """A read waited for its own tenant's pending index intents and they did
+    not land within the budget.
+
+    Readiness, never a no-match: recall raises this instead of answering an
+    empty result for a write that is merely still in flight, and the API
+    answers 503 with the typed body ``{"error": "index_freshness_timeout"}``
+    (see ``app.main``). Raised by
+    :func:`app.retrieval.memory.freshness.await_freshness`.
+    """
+
+
 def bump_revision(memory) -> int:
     """Advance (and return) the memory's monotonic write counter.
 
@@ -648,6 +660,7 @@ __all__ = [
     "OPERATION_DELETE",
     "OPERATION_UPSERT",
     "TARGET_GENERATION",
+    "IndexFreshnessTimeout",
     "VectorDeleteUnconfirmed",
     "active_generation",
     "active_generation_sync",
