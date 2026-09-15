@@ -92,6 +92,7 @@ from app.retrieval.embedding_fingerprint import (  # noqa: E402
 )
 from app.retrieval.memory import outbox, vector_store  # noqa: E402
 from app.retrieval.memory.correction import state_of  # noqa: E402
+from app.services.erasure_service import ERASURE_STATUS_COMPLETED  # noqa: E402
 
 log = logging.getLogger("migrate_qdrant")
 
@@ -1118,9 +1119,6 @@ def verify(*, kind: str) -> dict:
 
 # ── restore drill (spec §12, ruling R33) ────────────────────────────────────
 
-DRILL_ABSENCE_STATUS = "completed"
-
-
 def _check(findings: list[str]) -> dict:
     return {"ok": not findings, "findings": findings}
 
@@ -1225,10 +1223,11 @@ def _drill_ledger(manifest: dict, path: Path) -> dict:
 def _drill_absence(path: Path) -> dict:
     """GC/absence assertions: the restore must not resurrect what was erased.
 
-    A receipt with status ``completed`` is a hard claim that its memories were
-    gone; a chunk whose document row no longer exists is GC residue that no
-    reader can serve. Either one present in the restore means the bytes are not
-    the state the receipt was written against.
+    A receipt carrying the app's own ``completed`` status
+    (``ERASURE_STATUS_COMPLETED``) is a hard claim that its memories were gone; a
+    chunk whose document row no longer exists is GC residue that no reader can
+    serve. Either one present in the restore means the bytes are not the state
+    the receipt was written against.
     """
     findings: list[str] = []
     conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
@@ -1239,7 +1238,7 @@ def _drill_absence(path: Path) -> dict:
             for receipt_id, status, ids in conn.execute(
                 "SELECT id, status, requested_memory_ids FROM erasure_receipts"
             ):
-                if status != DRILL_ABSENCE_STATUS:
+                if status != ERASURE_STATUS_COMPLETED:
                     continue
                 for memory_id in _json_list(ids):
                     if _norm_id(memory_id) in present:
@@ -1264,7 +1263,9 @@ def restore_drill(*, backup_dir: Path, target: Path | None = None) -> dict:
 
     Read-only over the backup volume (checksums are recomputed, never written)
     and it never touches the live database, so it is safe to run with the app
-    up. ``target`` defaults to ``<backup_dir>.restore`` beside the backup.
+    up. ``target`` defaults to ``<backup_dir>.restore`` beside the backup; it
+    must be empty (or absent) and outside ``backup_dir``, because a target
+    inside the volume would write into the bytes the drill is verifying.
     """
     if not is_sqlite():
         raise MigrationRefused(
@@ -1292,6 +1293,11 @@ def restore_drill(*, backup_dir: Path, target: Path | None = None) -> dict:
     except json.JSONDecodeError:
         raise MigrationRefused(f"manifest {manifest_path} is not readable JSON") from None
     target = Path(target).resolve() if target else backup_dir.parent / f"{backup_dir.name}.restore"
+    if target.is_relative_to(backup_dir):
+        raise MigrationRefused(
+            f"target {target} is inside the backup directory {backup_dir} — the drill "
+            "never writes into the volume it verifies; choose a target outside it"
+        )
     if target.exists() and any(target.iterdir()):
         raise MigrationRefused(
             f"target {target} is not empty — the drill restores into a NEW directory "

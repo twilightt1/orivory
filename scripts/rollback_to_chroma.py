@@ -26,6 +26,10 @@ What the rebuild guarantees (rulings R30-R32):
 - the fixture gates (tenant isolation, ID set, correction, forget, chunks) run
   BEFORE anything is reported ready, and a failing gate writes a
   ``NOT-READY.json`` marker into the store;
+- the arctic-mean assumption is cross-checked against the INSTALL's own records
+  (the expand record, and any row still naming the mean generation): a
+  contradiction refuses, and an install that records nothing is reported as
+  unverified instead of implied;
 - neither the LIVE database nor the pre-P1b snapshot beside it is written — all
   work happens on the emitted copy.
 
@@ -160,6 +164,76 @@ def rollback_from(db_path: Path) -> dict:
     return {"source": "none", "active": None,
             "hint": "no rollback marker and no expand record: the generation the "
                     "live rows serve was not recorded by the migration"}
+
+
+def _mapping(value: object) -> dict:
+    """A JSON field that may be anything: a dict or nothing usable."""
+    return value if isinstance(value, dict) else {}
+
+
+def mean_evidence(db_path: Path) -> dict:
+    """What the INSTALL's own records say about the contract it served pre-P1b.
+
+    Ambient settings describe the post-P1b deployment, so they cannot show that
+    the store being rebuilt was the arctic mean one. Two records can, and both
+    are read here: the pointer recorded at expand time
+    (``<db>.p1b-expand-record.json``) and any ``index_generations`` row that
+    still names the mean generation (the P1a transitional row), which carries
+    the fingerprint token it was built at.
+
+    ``mean`` is ``None`` when neither record names a contract: the assumption is
+    then UNVERIFIED, and the report says so instead of implying a check that
+    never ran. ``False`` is a contradiction the caller refuses on.
+    """
+    mean_names = {outbox.TARGET_GENERATION, outbox.CHUNK_TARGET_GENERATION}
+    observed: dict[str, list[str]] = {}
+    sources: list[str] = []
+    record = sidecar(db_path, migration.EXPAND_RECORD_NAME)
+    if record.is_file():
+        sources.append(record.name)
+        try:
+            recorded = json.loads(record.read_text())
+        except json.JSONDecodeError:
+            recorded = {}
+        for kind, name in sorted(_mapping(_mapping(recorded).get("previous")).items()):
+            if name:
+                observed.setdefault(str(kind), []).append(str(name))
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        if "index_generations" in migration._table_names(conn):
+            rows = conn.execute(
+                "SELECT kind, generation, fingerprint FROM index_generations "
+                "WHERE generation IN (?, ?)",
+                tuple(sorted(mean_names)),
+            ).fetchall()
+            if rows:
+                sources.append("index_generations")
+            for kind, generation, fingerprint in rows:
+                observed.setdefault(str(kind), []).extend(
+                    value for value in (str(generation), str(fingerprint or "")) if value
+                )
+    finally:
+        conn.close()
+
+    known = mean_names | {mean_token()}
+    foreign = sorted({value for values in observed.values() for value in values
+                      if value not in known})
+    if not observed:
+        note = ("no install record names a pre-P1b contract (no expand record, no row "
+                "naming the mean generation): the arctic mean assumption is UNVERIFIED, "
+                "not confirmed")
+    elif foreign:
+        note = (f"the install's records name a different contract: {', '.join(foreign)} "
+                "— neither the mean generation names nor the mean token")
+    else:
+        note = "the install's records name the arctic mean generation and token"
+    return {
+        "mean": None if not observed else not foreign,
+        "sources": sources,
+        "observed": observed,
+        "unexpected": foreign,
+        "note": note,
+    }
 
 
 # ── reading: the live data, on a copy ───────────────────────────────────────
@@ -398,13 +472,48 @@ def _by_tenant(expected: dict[str, str]) -> dict[str, set[str]]:
     return tenants
 
 
+def _contract_findings(metadata: dict) -> list[str]:
+    """Every way the OLD binary's own guard would reject this collection.
+
+    ``check_collection_dim`` — the p1a code the pre-P1b binary runs before every
+    query — requires the collection's recorded backend to equal its
+    ``active_backend_name()``, its dim to equal the embedding dim, its
+    fingerprint to equal the contract it embeds with, and its generation to be
+    that fingerprint's own token; the space must be the cosine the vectors were
+    compared under. A store that fails any of them is not ready, however clean
+    its points are.
+    """
+    problems: list[str] = []
+    canonical = str(metadata.get("orivory_embed_fingerprint") or "")
+    if canonical != mean_canonical():
+        problems.append("fingerprint")
+    try:
+        generation: str | None = fingerprint_generation(canonical)
+    except ValueError:
+        generation = None
+    if not generation or metadata.get("orivory_embed_generation") != generation:
+        problems.append("generation")
+    if metadata.get("orivory_embed_backend") != MEAN_BACKEND:
+        problems.append("backend")
+    try:
+        dim: int | None = int(str(metadata.get("orivory_embed_dim")))
+    except (TypeError, ValueError):
+        dim = None
+    if dim != int(LEGACY_MEAN_FINGERPRINT["dim"]):
+        problems.append("dim")
+    if metadata.get("hnsw:space") != CHROMA_SPACE["hnsw:space"]:
+        problems.append("space")
+    return problems
+
+
 def gate_findings(*, client, memory_collection: str, chunk_collections: dict, expected: dict,
                   excluded: dict, chunk_expected: dict, token: str) -> dict[str, list[str]]:
     """Read the rebuilt store back and report every fixture violation.
 
     Findings are grouped by the fixture they belong to: ``id_set`` (the served
     set must equal the eligible set, per tenant), ``fingerprint`` (the legacy
-    mean contract), ``tenant_isolation`` (no query may cross a tenant),
+    mean contract: the collection stamp the old guard reads AND the per-point
+    generation), ``tenant_isolation`` (no query may cross a tenant),
     ``correction`` (a superseded/dirty row is gone), ``forget`` (a suppressed
     row is gone and stays gone) and ``chunks``. An empty dict means ready.
     """
@@ -414,8 +523,8 @@ def gate_findings(*, client, memory_collection: str, chunk_collections: dict, ex
         findings.setdefault(bucket, []).append(str(entity_id))
 
     memory = client.get_collection(memory_collection)
-    if memory.metadata.get("orivory_embed_fingerprint") != mean_canonical():
-        add("fingerprint", "collection-stamp")
+    for problem in _contract_findings(dict(memory.metadata or {})):
+        add("fingerprint", f"collection:{problem}")
     served: dict[str, set[str]] = {}
     served_ids: set[str] = set()
     absent_by_reason = {"superseded": "correction", "dirty": "correction", "suppressed": "forget"}
@@ -454,8 +563,8 @@ def gate_findings(*, client, memory_collection: str, chunk_collections: dict, ex
 
     for name, want_ids in chunk_expected.items():
         collection = chunk_collections[name]
-        if collection.metadata.get("orivory_embed_fingerprint") != mean_canonical():
-            add("fingerprint", f"{name}:stamp")
+        for problem in _contract_findings(dict(collection.metadata or {})):
+            add("fingerprint", f"{name}:{problem}")
         have = {point_id for point_id, _payload in _points(collection)}
         for missing in sorted(set(want_ids) - have):
             add("chunks", missing)
@@ -472,6 +581,11 @@ def rollback(*, db_path: Path, chroma_path: Path, fingerprint: str = MEAN,
              out_db: Path | None = None, embed_passages=None, batch: int = DEFAULT_BATCH) -> dict:
     """Rebuild the pre-P1b Chroma store + the SQLite copy the old binary opens."""
     started = time.monotonic()
+    if not migration.is_sqlite():
+        raise RollbackRefused(
+            "rollback_to_chroma rebuilds a SQLite install's Chroma store; a server "
+            "deployment rolls back with its Qdrant snapshot and its own pre-P1b path"
+        )
     if fingerprint not in FINGERPRINTS:
         raise RollbackRefused(
             f"unknown fingerprint {fingerprint!r}: this tool rebuilds the "
@@ -486,16 +600,32 @@ def rollback(*, db_path: Path, chroma_path: Path, fingerprint: str = MEAN,
     db_path = Path(db_path)
     if not db_path.is_file():
         raise RollbackRefused(f"no such database: {db_path}")
+    evidence = mean_evidence(db_path)
+    if evidence["mean"] is False:
+        raise RollbackRefused(
+            f"refusing to rebuild: {evidence['note']}. This store would carry vectors "
+            "for a contract the install never served"
+        )
     chroma_path = Path(chroma_path)
+    if chroma_path.exists() and not chroma_path.is_dir():
+        raise RollbackRefused(
+            f"{chroma_path} is a file — --chroma-path names the DIRECTORY the rebuilt "
+            "store is written into"
+        )
     if chroma_path.exists() and any(chroma_path.iterdir()):
         raise RollbackRefused(
             f"{chroma_path} already holds a store — a rollback builds a FRESH "
-            "directory (never merges into an existing one); pick another path "
-            "or remove it"
+            "directory (never merges into an existing one); pass another "
+            "--chroma-path or remove it. A re-run generally needs both: another "
+            "--chroma-path AND --out-db for the emitted copy"
         )
     emitted = Path(out_db) if out_db else chroma_path.parent / f"{db_path.name}.rollback.db"
     if emitted.exists():
-        raise RollbackRefused(f"{emitted} already exists — remove it to rebuild")
+        raise RollbackRefused(
+            f"{emitted} already exists — a rebuild never overwrites an emitted copy; "
+            "remove it, or pass --out-db <path> (a second rollback also needs its own "
+            "--chroma-path: the store beside it is taken)"
+        )
     if emitted.resolve() == db_path.resolve():
         raise RollbackRefused("--out-db must not be the live database")
     migration.require_quiesced()
@@ -544,6 +674,7 @@ def rollback(*, db_path: Path, chroma_path: Path, fingerprint: str = MEAN,
         "ok": not gates,
         "fingerprint": {"name": fingerprint, "canonical": mean_canonical(),
                         "token": mean_token(), "dim": int(LEGACY_MEAN_FINGERPRINT["dim"])},
+        "contract_evidence": evidence,
         "db": {"source": str(db_path), "emitted": str(emitted),
                "user_version": PRE_P1B_USER_VERSION},
         "chroma": {"path": str(chroma_path),
@@ -561,7 +692,9 @@ def rollback(*, db_path: Path, chroma_path: Path, fingerprint: str = MEAN,
         (chroma_path / NOT_READY_MARKER).write_text(json.dumps(
             {"ready": False, "built_at": datetime.now(UTC).isoformat(), "findings": gates,
              "message": "a fixture gate failed: do NOT point the pre-P1b binary at this "
-                        "store; re-run the rollback once the finding is understood"},
+                        "store; re-run the rollback with a fresh --chroma-path (and "
+                        "--out-db, if the emitted copy is taken) once the finding is "
+                        "understood — this store is never overwritten or merged into"},
             indent=2,
         ))
         log.error("rollback gates failed: %s", ", ".join(f"{k}={len(v)}" for k, v in gates.items()))

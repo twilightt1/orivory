@@ -39,13 +39,20 @@ Arguments:
 | flag | meaning |
 | --- | --- |
 | `--db` | the **live** SQLite database (never the snapshot) |
-| `--chroma-path` | where the rebuilt Chroma store is written; must be free |
+| `--chroma-path` | where the rebuilt Chroma store is written; must be a free DIRECTORY (a file, or a non-empty directory, is refused) |
 | `--fingerprint` | `legacy-mean` only — the contract the old binary expects |
-| `--out-db` | where the SQLite copy goes (default: beside the store) |
+| `--out-db` | where the SQLite copy goes (default: beside the store); must not already exist |
 | `--batch` | rows per embedding batch (default 64) |
 
 Exit codes: `0` rebuilt and every gate passed; `1` rebuilt, a gate failed (see
 the marker below); `2` refused before doing anything.
+
+`--chroma-path` must name a **free directory**: a path that is a file, or a
+directory that already holds anything, is refused before a byte is written.
+Both artifacts belong to the run that made them: a **failed** build removes the
+store directory it created (an empty directory you passed in is removed with
+it) and the emitted copy — the source database is untouched either way — and
+neither artifact of a completed build is ever overwritten or merged into.
 
 ### What it emits
 
@@ -67,9 +74,12 @@ the marker below); `2` refused before doing anything.
   - `PRAGMA user_version = 2` — without this the old ladder refuses to boot the
     file at all.
 
-The tool never writes the live database or the `.pre-p1b.bak` snapshot beside
-it; the copy is read once, read-only, and all edits land on the emitted file.
-Post-cutover writes are preserved because the source is the live DB.
+The tool never edits the live database or the `.pre-p1b.bak` snapshot beside
+it: it reads the live database once through a read-only handle (a killed
+process can leave a WAL that only opens read-write — that fallback may
+checkpoint the WAL, but it never changes committed content), and every edit
+lands on the emitted copy. Post-cutover writes are preserved because the source
+is the live DB.
 
 The chunk collections are rebuilt from `document_chunks` (never skipped): every
 row the live reader would index — the migration CLI's eligibility rule, one
@@ -84,10 +94,27 @@ Before the report says ready, the rebuilt store is read back and checked:
 tenant isolation (per-tenant ID sets, plus a filtered query that must not cross
 a tenant), the ID set against the eligible set, the legacy mean contract on
 every point and collection, corrections (superseded/dirty absent) and forgets
-(suppressed absent). A failure writes `NOT-READY.json` **into the store** with
-the findings and exits `1` — do not point the old binary at a store carrying
-that file. Re-run the rebuild (with another `--chroma-path`) once the finding is
-understood.
+(suppressed absent). The contract check is the OLD binary's own
+`check_collection_dim` guard, not a weaker cousin: `orivory_embed_backend =
+local-arctic`, `orivory_embed_dim = 384`, the mean fingerprint,
+`orivory_embed_generation = fingerprint_generation(fingerprint)` and
+`hnsw:space = cosine` on every collection, plus the mean generation on every
+point. A failure writes `NOT-READY.json` **into the store** with the findings
+and exits `1` — do not point the old binary at a store carrying that file.
+
+Re-running is always a **fresh build**, never an overwrite: the store directory
+and the emitted copy (`<db>.rollback.db` by default) both belong to the run that
+made them. Give the second run its own paths (`--chroma-path
+/data/chroma-rollback-2 --out-db /data/orivory.rollback-2.db`) or move/delete the
+previous pair first — the refusal names the same remedy.
+
+The arctic-mean assumption is also cross-checked against the **install's own
+records**: the pointer in `<db>.p1b-expand-record.json` and any
+`index_generations` row still naming the mean generation, which carries the
+token it was built at. The report's `contract_evidence.mean` is `true` (the
+records agree), `false` (they name a different contract — the tool refuses with
+exit `2`) or `null` (no record names a pre-P1b contract: the assumption is
+**unverified**, not confirmed).
 
 ## 2. What it is rolling back FROM
 
@@ -121,7 +148,9 @@ store, and `user_version = 2` makes the era explicit).
 
 Writes made **after** the rebuild are not in the emitted copy (it is a copy of
 the live database at run time). Record the cutover point in the incident log
-and re-run the rebuild if the rollback is delayed.
+and re-run the rebuild if the rollback is delayed — a re-run is a fresh build,
+so it needs its own `--chroma-path` and `--out-db`, or the previous pair moved
+out of the way first (§1).
 
 ## 4. Restore drill (before you need it)
 
@@ -151,6 +180,18 @@ report's `checks` are `checksum`, `integrity`, `foreign_keys`, `fingerprint`,
 Backups taken before this release have no `fingerprint`/`deletion_ledger`
 records; re-running `backup --dir <same dir>` verifies the existing snapshot
 and adds those records from the bytes (it never re-snapshots or overwrites).
+That refresh can only recompute what the bytes still carry: a snapshot from a
+pre-v2-era install has **no `memory_suppressions` table at all**, so there is no
+ledger to recompute and the drill's `ledger` check fails closed — intended
+(R33), because a restore that cannot prove forgotten content stays forgotten is
+not a restore. Such a snapshot is not drillable: take a fresh `backup --dir
+<new dir>` from the migrated install and keep the old snapshot as a last-resort
+artifact only.
+
+The drill's `--target` must be a directory that is empty or does not exist yet,
+and it must sit **outside** `--dir` — the volume being verified is never
+written to. Both rules are enforced before a byte is copied (default target:
+`<dir>.restore`, beside the backup).
 
 ## 5. Removal condition
 

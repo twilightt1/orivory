@@ -36,7 +36,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import create_engine, event, select, text
+from sqlalchemy import create_engine, delete, event, select, text, update
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import NullPool
 
@@ -425,6 +425,146 @@ def test_rollback_refuses_half_states_and_unknown_contracts(env, rollback_cli, t
                               embed_passages=_fake_embed)
 
 
+def test_a_chroma_path_that_is_a_file_is_refused_instead_of_tracebacking(
+    env, rollback_cli, tmp_path, capsys
+):
+    """M1: a FILE at --chroma-path is a refusal (exit 2), not a NotADirectoryError."""
+    file_path = tmp_path / "not-a-store"
+    file_path.write_text("")
+    assert rollback_cli.main(
+        ["--db", str(env.db_path), "--chroma-path", str(file_path)]
+    ) == 2
+    assert "is a file" in capsys.readouterr().err
+
+
+def test_a_server_deployment_is_refused_like_the_drill(
+    env, rollback_cli, migrate_cli, tmp_path, monkeypatch
+):
+    """I4: both tools refuse a server install, and the lite URL still builds."""
+    with monkeypatch.context() as patch:
+        patch.setattr(settings, "DATABASE_URL", "postgresql+asyncpg://user@host:5432/ragdb")
+        assert migrate_cli.is_sqlite() is False
+        with pytest.raises(rollback_cli.RollbackRefused, match="server deployment"):
+            rollback_cli.rollback(db_path=env.db_path, chroma_path=tmp_path / "c-server",
+                                  embed_passages=_fake_embed)
+
+    # `sqlite+aiosqlite:///…` — the lite path every install here runs — passes.
+    report = rollback_cli.rollback(db_path=env.db_path, chroma_path=tmp_path / "chroma-lite",
+                                   embed_passages=_fake_embed)
+    assert report["ok"] is True
+
+
+def test_a_second_rollback_refuses_and_names_the_remedy(env, rollback_cli, tmp_path):
+    """I2: the documented re-run path is a fresh build, and the refusal says so."""
+    first = rollback_cli.rollback(
+        db_path=env.db_path, chroma_path=tmp_path / "chroma-rollback",
+        embed_passages=_fake_embed,
+    )
+    emitted = Path(first["db"]["emitted"])
+    assert emitted.exists()
+
+    # The default emitted copy is taken: the second run must be told what to do.
+    with pytest.raises(rollback_cli.RollbackRefused) as excinfo:
+        rollback_cli.rollback(db_path=env.db_path, chroma_path=tmp_path / "chroma-rollback-2",
+                              embed_passages=_fake_embed)
+    message = str(excinfo.value)
+    assert str(emitted) in message and "--out-db" in message
+
+    # ...and the store directory of the first run refuses too, naming both artifacts.
+    with pytest.raises(rollback_cli.RollbackRefused) as excinfo:
+        rollback_cli.rollback(db_path=env.db_path, chroma_path=tmp_path / "chroma-rollback",
+                              embed_passages=_fake_embed)
+    assert "--chroma-path" in str(excinfo.value)
+
+    # The remedy the message names works: a second run with its own two paths.
+    again = rollback_cli.rollback(
+        db_path=env.db_path, chroma_path=tmp_path / "chroma-rollback-3",
+        out_db=tmp_path / "second.db", embed_passages=_fake_embed,
+    )
+    assert again["ok"] is True
+    assert Path(again["db"]["emitted"]) == tmp_path / "second.db"
+
+
+def test_contract_gate_is_the_old_binarys_own_dim_guard(env, rollback_cli, tmp_path):
+    """I1: backend, dim, generation and space are gated, not just the fingerprint.
+
+    Each case is a store that reads back with one contract field wrong — the
+    shapes a wrong rebuild or a hand-edited store produces. The gate must refuse
+    every one of them, because ``check_collection_dim`` (the pre-P1b binary's
+    real guard) refuses every one of them.
+    """
+    cases = {
+        "backend": {"orivory_embed_backend": "openai"},
+        "dim": {"orivory_embed_dim": 1024},
+        "generation": {"orivory_embed_generation": CLS_TOKEN},
+        "fingerprint": {"orivory_embed_fingerprint": canonical_fingerprint(ARCTIC_CLS_FINGERPRINT)},
+        "space": {"hnsw:space": "l2"},
+    }
+    for name, override in cases.items():
+        metadata = dict(rollback_cli.collection_metadata(DIM))
+        metadata.update(override)
+        client = _open_chroma(tmp_path / f"chroma-{name}")
+        client.get_or_create_collection(MEMORY_COLLECTION, metadata=metadata)
+        gates = rollback_cli.gate_findings(
+            client=client, memory_collection=MEMORY_COLLECTION, chunk_collections={},
+            expected={}, excluded={}, chunk_expected={}, token=MEAN_TOKEN,
+        )
+        assert f"collection:{name}" in gates["fingerprint"], (name, gates)
+
+
+def test_contract_evidence_is_read_from_the_install_and_reported(env, rollback_cli, tmp_path):
+    """I5: the mean assumption is checked against the install's own records."""
+    report = rollback_cli.rollback(
+        db_path=env.db_path, chroma_path=tmp_path / "chroma-1", embed_passages=_fake_embed,
+    )
+    evidence = report["contract_evidence"]
+    assert evidence["mean"] is True, evidence
+    assert "index_generations" in evidence["sources"]
+    assert evidence["unexpected"] == []
+
+    # No record names a pre-P1b contract: the tool still runs, and SAYS the
+    # assumption is unverified instead of implying a check that did not run.
+    with _Sqlite(env.db_path) as db:
+        db.execute(delete(IndexGeneration).where(
+            IndexGeneration.generation == MEMORY_COLLECTION))
+        db.commit()
+    again = rollback_cli.rollback(
+        db_path=env.db_path, chroma_path=tmp_path / "chroma-2", out_db=tmp_path / "second.db",
+        embed_passages=_fake_embed,
+    )
+    assert again["ok"] is True
+    assert again["contract_evidence"]["mean"] is None
+    assert "UNVERIFIED" in again["contract_evidence"]["note"]
+
+
+def test_contract_evidence_refuses_an_install_that_names_another_contract(
+    env, rollback_cli, tmp_path
+):
+    """I5: a live row recording a non-mean token for the mean generation refuses."""
+    with _Sqlite(env.db_path) as db:
+        db.execute(update(IndexGeneration)
+                   .where(IndexGeneration.generation == MEMORY_COLLECTION)
+                   .values(fingerprint=CLS_TOKEN))
+        db.commit()
+    with pytest.raises(rollback_cli.RollbackRefused, match="different contract"):
+        rollback_cli.rollback(db_path=env.db_path, chroma_path=tmp_path / "chroma-1",
+                              embed_passages=_fake_embed)
+
+    # The expand record is the second source: a pointer recorded at a
+    # non-mean generation refuses even with the manifest row gone.
+    with _Sqlite(env.db_path) as db:
+        db.execute(delete(IndexGeneration).where(
+            IndexGeneration.generation == MEMORY_COLLECTION))
+        db.commit()
+    Path(f"{env.db_path}.p1b-expand-record.json").write_text(json.dumps(
+        {"recorded_at": "2026-09-14T00:00:00+00:00",
+         "previous": {"memory": generation_name("memory"), "chunk": None}}
+    ))
+    with pytest.raises(rollback_cli.RollbackRefused, match="different contract"):
+        rollback_cli.rollback(db_path=env.db_path, chroma_path=tmp_path / "chroma-2",
+                              embed_passages=_fake_embed)
+
+
 def test_a_failing_gate_never_reports_ready(env, rollback_cli, tmp_path, monkeypatch):
     def _finding(**_kwargs):
         return {"tenant_isolation": ["leak"]}
@@ -668,3 +808,64 @@ def test_restore_drill_uses_a_fresh_target_only(env, migrate_cli, tmp_path):
 
     with pytest.raises(migrate_cli.MigrationRefused, match="not empty"):
         migrate_cli.restore_drill(backup_dir=dest, target=target)
+
+
+def test_restore_drill_refuses_a_target_inside_the_backup_dir(env, migrate_cli, tmp_path):
+    """M7: the drill never writes into the volume it is verifying."""
+    dest = tmp_path / "backups"
+    dest.mkdir()
+    migrate_cli.backup(dest_dir=dest)
+
+    with pytest.raises(migrate_cli.MigrationRefused, match="inside the backup directory"):
+        migrate_cli.restore_drill(backup_dir=dest, target=dest / "restored")
+
+    # The documented default is outside it, and still works.
+    report = migrate_cli.restore_drill(backup_dir=dest)
+    assert report["ok"] is True, report["checks"]
+    assert Path(report["target"]) == tmp_path / "backups.restore"
+
+
+def test_backup_reuses_a_verified_snapshot_and_refreshes_a_legacy_manifest(env, migrate_cli,
+                                                                          tmp_path):
+    """M9: the reuse branch (and the refresh it triggers) is exercised, not assumed."""
+    dest = tmp_path / "backups"
+    dest.mkdir()
+    first = migrate_cli.backup(dest_dir=dest)
+    snapshot = Path(first["db_backup"])
+    manifest_path = Path(first["manifest"])
+    before = snapshot.read_bytes()
+
+    # Reuse: the same verified bytes are never re-snapshotted or overwritten.
+    again = migrate_cli.backup(dest_dir=dest)
+    assert again["reused"] is True
+    assert Path(again["db_backup"]) == snapshot
+    assert snapshot.read_bytes() == before
+
+    # A manifest written before the drill learned to read these records: the
+    # bytes are verified, so the records are recomputed from them.
+    legacy = json.loads(manifest_path.read_text())
+    legacy.pop("deletion_ledger")
+    legacy["db"].pop("fingerprint")
+    manifest_path.write_text(json.dumps(legacy))
+    refreshed = migrate_cli.backup(dest_dir=dest)
+    assert refreshed["reused"] is True
+    assert snapshot.read_bytes() == before, "a refresh never re-snapshots"
+    recorded = json.loads(manifest_path.read_text())
+    assert recorded["deletion_ledger"] == migrate_cli._ledger_digest(str(snapshot))
+    assert "refreshed_at" in recorded
+    assert recorded["db"]["fingerprint"]["memory"], "the active token is recorded"
+
+    # With the records back, the drill reads the same manifest and passes.
+    report = migrate_cli.restore_drill(backup_dir=dest, target=tmp_path / "restored")
+    assert report["ok"] is True, report["checks"]
+
+
+def test_restore_drill_refuses_a_snapshot_with_no_checksum_manifest(env, migrate_cli, tmp_path):
+    """M9: a snapshot nobody can verify is refused by name, not by accident."""
+    dest = tmp_path / "backups"
+    dest.mkdir()
+    migrate_cli.backup(dest_dir=dest)
+    Path(f"{dest / f'{DB_NAME}.pre-p1b.bak'}.manifest.json").unlink()
+
+    with pytest.raises(migrate_cli.MigrationRefused, match="no checksum manifest"):
+        migrate_cli.restore_drill(backup_dir=dest, target=tmp_path / "restored")
