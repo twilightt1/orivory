@@ -15,7 +15,7 @@ lite-run:
 quickstart: lite-build lite-run
 	@echo "Orivory is up:  http://localhost:8000  (MCP: /mcp)"
 
-# ── Full stack (Postgres + Redis + Qdrant + MinIO + workers + UI) ───────────
+# ── Full stack (Postgres + Redis + Qdrant + MinIO; drain in-process) ────────
 
 dev:
 	uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload

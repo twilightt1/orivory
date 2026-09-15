@@ -192,7 +192,8 @@ by characters before the LLM call; the fallback answer is an explicit
 - **Index drain (P3).** A background drain loop replays pending
   `index_outbox` intents against the vector store, and it runs on **both**
   dialects — a Postgres deployment no longer accumulates a backlog waiting for
-  a restart (P1b's boot-only, SQLite-only hook is gone). One round every
+  a restart (P1b's SQLite-only gate and boot-only role are gone; the boot still
+  replays one bounded batch as a warm start). One round every
   `OUTBOX_DRAIN_INTERVAL_SECONDS` (default 5s), or immediately after a batch
   that applied anything, so a backlog drains at full speed. Write-through is
   unaffected (every write still embeds inline); the loop owns the RETRY path.

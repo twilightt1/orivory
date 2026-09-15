@@ -121,8 +121,8 @@ async def get_index_outbox_summary(db: AsyncSession) -> dict[str, Any]:
 
     Counts by BOTH status and kind, plus the two age signals an operator needs
     (``stuck_pending`` past the same 15-minute threshold as document ingestion,
-    and ``oldest_pending_at`` — how long the oldest un-drained write has been
-    waiting).
+    and ``oldest_pending_at`` — the ISO timestamp of the oldest pending write's
+    ``created_at``, null when nothing is pending).
 
     ``blocked`` is part of the summary on purpose (ruling C2): a terminally
     blocked intent (an embedding-contract mismatch, a generation the cutover

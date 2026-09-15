@@ -147,9 +147,11 @@ failed stays owed there, and the background drain loop
 (`app/retrieval/memory/drain_loop.py`, started and stopped by the app lifespan)
 replays it against the latest SQL state until the vector store confirms it.
 
-- **One loop, both dialects.** The P1b boot-only, SQLite-only drain is gone: a
-  Postgres deployment replays its backlog through the same loop. Write-through
-  is unaffected — every write still embeds inline; the loop owns the RETRY path.
+- **One loop, both dialects.** P1b's SQLite-only gate and boot-only role are
+  gone: a Postgres deployment replays its backlog through the same loop, and
+  the boot's one bounded batch replays there too — a restart is a warm start.
+  Write-through is unaffected — every write still embeds inline; the loop owns
+  the RETRY path.
 - **Settings.** `OUTBOX_DRAIN_ENABLED` (default `true`),
   `OUTBOX_DRAIN_INTERVAL_SECONDS` (default `5`) between idle rounds, and
   `OUTBOX_DRAIN_BATCH_SIZE` (default `50`). A round that applied anything runs
@@ -176,11 +178,18 @@ replays it against the latest SQL state until the vector store confirms it.
   never land, so no recall will ever wait for it — a contract mismatch needs the
   contract fixed plus a reindex, a superseded generation was covered by the
   migration's backfill); `by_kind` — `memory` / `chunk`; `stuck_pending` —
-  pending longer than 15 minutes; `oldest_pending_at` — how long the oldest
-  un-drained write has been waiting. Every failed drain round also counts the
+  pending longer than 15 minutes; `oldest_pending_at` — the ISO timestamp of
+  the oldest pending write's `created_at` (null when nothing is pending), not a
+  duration. Every failed drain round also counts the
   `index.outbox_drain_failed` fallback (`app/observability/fallbacks.py`,
   log-grep `Fallback activated`): a rising rate means the retry path itself is
   failing — look at Qdrant, not at the loop.
+- **No retention policy in P3.** The outbox grows monotonically: nothing prunes
+  `done` rows, and the summary's `by_status` / `by_kind` counts scan the whole
+  table (no status predicate), so the table — and the cost of reading it — grow
+  with every write. Fine at current scale; the upgrade path is a prune/retention
+  policy for `done` rows (plus a status-predicated index if that scan ever
+  matters).
 
 ```bash
 curl -fsS -H "Authorization: Bearer $ADMIN_ACCESS_TOKEN" \
@@ -310,8 +319,10 @@ All of these are written next to the SQLite file (`<db>` = the database path):
 
 P1b's boot drain was SQLite-only, so a Postgres deployment replayed nothing at
 startup and pending `index_outbox` intents accumulated between restarts. P3
-replaced that boot hook with the background drain loop, which runs on BOTH
-dialects — see [Background indexing (P3)](#background-indexing-p3). Write-through
+removed the SQLite-only gate and the boot-only role — not the boot batch: the
+background drain loop runs on BOTH dialects, and the boot's one bounded batch
+now replays on both too — see
+[Background indexing (P3)](#background-indexing-p3). Write-through
 is unaffected (every write still embeds inline on the write path); only the
 retry path was ever deferred, and it is no longer deferred by dialect.
 

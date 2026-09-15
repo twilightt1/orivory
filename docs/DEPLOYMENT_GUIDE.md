@@ -52,8 +52,8 @@ Confirm the Redis instance you point at:
 
 - has `REFRESH_TOKEN_EXPIRE_DAYS` consistent with your product
   expectations (default 30 days in `Settings`).
-- is reachable from the API process and the worker process (if the
-  worker ever needs to revoke on behalf of an admin).
+- is reachable from the API process (it is the only process, and therefore
+  the only reader or revoker of sessions).
 - is backed up with the rest of the persistent data — a Redis
   wipe forces every user to re-authenticate, which is the correct
   behaviour for a secret-bearing store.

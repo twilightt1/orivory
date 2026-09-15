@@ -150,12 +150,12 @@ def check_merged_prod_config(merged_yaml: str) -> CheckResult:
     """Assert a MERGED `docker compose config` rendering exposes nothing.
 
     Fails when any internal service (postgres/redis/qdrant/minio/flower)
-    carries a host-published port, or when app-tier services (app/frontend/
-    celery_*) retain a host `bind` mount (dev bind-mounts must not survive
+    carries a host-published port, or when app-tier services (app/frontend)
+    retain a host `bind` mount (dev bind-mounts must not survive
     into prod). Pure function of the rendered text — unit-testable.
     """
     internal = ["postgres", "redis", "qdrant", "minio", "flower"]
-    app_tier = ["app", "frontend", "celery_worker", "celery_beat", "celery"]
+    app_tier = ["app", "frontend"]
     leaks: list[str] = []
 
     current: str | None = None
