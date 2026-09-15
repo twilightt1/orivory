@@ -14,6 +14,29 @@ pytestmark = pytest.mark.service
 full_stack_only = pytest.mark.skipif(
     IS_SQLITE, reason="full-stack readiness map; lite mode exposes its own checks"
 )
+lite_only = pytest.mark.skipif(
+    not IS_SQLITE, reason="lite readiness map; only a SQLite install exposes it"
+)
+
+
+@lite_only
+@pytest.mark.asyncio
+async def test_check_readiness_lite_key_set(monkeypatch):
+    """Mirror of the full-stack key-set pin: lite answers sqlite/storage."""
+    async def ok():
+        return None
+
+    monkeypatch.setattr(health_service, "_check_sqlite", ok)
+    monkeypatch.setattr(health_service, "_check_redis", ok)
+    monkeypatch.setattr(health_service, "_check_storage", ok)
+    monkeypatch.setattr(health_service, "_check_qdrant", ok)
+    monkeypatch.setattr(health_service, "_check_mcp_hub", ok)
+
+    result = await health_service.check_readiness()
+
+    assert result["status"] == "ok"
+    assert set(result["checks"]) == {"sqlite", "redis", "storage", "qdrant", "mcp_hub"}
+    assert all(check["status"] == "ok" for check in result["checks"].values())
 
 
 @full_stack_only

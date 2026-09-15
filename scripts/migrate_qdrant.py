@@ -26,8 +26,10 @@ the controller rulings R24-R29:
   the generation.
 - ``cutover`` requires ``--yes`` and a green verify for BOTH kinds, then FLIPS
   the pointer for both kinds in ONE transaction (the expand only WRITES the new
-  rows: until this flip the install keeps serving its old generation, so an
-  un-migrated one fails loud instead of returning zero hits) — it also blocks
+  rows: until this flip the install keeps serving its OLD generation — loud, an
+  ``EmbeddingDimensionMismatch``, when that pointer names a different contract,
+  and EMPTY results when there is no active row at all, the Postgres
+  un-migrated state; the flip ends both) — it also blocks
   the intents that still target a retired generation (R27) — and writes a
   rollback marker.
 
@@ -839,6 +841,16 @@ def backup(*, dest_dir: Path) -> dict:
                     f"--dir {dest_dir} is inside the {label} source tree {source} — "
                     "the copy would recurse into its own destination; choose a "
                     "destination outside every source tree"
+                )
+            if source.is_relative_to(dest_dir):
+                # The other half: a destination that OWNS a source tree. Each
+                # tree is copied to ``{dest_dir}/{label}``, so an ancestor
+                # destination can put a copy on its own source (``--dir /data``
+                # with FS_STORAGE_PATH=/data/uploads → SameFileError).
+                raise MigrationRefused(
+                    f"--dir {dest_dir} CONTAINS the {label} source tree {source} — the "
+                    f"{label} copy targets {dest_dir / label}, so a tree can be copied "
+                    "onto its own source; choose a destination outside every source tree"
                 )
         dest_dir.mkdir(parents=True, exist_ok=True)
         snapshot = dest_dir / f"{db_path.name}.{BACKUP_SUFFIX}"

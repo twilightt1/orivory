@@ -1,8 +1,10 @@
 """T2 — memory generation on Qdrant: payload contract, filters, contract guard.
 
 Isolated by construction: a real embedded Qdrant on a private ``tmp_path``
-folder (closed in teardown, so its folder lock never leaks into another test)
-and a private per-test SQLite file monkeypatched in as the module engines /
+folder (closed in teardown, so its folder lock never leaks into another test),
+or — when the environment asks for it (``QDRANT_MODE=server``, see the ``env``
+fixture) — the live server, with the same private SQLite manifest and a private
+per-test SQLite file monkeypatched in as the module engines /
 sessionmakers (the ``tests/retrieval/test_index_outbox.py`` pattern), so this
 suite can never read or write whatever ``DATABASE_URL`` is ambient.
 
@@ -14,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import os
 import random
 import uuid
 from datetime import UTC, datetime
@@ -95,11 +98,24 @@ def _fake_embed_sync(texts: list[str]) -> list[list[float]]:
 
 @pytest_asyncio.fixture
 async def env(tmp_path, monkeypatch):
-    """Real embedded Qdrant + private SQLite manifest, both on ``tmp_path``."""
-    folder = tmp_path / "qdrant"
-    folder.mkdir()
-    monkeypatch.setattr(settings, "QDRANT_MODE", "local")
-    monkeypatch.setattr(settings, "QDRANT_LOCAL_PATH", str(folder))
+    """Real embedded Qdrant + private SQLite manifest, both on ``tmp_path``.
+
+    Server mode is opt-in FROM THE ENVIRONMENT (``QDRANT_MODE=server``, plus
+    ``QDRANT_URL``): the module then drives the live Qdrant the deployment
+    uses — the CI integration job points it at the compose service — so the
+    real HTTP data path (payload indexes, guard reads) is exercised by the same
+    assertions the embedded folder covers. Local stays the default.
+    """
+    if os.environ.get("QDRANT_MODE") == "server":
+        monkeypatch.setattr(settings, "QDRANT_MODE", "server")
+        monkeypatch.setattr(
+            settings, "QDRANT_URL", os.environ.get("QDRANT_URL", settings.QDRANT_URL)
+        )
+    else:
+        folder = tmp_path / "qdrant"
+        folder.mkdir()
+        monkeypatch.setattr(settings, "QDRANT_MODE", "local")
+        monkeypatch.setattr(settings, "QDRANT_LOCAL_PATH", str(folder))
 
     url = f"sqlite+aiosqlite:///{tmp_path / GEN_DB}"
     engine = create_async_engine(

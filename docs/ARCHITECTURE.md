@@ -171,12 +171,18 @@ by characters before the LLM call; the fallback answer is an explicit
 - Health: `/health` liveness; `/ready` per-dependency checks (postgres,
   redis, minio, qdrant, mcp_hub) with latencies and sanitized errors.
 - **P1b migration before serving.** The vector store moved from Chroma to
-  Qdrant and the embedding contract from masked mean to CLS. An install that
-  runs the new code against an un-migrated store deliberately **fails loud**:
-  until `cutover` flips the generation pointers the install keeps serving its
-  old generation, and a populated generation with no manifest row (or a
-  different contract) raises `EmbeddingDimensionMismatch` instead of returning
-  zero hits. The offline sequence — `inventory → backup → backfill → verify →
+  Qdrant and the embedding contract from masked mean to CLS. Until `cutover`
+  flips the generation pointers the install keeps serving its OLD generation.
+  Where that pointer names a contract the new code no longer matches (the
+  lite/P1a transitional row: masked mean) the read path deliberately **fails
+  loud** — it raises `EmbeddingDimensionMismatch` ("same dim but different
+  embedding contract") instead of serving vectors it cannot verify. With NO
+  active manifest row it does not: `outbox.active_generation()` falls back to
+  the transitional generation name with no fingerprint, an EMPTY generation is
+  allowed, and reads answer `[]`. That is the state on Postgres (P1a never
+  seeded `index_generations` there) and on any install whose contract token did
+  not change. SQL stays canonical; the migration rebuilds the vectors. The
+  offline sequence — `inventory → backup → backfill → verify →
   cutover`, app stopped throughout — is in
   [OPERATIONS_RUNBOOK.md](OPERATIONS_RUNBOOK.md), and the one-release swap-back
   in [ROLLBACK_P1B.md](ROLLBACK_P1B.md).

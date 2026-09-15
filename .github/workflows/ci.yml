@@ -292,6 +292,17 @@ jobs:
         # cutover is the pointer flip. Skips silently without a PG DATABASE_URL.
         run: python -m pytest --confcutdir=tests/migration tests/migration/test_p1b_pg_smoke.py -q
 
+      - name: Run P1b Qdrant parity against the live server
+        # The module the infra-free step runs against an embedded folder, here
+        # in server mode against the compose qdrant service (QDRANT_URL from the
+        # job env): the real HTTP data path — payload indexes + guard reads —
+        # that the local mode cannot exercise. The env fixture takes the mode
+        # from QDRANT_MODE/QDRANT_URL, so no test edit is needed here.
+        env:
+          DATABASE_URL: sqlite+aiosqlite:////tmp/p1b_parity_server.db
+          QDRANT_MODE: server
+        run: python -m pytest --confcutdir=tests/retrieval tests/retrieval/test_qdrant_parity.py -q
+
       - name: Stop live services
         if: always()
         run: docker compose down -v

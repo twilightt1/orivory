@@ -213,9 +213,10 @@ def test_pg_expand_backfill_and_cutover_flip_the_pointer(pg):
     cli = pg.cli
 
     # ── the expand (R10/R24): both rows exist, NEITHER is active. An
-    # un-migrated PG deployment keeps serving its transitional pointer, so the
-    # read path fails loud instead of answering zero hits from an empty
-    # generation nobody built.
+    # un-migrated PG deployment has NO active row to hand the guard, so reads
+    # hit the transitional fallback generation and answer empty results until
+    # cutover flips the pointer (no tripwire here — the loud path belongs to
+    # installs whose old pointer names a different contract).
     cli._expand()
     after_expand = _generations(pg)
     expected = {("memory", pg.memory_generation), ("chunk", pg.chunk_generation)}

@@ -294,6 +294,9 @@ async def delete_memory(memory_id: str) -> bool:
     a generation's contract is stale, and the durable outbox acks a delete
     intent ``done`` from this result — ``False`` keeps it pending and retried.
     """
+    # `_open_collection` runs `ensure_collection`, so a delete in an empty or
+    # un-migrated state materialises the empty generation first: intentional —
+    # a delete must be able to run before any write ever lands.
     try:
         client, generation, _ = await _open_collection(int(current_fingerprint()["dim"]))
         await client.delete(
@@ -313,6 +316,7 @@ async def delete_memories(memory_ids: list[str]) -> bool:
     """Remove many memories' vectors (see :func:`delete_memory`)."""
     if not memory_ids:
         return True
+    # Same materialising delete as `delete_memory`: intentional, see above.
     try:
         client, generation, _ = await _open_collection(int(current_fingerprint()["dim"]))
         await client.delete(

@@ -53,11 +53,12 @@ async def _check_qdrant() -> None:
 
     if vector_backend.is_local_mode():
         # The Qdrant owner client IS the vector store in lite mode: opening it
-        # is the real check, and it is the SAME client the store uses — a
-        # second one on the folder is impossible by construction, and lite
-        # starts no server for an HTTP probe to dial.
-        if vector_backend.get_sync_client() is None:
-            raise RuntimeError("local Qdrant client unavailable")
+        # is the real check — the open raises (through the owner executor) if
+        # the folder is unreadable, and it is the SAME client the store uses,
+        # so a second one on the folder is impossible by construction and lite
+        # starts no server for an HTTP probe to dial. There is no "is it None"
+        # branch to take: a failed open raises rather than returning None.
+        vector_backend.get_sync_client()
         return
     url = f"{settings.QDRANT_URL.rstrip('/')}/readyz"
     async with httpx.AsyncClient(timeout=2.0) as client:

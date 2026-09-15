@@ -146,14 +146,29 @@ cutover: stop the app, run the migration CLI, start the app.
 
 ### Migration before serving
 
-An install that starts the app **before** the migration fails loud instead of
-quietly returning zero hits: until `cutover` flips the generation pointers the
-install keeps serving its old generation, and once the new code is live the
-store's generation manifest and the vectors' embedding contract cannot be
-reconciled — the read path raises `EmbeddingDimensionMismatch`
-("populated generation has no manifest row — quarantine/rebuild") and refuses
-to serve. That is the intended contract (Tasks 4/5 rulings): migrate first,
-serve second.
+The migration is not optional, and what skipping it costs depends on what the
+generation pointer says:
+
+- **Loud (a contract change).** Until `cutover` flips the generation pointers
+  the install keeps serving its OLD generation. Where that pointer names a
+  contract the new code no longer matches — the lite/arctic upgrade, whose
+  P1a transitional row is the masked-mean generation — the read path raises
+  `EmbeddingDimensionMismatch` ("same dim but different embedding contract:
+  ... — fresh reindex required") and refuses to serve. That is the intended
+  contract (Tasks 4/5 rulings): migrate first, serve second.
+- **Empty (full-stack/Postgres, or an unchanged contract).** With NO active
+  manifest row, `outbox.active_generation()` falls back to the transitional
+  generation name with no fingerprint, an EMPTY generation is deliberately
+  allowed, and the read path creates/reads that generation and answers `[]`.
+  P1a never seeded `index_generations` on Postgres, so an un-migrated
+  full-stack deployment serves empty vector results — and so does any install
+  whose contract token did not change (an unchanged-contract install keeps
+  serving its old vectors). SQL stays canonical in both cases; the migration
+  rebuilds the vectors, so no recall is lost permanently.
+
+> On a full-stack/Postgres or unchanged-contract install an un-migrated
+> deployment serves EMPTY vector results; the read-path guard that makes it
+> fail loud on every path arrives with P3's freshness barrier.
 
 ### Sequence (run inside the app stack)
 

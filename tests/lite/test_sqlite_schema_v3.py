@@ -3,11 +3,19 @@
 A v2 install (the schema P1a produced) boots and must end with the TWO real
 generation rows (memory + chunk, named by ``generation_name`` and stamped with
 the current contract token) written **inactive**: the OLD pointer keeps serving,
-so an install that has not been through ``migrate_qdrant.py cutover`` fails LOUD
-— the read path's contract guard raises — instead of answering every recall with
-an empty result from a generation nobody has built yet. A fresh install has
-nothing to serve, so its rows are active from the start. Either way the
-milestone backup is ``.pre-p1b.bak``.
+and because that pointer IS the P1a transitional row (masked mean, i.e.
+``LEGACY_TOKEN``) an install that has not been through ``migrate_qdrant.py
+cutover`` fails LOUD — the read path's contract guard raises "different
+embedding contract" — instead of answering every recall with an empty result
+from a generation nobody has built yet (the test at the end of this module is
+the pin). A fresh install has nothing to serve, so its rows are active from the
+start. Either way the milestone backup is ``.pre-p1b.bak``.
+
+The loud path needs that mismatch: with NO active row the guard has nothing to
+reject — ``outbox.active_generation()`` falls back to the transitional name
+with no fingerprint, an EMPTY generation is allowed, and reads answer ``[]``.
+That is the Postgres/full-stack state (P1a never seeded ``index_generations``
+there), not this ladder's.
 
 The carry item this pins (T1-M4): the old ``_seed_transitional_generation``
 re-created the ``Orivory_memories`` row on EVERY boot. The ladder writes the real

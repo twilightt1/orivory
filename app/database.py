@@ -172,8 +172,12 @@ def activate_generations(conn, *, activate: bool = True) -> dict[str, tuple[str,
 
     ``activate=False`` is the EXPAND half of an upgrade: the rows are written
     (or refreshed) and stay INACTIVE, so the install keeps serving its OLD
-    pointer and an un-migrated one fails LOUD — the read path's contract guard
-    raises instead of answering zero hits from a generation nobody built yet.
+    pointer. That is loud — the read path's contract guard raises — only where
+    the old pointer names a contract the new code no longer matches (the P1a
+    transitional row: masked mean). With NO active row (Postgres: P1a never
+    seeded this table) ``active_generation`` falls back to the transitional
+    generation name with no fingerprint, an EMPTY generation is deliberately
+    allowed, and reads answer ``[]`` until ``cutover`` flips the pointer.
     ``activate=True`` is the FLIP (``cutover``, and a fresh install with nothing
     to serve yet): every other row for the kind is retired FIRST — with two
     active rows the runtime's ``is_active`` lookup would be a coin toss, the
@@ -245,10 +249,13 @@ def _upgrade_v2_to_v3(sync_conn, *, activate: bool) -> None:
     moved — or that a rollback moved back).
 
     ``activate`` is True only for a FRESH install, which has nothing to serve
-    yet. An UPGRADE writes the rows INACTIVE: the OLD pointer keeps serving, so
+    yet. An UPGRADE writes the rows INACTIVE: the OLD pointer keeps serving and
     an install that has not been through ``migrate_qdrant.py cutover`` fails
     LOUD (the read path's contract guard) instead of answering every recall
-    with an empty result from a generation nobody built.
+    with an empty result from a generation nobody built — true of the lite v2
+    install, whose old pointer IS the masked-mean transitional row. With no
+    active row at all there is nothing for the guard to reject and reads fall
+    back to the transitional name (``activate_generations`` documents that).
 
     P1a seeded ONE transitional row and re-created it on every boot
     (``Orivory_memories`` + the then-current fingerprint); the two rows written
@@ -317,7 +324,9 @@ def upgrade_sqlite_schema(conn) -> None:
         # The v2 -> v3 DATA step, ONCE, on the transition: the two real rows.
         # A fresh install (no tables before this call) may have them active —
         # nothing to serve yet. An UPGRADE must not: the old pointer keeps
-        # serving, so an un-migrated install fails loud; `cutover` flips it.
+        # serving — loud (a contract mismatch the guard raises) when that
+        # pointer is the masked-mean P1a row, empty results when there is no
+        # active row at all; `cutover` flips it either way.
         # A later boot (already v3) never re-asserts the pointer (that would
         # undo a rollback) and never re-mutates the manifest.
         _upgrade_v2_to_v3(conn, activate=fresh_install)

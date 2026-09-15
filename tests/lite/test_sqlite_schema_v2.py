@@ -137,7 +137,8 @@ async def test_v1_install_is_upgraded_to_v2_and_backed_up(v1_db):
     assert fk_violations == []
     assert integrity == "ok"
     # An UPGRADE writes the two real rows INACTIVE: the install keeps serving its
-    # OLD pointer and fails loud until `migrate_qdrant.py cutover` flips it.
+    # OLD pointer — loud (the guard rejects the pre-P1b masked-mean contract)
+    # until `migrate_qdrant.py cutover` flips it.
     assert {(r[0], r[1]) for r in generations} == {
         ("memory", generation_name("memory")), ("chunk", generation_name("chunk"))}
     assert not any(r[3] for r in generations), "the ladder never moves the pointer"

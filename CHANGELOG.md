@@ -54,6 +54,19 @@ project adheres to [Semantic Versioning](https://semver.org/).
   Runbook cutover (stop app → inventory/backup/backfill/verify/cutover → start
   app; ngưỡng đo ≈65k row/60' @1000 ký tự) ở `docs/OPERATIONS_RUNBOOK.md`;
   đường lùi một release ở `docs/ROLLBACK_P1B.md`.
+- **P1b pooling swap là RANKING CHANGE (spec constraint 1)** — masked mean →
+  CLS đổi MỌI vector (memory + query), nên vector cũ không bao giờ được serve
+  lẫn: generation manifest + contract guard từ chối generation lệch contract
+  và `migrate_qdrant.py backfill` dựng lại generation đó. Bằng chứng:
+  [eval/ablation_mean_vs_cls.json](eval/ablation_mean_vs_cls.json) — recall@1
+  0.875 (CLS) vs 0.750 (mean), recall@3 1.000 vs 0.875, recall@5 1.000 vs
+  1.000 — **small-sample evidence (12 passages / 8 queries), KHÔNG phải đo
+  chất lượng ổn định**; gate parity blocking là P0 corpus baseline, không phải
+  ablation này.
+- **Memory filter siết lại cho Qdrant** — float operand trên
+  `$eq/$ne/$in/$nin/$contains`, operand không phải scalar, và range operator
+  trên field không phải range (`pinned`, `tags`, `source_type`) giờ raise
+  `ValueError`; `$ne`/`$nin` compile thành `must_not` clauses (docs/API.md §4).
 
 ### Removed
 - **`chromadb` khỏi runtime (P1b)** — bỏ khỏi `pyproject.toml`,

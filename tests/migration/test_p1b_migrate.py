@@ -14,8 +14,12 @@ Contract under test (brief + rulings R24-R29):
   eligible, no re-embed of acked rows after a crash.
 - the expand (the ladder v3 step and ``backfill``'s ``_expand``) only WRITES the
   two generation rows; the pointer stays where it was until ``cutover`` flips
-  it, so an un-migrated install fails loud instead of serving an empty
-  generation (F1).
+  it. A lite install's old pointer names the masked-mean contract, so the read
+  path's guard raises (loud, never an empty generation). Where there is NO
+  active row (Postgres, where P1a never seeded ``index_generations``) the read
+  path falls back to the transitional generation name and answers empty
+  results until the flip — the pointer move is still the only thing that
+  starts serving the built generation (F1).
 - ``verify --kind``: full read-side audit — count, ID set, revision,
   fingerprint, tenant, absence of excluded rows; empty is valid only with the
   manifest row present.
@@ -479,6 +483,26 @@ async def test_backup_refuses_a_destination_inside_a_source_tree(world, tmp_path
     with pytest.raises(cli.MigrationRefused, match="inside the uploads source tree"):
         cli.backup(dest_dir=inside)
     assert not inside.exists(), "the refusal happens before anything is written"
+
+
+async def test_backup_refuses_a_destination_that_owns_a_source_tree(world):
+    """The other half of F3: ``--dir`` that is a PARENT of a copied tree.
+
+    Each tree is copied to ``{dir}/{label}``, so ``--dir /data`` with
+    ``FS_STORAGE_PATH=/data/uploads`` copies the uploads tree onto its own
+    source — refused before anything is written, exactly like the inside case.
+    """
+    cli = world.env.cli
+    uploads = world.env.tmp_path / "uploads"
+    uploads.mkdir(exist_ok=True)
+    (uploads / "note.txt").write_text("kept")
+    before = sorted(p.name for p in world.env.tmp_path.iterdir())
+
+    with pytest.raises(cli.MigrationRefused, match="CONTAINS the uploads source tree"):
+        cli.backup(dest_dir=world.env.tmp_path)
+    # The refusal happens before anything is written: the directory (which
+    # already holds the DB + its ladder milestone backup) is untouched.
+    assert sorted(p.name for p in world.env.tmp_path.iterdir()) == before
 
 
 # ── backfill ────────────────────────────────────────────────────────────────

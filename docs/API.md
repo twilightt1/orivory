@@ -1063,6 +1063,8 @@ List memories with filtering and semantic search.
 
 > **Note — `total` counts visible rows only:** dirty (stale-derived) memories are excluded from the page and from the total; superseded rows stay listed, labeled `state: "superseded"`.
 
+> **Note — memory filter language (P1b, Qdrant):** the `where` object accepted by the memory search/recall path takes one operator per field, restricted to the allowlist `source_type`, `captured_at`, `salience`, `pinned`, `tags` (`user_id` is always the authenticated principal and is rejected as a filter). Values must be scalars (`bool`/`int`/`str`) or, for `$in`/`$nin`, a list. Tightened against the Chroma-era behaviour, each of these now raises `ValueError`: a **float** operand on `$eq`/`$ne`/`$in`/`$nin`/`$contains` (a float is a range question — use `$gt`/`$gte`/`$lt`/`$lte` on `salience`), a non-scalar operand where a scalar is required (e.g. `{"tags": {"$contains": ["a", "b"]}}` — `$contains` takes ONE element and matches it against the list), and range operators on fields that are not ranges (`pinned`, `tags`, `source_type`). `$ne` and `$nin` compile to `must_not` clauses, and because a missing field never matches an include, a memory carrying no `tags` key is still returned by `tags: {"$ne": "x"}`.
+
 ---
 
 ### GET /api/v1/memories/{id}
