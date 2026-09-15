@@ -1,0 +1,19 @@
+# Isolated requirements for the ONE-RELEASE rollback path (spec §12).
+#
+# NEVER install this file into the runtime image. After P1b the runtime serves
+# Qdrant and must not carry chromadb at all (Task 7 removed it from the runtime
+# deps); the rollback utility only needs it while an operator still has the
+# option of going back to the pre-P1b binary:
+#
+#     python -m venv .venv-rollback
+#     .venv-rollback/bin/pip install -r requirements.txt -r requirements-rollback.txt
+#     .venv-rollback/bin/python scripts/rollback_to_chroma.py \
+#         --db /data/orivory.db --chroma-path /data/chroma-rollback
+#
+# (requirements.txt mirrors the runtime, so the tool imports the same app code
+# and the same migration CLI the deployment runs.)
+#
+# Pinned to the version the PRE-P1b lock resolved (chromadb==1.5.9): Task 7
+# dropped chromadb from pyproject/uv.lock, so THIS file is now its only pin —
+# exactly the chromadb the pre-P1b releases shipped.
+chromadb==1.5.9

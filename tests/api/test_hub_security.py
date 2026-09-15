@@ -107,10 +107,10 @@ def no_chroma(monkeypatch):
         return set()
 
     monkeypatch.setattr(
-        "app.services.erasure_service.safe_delete_from_chroma", _noop_delete
+        "app.services.erasure_service.safe_delete_from_index", _noop_delete
     )
     monkeypatch.setattr(
-        "app.services.erasure_service._chroma_present_ids", _no_residual
+        "app.services.erasure_service._vector_present_ids", _no_residual
     )
 
 

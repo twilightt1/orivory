@@ -1,10 +1,10 @@
 """Reindex / backfill personal memories into the vector store.
 
-The Postgres ``memories`` table is the source of truth. The ChromaDB
+The Postgres ``memories`` table is the source of truth. The Qdrant
 ``Orivory_memories`` collection is a derived index that can be lost
 (restart with empty volume, corruption) or fall behind (memories written
 before write-through embedding existed). This helper replays memories from
-Postgres into ChromaDB so recall can always be made whole again.
+Postgres into Qdrant so recall can always be made whole again.
 
 Usage:
     reindex_user_memories_sync(str(user_id))                     # only missing
@@ -26,7 +26,7 @@ _PAGE_SIZE = 200
 
 
 def reindex_user_memories_sync(user_id: str, only_missing: bool = True) -> dict:
-    """Embed a user's memories into ChromaDB in batches.
+    """Embed a user's memories into Qdrant in batches.
 
     Returns a summary dict: scanned, already_indexed, reindexed, pages.
     Raises on failure after logging (the admin caller reports ``queued=False``).

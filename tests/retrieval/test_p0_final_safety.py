@@ -29,6 +29,8 @@ class _SyncCollection:
 
 
 class _AsyncCollection:
+    """Async Chroma-like collection (the chunk path's stamp guard)."""
+
     def __init__(self, metadata, count=0, modify_error=None):
         self.metadata = dict(metadata)
         self._count = count
@@ -142,19 +144,32 @@ async def test_write_back_propagates_contract_failure(monkeypatch):
 
     monkeypatch.setattr("app.retrieval.memory.vector_store.upsert_memory", fail)
     with pytest.raises(EmbeddingDimensionMismatch, match="contract mismatch"):
-        await write_back.safe_upsert_to_chroma(SimpleNamespace(id=uuid4(), user_id=uuid4()))
+        await write_back.safe_upsert_to_index(SimpleNamespace(id=uuid4(), user_id=uuid4()))
 
 
 @pytest.mark.asyncio
 async def test_async_search_quarantines_populated_unstamped_collection(monkeypatch):
+    """The P0 law on the Qdrant side: a populated generation whose manifest
+    row is gone (``manifest_fingerprint is None``) is quarantined, never
+    served as an empty result."""
+    from app.retrieval import vector_backend
     from app.retrieval.memory import vector_store
 
-    collection = _AsyncCollection({}, count=1)
-    monkeypatch.setattr(vector_store, "_get_collection", AsyncMock(return_value=collection))
+    class Client:
+        async def count(self, _generation):
+            return SimpleNamespace(count=1)
 
+    monkeypatch.setattr(
+        vector_store, "_open_collection", AsyncMock(return_value=(Client(), "generation", None))
+    )
+    monkeypatch.setattr(
+        vector_backend,
+        "collection_info_async",
+        AsyncMock(return_value={"dim": 384, "distance": "Cosine"}),
+    )
     with pytest.raises(EmbeddingDimensionMismatch, match="populated"):
         await vector_store.search_memories(
-            [0.1, 0.2],
+            [0.1] * 384,
             user_id="owner",
         )
 
@@ -304,66 +319,73 @@ async def test_remote_rerank_sees_only_current_sql_owned_content(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_tenant_filter_is_immutable_and_allowlisted(monkeypatch):
+    """The tenant clause is always the first MUST of the store's own filter,
+    and a caller's ``where`` can never replace it."""
+    from qdrant_client import models as qm
+
+    from app.retrieval import vector_backend
     from app.retrieval.memory import vector_store
 
-    query_calls = []
+    query_calls: list[dict] = []
 
-    class Collection:
-        metadata = {
-            "orivory_embed_backend": "local-e5",
-            "orivory_embed_dim": 384,
-            "orivory_embed_fingerprint": "contract-v1",
-        }
+    class Client:
+        async def count(self, _generation):
+            return SimpleNamespace(count=1)
 
-        async def count(self):
-            return 1
-
-        async def query(self, **kwargs):
+        async def query_points(self, **kwargs):
             query_calls.append(kwargs)
-            return {
-                "documents": [["current"]],
-                "distances": [[0.1]],
-                "metadatas": [[{"user_id": "owner"}]],
-                "ids": [[str(uuid4())]],
-            }
+            return SimpleNamespace(points=[])
 
-    monkeypatch.setattr(vector_store, "_get_collection", AsyncMock(return_value=Collection()))
-    monkeypatch.setattr(vector_store, "check_collection_dim", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        vector_store, "_open_collection", AsyncMock(return_value=(Client(), "generation", "f" * 64))
+    )
+    monkeypatch.setattr(
+        vector_backend,
+        "collection_info_async",
+        AsyncMock(return_value={"dim": 384, "distance": "Cosine"}),
+    )
+    monkeypatch.setattr(vector_store, "check_generation_contract", lambda *args, **kwargs: None)
 
     with pytest.raises(ValueError, match="user_id"):
         await vector_store.search_memories(
-            [0.1, 0.2],
+            [0.1] * 384,
             user_id="owner",
             where={"user_id": {"$eq": "attacker"}},
         )
 
     await vector_store.search_memories(
-        [0.1, 0.2],
+        [0.1] * 384,
         user_id="owner",
         where={"source_type": {"$eq": "manual_note"}},
     )
-    sent_filter = query_calls[-1]["where"]
-    assert sent_filter == {
-        "$and": [
-            {"user_id": {"$eq": "owner"}},
-            {"source_type": {"$eq": "manual_note"}},
-        ]
-    }
+    sent_filter = query_calls[-1]["query_filter"]
+    assert sent_filter.must[0] == qm.FieldCondition(
+        key="user_id", match=qm.MatchValue(value="owner")
+    )
+    assert sent_filter.must[1] == qm.FieldCondition(
+        key="source_type", match=qm.MatchValue(value="manual_note")
+    )
 
 
 def test_only_missing_rejects_contract_mismatch(monkeypatch):
+    """``only_missing`` reindex trusts presence only under a matching contract."""
+    from app.retrieval import vector_backend
     from app.retrieval.memory import vector_store
 
-    collection = _SyncCollection(
-        {
-            "orivory_embed_backend": "local-e5",
-            "orivory_embed_dim": 384,
-            "orivory_embed_fingerprint": "old-contract",
-        },
-        count=1,
+    class Client:
+        def count(self, _generation):
+            return SimpleNamespace(count=1)
+
+    monkeypatch.setattr(
+        vector_store,
+        "_open_collection_sync",
+        lambda _dim: (Client(), "generation", "old-contract"),
     )
-    client = SimpleNamespace(get_or_create_collection=lambda *_args, **_kwargs: collection)
-    monkeypatch.setattr(vector_store, "_get_sync_client", lambda: client)
+    monkeypatch.setattr(
+        vector_backend,
+        "collection_info",
+        lambda *_args, **_kwargs: {"dim": 384, "distance": "Cosine"},
+    )
 
     with pytest.raises(EmbeddingDimensionMismatch, match="different embedding contract"):
         vector_store.get_existing_memory_ids_sync([str(uuid4())])
@@ -409,6 +431,7 @@ def test_memory_payload_carries_embedding_provenance(monkeypatch):
         salience=0.5,
         pinned=False,
         tags=[],
+        extra_metadata={},
         revision=7,
     )
 
@@ -421,18 +444,19 @@ def test_memory_payload_carries_embedding_provenance(monkeypatch):
     assert "metadata" not in metadata
 
 
-def test_fingerprint_represents_minilm_and_configured_dimensions(monkeypatch):
+def test_fingerprint_represents_arctic_cls_and_configured_dimensions(monkeypatch):
     from app.config import settings
     from app.retrieval import embedding_fingerprint as fingerprint_module
 
     monkeypatch.setattr(settings, "USE_LOCAL_EMBEDDINGS", True)
-    monkeypatch.setattr(settings, "LOCAL_EMBED_MODEL", "minilm")
-    minilm = fingerprint_module.current_fingerprint()
-    assert minilm["model_id"] == "all-MiniLM-L6-v2"
-    assert minilm["provider"] == "chromadb-onnx"
-    assert minilm["dim"] == 384
-    assert minilm["pooling"] == "mean"
-    assert minilm["artifact_digest"]
+    monkeypatch.setattr(settings, "LOCAL_EMBED_MODEL", "arctic")
+    arctic = fingerprint_module.current_fingerprint()
+    assert arctic == fingerprint_module.ARCTIC_CLS_FINGERPRINT
+    assert arctic["model_id"] == "Snowflake/snowflake-arctic-embed-xs"
+    assert arctic["provider"] == "onnxruntime-cpu"
+    assert arctic["dim"] == 384
+    assert arctic["pooling"] == "cls"
+    assert arctic["artifact_digest"]
 
     monkeypatch.setattr(settings, "USE_LOCAL_EMBEDDINGS", False)
     monkeypatch.setattr(settings, "USE_JINA_EMBEDDINGS", True)

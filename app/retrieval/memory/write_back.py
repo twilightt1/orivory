@@ -4,7 +4,7 @@ When a ``Memory`` row is created or updated (manual API write, connector sync,
 or a future save-note node), two follow-up actions must happen so the memory
 is actually recallable:
 
-    1. Embed it into the ChromaDB ``Orivory_memories`` collection.
+    1. Embed it into the Qdrant memory generation.
     2. Enqueue knowledge-graph extraction (entities + relations).
 
 Both are **best-effort**: the Postgres ``Memory`` row is the source of truth,
@@ -27,8 +27,8 @@ from app.retrieval.embedder import EmbeddingDimensionMismatch
 log = logging.getLogger(__name__)
 
 
-async def safe_upsert_to_chroma(memory: Memory) -> bool:
-    """Embed a memory into ChromaDB.
+async def safe_upsert_to_index(memory: Memory) -> bool:
+    """Embed a memory into the Qdrant memory generation.
 
     Transient vector outages return ``False`` for compatibility. Contract
     mismatches are typed integrity failures and are deliberately propagated.
@@ -44,15 +44,15 @@ async def safe_upsert_to_chroma(memory: Memory) -> bool:
         raise
     except Exception as exc:
         log.warning(
-            "ChromaDB upsert failed for memory %s: %s",
+            "Vector upsert failed for memory %s: %s",
             memory.id, exc,
             extra={"memory_id": str(memory.id), "user_id": str(memory.user_id)},
         )
         return False
 
 
-async def safe_delete_from_chroma(memory_id: UUID | str) -> bool:
-    """Remove a memory's vector from ChromaDB. Never raises.
+async def safe_delete_from_index(memory_id: UUID | str) -> bool:
+    """Remove a memory's vector from the index. Never raises.
 
     Returns whether the backend confirmed the delete, so a caller that owns a
     durable intent (the outbox drain) can tell a purge from an outage.
@@ -63,7 +63,7 @@ async def safe_delete_from_chroma(memory_id: UUID | str) -> bool:
         return await delete_memory(str(memory_id))
     except Exception as exc:
         log.warning(
-            "ChromaDB delete failed for memory %s: %s",
+            "Vector delete failed for memory %s: %s",
             memory_id, exc,
             extra={"memory_id": str(memory_id)},
         )
@@ -101,14 +101,14 @@ async def index_new_memory(memory: Memory) -> bool:
     outbox intent enqueued with the row is now the only path to the index
     (``drain_pending``), which is what ``indexing="pending"`` reports.
     """
-    indexed = await safe_upsert_to_chroma(memory)
+    indexed = await safe_upsert_to_index(memory)
     safe_enqueue_graph_build(memory.id)
     return indexed
 
 
 __all__ = [
-    "safe_upsert_to_chroma",
-    "safe_delete_from_chroma",
+    "safe_upsert_to_index",
+    "safe_delete_from_index",
     "safe_enqueue_graph_build",
     "index_new_memory",
 ]

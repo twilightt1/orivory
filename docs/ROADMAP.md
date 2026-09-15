@@ -43,7 +43,7 @@
   (sha256 token registry), streamable-HTTP with scope normalization.
 - **Permissions + access ledger** — per-agent read/write scopes, append-only
   audit log of every authorized call.
-- **Erasure receipts** — ownership-checked transitive cascade, Chroma
+- **Erasure receipts** — ownership-checked transitive cascade, vector-store
   verification pass, three honest statuses, MCP `forget_memory` + REST.
 - **Import paths** — ChatGPT / Claude / generic / PAM upload with detection,
   dedup, 10k cap, per-item isolation.

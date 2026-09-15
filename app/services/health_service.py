@@ -40,15 +40,27 @@ async def _check_minio() -> None:
         raise RuntimeError(f"MinIO bucket '{settings.MINIO_BUCKET}' does not exist")
 
 
-async def _check_chroma() -> None:
-    if settings.CHROMA_MODE == "local":
-        # In-process Chroma: prove the client opens (no HTTP heartbeat).
-        from app.retrieval.memory.vector_store import _get_sync_client
+async def _check_qdrant() -> None:
+    """Vector readiness.
 
-        if _get_sync_client() is None:
-            raise RuntimeError("local Chroma client unavailable")
+    Lite mode runs the vector store in-process, so readiness proves the
+    process's ONE embedded Qdrant owner client opens (no server to poll) —
+    the same client the store itself uses, never a second one on the folder.
+    Server mode asks Qdrant's own ``/readyz`` (2s bound): one HTTP call that
+    answers 200 only once the shards are ready.
+    """
+    from app.retrieval import vector_backend
+
+    if vector_backend.is_local_mode():
+        # The Qdrant owner client IS the vector store in lite mode: opening it
+        # is the real check — the open raises (through the owner executor) if
+        # the folder is unreadable, and it is the SAME client the store uses,
+        # so a second one on the folder is impossible by construction and lite
+        # starts no server for an HTTP probe to dial. There is no "is it None"
+        # branch to take: a failed open raises rather than returning None.
+        vector_backend.get_sync_client()
         return
-    url = f"http://{settings.CHROMA_HOST}:{settings.CHROMA_PORT}/api/v2/heartbeat"
+    url = f"{settings.QDRANT_URL.rstrip('/')}/readyz"
     async with httpx.AsyncClient(timeout=2.0) as client:
         response = await client.get(url)
         response.raise_for_status()
@@ -111,8 +123,8 @@ async def _measure(name: str, checker: CheckFn) -> tuple[str, CheckPayload]:
 def _default_readiness_checkers() -> dict[str, CheckFn]:
     """Deployment-aware readiness checks.
 
-    Postgres (full stack): postgres + redis + minio + chroma-http + mcp_hub.
-    SQLite (lite mode):   sqlite + redis(memory) + storage(fs) + chroma-local
+    Postgres (full stack): postgres + redis + minio + qdrant + mcp_hub.
+    SQLite (lite mode):   sqlite + redis(memory) + storage(fs) + qdrant
     + mcp_hub.
     """
     from app.database import IS_SQLITE
@@ -122,14 +134,14 @@ def _default_readiness_checkers() -> dict[str, CheckFn]:
             "sqlite": _check_sqlite,
             "redis": _check_redis,
             "storage": _check_storage,
-            "chroma": _check_chroma,
+            "qdrant": _check_qdrant,
         }
     else:
         checkers = {
             "postgres": _check_postgres,
             "redis": _check_redis,
             "minio": _check_minio,
-            "chroma": _check_chroma,
+            "qdrant": _check_qdrant,
         }
     if settings.MCP_HUB_ENABLED:
         # Flag-off is a deliberate configuration, not a degraded service —

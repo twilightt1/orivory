@@ -31,9 +31,11 @@ from app.ingestion.document_memory import (
 )
 from app.models.conversation import Conversation
 from app.models.document import Document
+from app.models.document_chunk import DocumentChunk
 from app.models.index_outbox import IndexOutbox
 from app.models.memory import Memory, MemorySuppression
 from app.models.user import User
+from app.retrieval.memory import outbox
 from app.utils.chunker import ParentChunk
 
 pytestmark = pytest.mark.rag
@@ -324,6 +326,94 @@ async def test_suppress_and_check_work_on_an_async_session(db):
 
 
 # ── pipeline projection query is tenant-scoped too ───────────────────────────
+
+
+# ── chunk intents ride the ingestion transaction (P1b Task 3) ────────────────
+
+
+def _chunk_rows(session, document_id) -> list[DocumentChunk]:
+    return list(
+        session.execute(
+            select(DocumentChunk).where(DocumentChunk.document_id == document_id)
+        ).scalars().all()
+    )
+
+
+def _chunk_intents(session) -> list[IndexOutbox]:
+    return [
+        row for row in _outbox(session)
+        if row.kind == "chunk"
+    ]
+
+
+def test_reingest_enqueues_chunk_intents_in_the_row_transaction(sync_db, monkeypatch):
+    """The old ids leave with delete intents and the new ones with upsert
+    intents in the SAME transaction as the rows (spec §5.1) — a reingest can
+    never orphan a point, and an un-drained intent still names what to forget.
+    """
+    from app.ingestion import pipeline
+    from app.retrieval import vector_retriever
+
+    owner = _user(sync_db)
+    doc = _document(sync_db, owner)
+    sync_db.commit()
+
+    indexed: list[list[str]] = []
+    purged: list[tuple] = []
+
+    def _upsert(rows, *, user_id):
+        indexed.append([str(row.id) for row in rows])
+        return len(rows)
+
+    monkeypatch.setattr(pipeline, "_project_document_to_memories", lambda *a, **k: None)
+    monkeypatch.setattr("app.storage.get_object_sync", lambda *a, **k: b"file bytes")
+    monkeypatch.setattr("app.utils.chunker.extract_text", lambda *a, **k: "Body text. " * 200)
+    monkeypatch.setattr("app.retrieval.parent_store.store_parents_sync", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "app.retrieval.bm25_retriever.bm25_retriever.publish_build_sync", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "app.retrieval.retrieval_cache.invalidate_query_cache_sync", lambda *a, **k: None)
+    monkeypatch.setattr(vector_retriever, "upsert_chunks_sync", _upsert)
+    monkeypatch.setattr(
+        vector_retriever, "delete_document_chunks_sync",
+        lambda *args, **kwargs: purged.append((args, kwargs)))
+
+    pipeline._ingest(sync_db, str(doc.id))
+    first_ids = {row.id.hex for row in _chunk_rows(sync_db, doc.id)}
+    first_children = {
+        row.id.hex for row in _chunk_rows(sync_db, doc.id)
+        if (row.chunk_metadata or {}).get("chunk_type") == "child"
+    }
+    assert first_ids and first_children
+
+    pipeline._ingest(sync_db, str(doc.id))
+    second_ids = {row.id.hex for row in _chunk_rows(sync_db, doc.id)}
+    second_children = {
+        row.id.hex for row in _chunk_rows(sync_db, doc.id)
+        if (row.chunk_metadata or {}).get("chunk_type") == "child"
+    }
+    assert second_ids and not (first_ids & second_ids)  # reingest mints new ids
+
+    intents = _chunk_intents(sync_db)
+    by_operation: dict[str, set[str]] = {"upsert": set(), "delete": set()}
+    for row in intents:
+        by_operation[row.operation].add(row.entity_id)
+    # Every id that left SQL carries its own delete intent; only the children
+    # (the indexed kind) carry upsert intents.
+    assert by_operation["delete"] == first_ids
+    assert by_operation["upsert"] == first_children | second_children
+    assert {row.target_generation for row in intents} == {outbox.CHUNK_TARGET_GENERATION}
+
+    # The immediate attempt ran after the commit: the vectors that landed are
+    # acked, while the delete intents stay pending for the drain.
+    assert [{uuid.UUID(i).hex for i in ids} for ids in indexed] == [first_children, second_children]
+    assert purged == [
+        ((str(doc.conversation_id), str(doc.id)), {"user_id": str(owner)})
+        for _ in range(2)
+    ]
+    statuses = {(row.entity_id, row.operation): row.status for row in intents}
+    assert all(statuses[(entity_id, "upsert")] == "done" for entity_id in by_operation["upsert"])
+    assert all(statuses[(entity_id, "delete")] == "pending" for entity_id in by_operation["delete"])
 
 
 def test_pipeline_projection_is_tenant_scoped(sync_db, monkeypatch):

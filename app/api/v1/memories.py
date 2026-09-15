@@ -31,7 +31,7 @@ from app.retrieval.memory.correction import state_of
 from app.retrieval.memory.outbox import bump_revision, enqueue_upsert, mark_done
 from app.retrieval.memory.retriever import MemoryRetriever
 from app.retrieval.memory.visibility import not_dirty_predicate, state_expression
-from app.retrieval.memory.write_back import index_new_memory, safe_upsert_to_chroma
+from app.retrieval.memory.write_back import index_new_memory, safe_upsert_to_index
 from app.schemas.Orivory import (
     DigestResponse,
     MemoryCreate,
@@ -306,8 +306,8 @@ async def update_memory(
         await enqueue_upsert(db, memory)
     await db.commit()
     await db.refresh(memory)
-    # Write-through to ChromaDB (best-effort)
-    indexed = await safe_upsert_to_chroma(memory)
+    # Write-through to the vector store (best-effort)
+    indexed = await safe_upsert_to_index(memory)
     if indexed:
         await mark_done(db, entity_id=memory.id, revision=memory.revision)
     if not data and not indexed:
@@ -351,7 +351,7 @@ async def recall_memory(
 
         1. Fetch personal context (pinned + recent).
         2. LLM rewrite the query + extract entities.
-        3. Vector search in ChromaDB.
+        3. Vector search in Qdrant.
         4. Hydrate + apply entity boost + time decay.
         5. Return top_k with trace (rewritten query, entities, latency).
 

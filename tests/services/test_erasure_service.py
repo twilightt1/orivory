@@ -83,13 +83,14 @@ class _FakeDB:
     """
 
     def __init__(self, *, owned=None, child_ids=None, entity_links=0, source_links=0, residual=None, rows=None, total=0,
-                 foreign_child_ids=None):
+                 foreign_child_ids=None, cross_user_children=0):
         self._owned = owned or {}
         self._child_ids = child_ids or {}
         self._foreign_child_ids = foreign_child_ids or {}
         self._entity_links = entity_links
         self._source_links = source_links
         self._residual = residual or {"children": 0, "entity_links": 0, "source_links": 0}
+        self._cross_user_children = cross_user_children
         self._rows = rows or []
         self._total = total
         self.added = []
@@ -117,6 +118,10 @@ class _FakeDB:
                 return _FakeScalar(self._residual["entity_links"] if residual else self._entity_links)
             if "memory_sources" in sql:
                 return _FakeScalar(self._residual["source_links"] if residual else self._source_links)
+            if "memories.user_id !=" in sql:
+                # The pre-delete cross-user cascade count (R29c): rows another
+                # user parents onto the erased ids — unknowable from this scope.
+                return _FakeScalar(self._cross_user_children)
             return _FakeScalar(self._residual["children"] if residual else 0)
         parent_id = next((v for v in params.values() if isinstance(v, (list, tuple))), None)
         if parent_id is not None:  # BFS frontier: (id, revision) rows for children of every id in it
@@ -157,8 +162,8 @@ def no_chroma(monkeypatch):
     async def _no_residual(_ids):
         return set()
 
-    monkeypatch.setattr(erasure_service, "safe_delete_from_chroma", _fake_delete)
-    monkeypatch.setattr(erasure_service, "_chroma_present_ids", _no_residual)
+    monkeypatch.setattr(erasure_service, "safe_delete_from_index", _fake_delete)
+    monkeypatch.setattr(erasure_service, "_vector_present_ids", _no_residual)
     return deleted
 
 
@@ -178,7 +183,8 @@ async def test_erase_deletes_owned_memory_and_writes_receipt(no_chroma):
     assert target["entity_links"] == 2 and target["source_links"] == 1
     assert target["vectors_deleted"] == [str(mid)]
     assert target["vector_residual"] == [] and target["vector_residual_checked"] is True
-    assert target["db_residual"] == {"children": 0, "entity_links": 0, "source_links": 0}
+    assert target["db_residual"] == {"children": 0, "entity_links": 0, "source_links": 0,
+                                     "cross_user_children": 0}
     assert receipt.detail["requested_by"] == "rest_api"
     assert receipt.detail["summary"] == {"requested": 1, "erased": 1, "skipped": 0, "errors": 0, "residual_vectors": 0, "residual_rows": 0}
     assert no_chroma == [str(mid)]
@@ -230,7 +236,7 @@ async def test_erase_records_vector_residual(no_chroma, monkeypatch):
     async def _still_present(_ids):
         return {str(mid)}
 
-    monkeypatch.setattr(erasure_service, "_chroma_present_ids", _still_present)
+    monkeypatch.setattr(erasure_service, "_vector_present_ids", _still_present)
     receipt = await erase_memories(db, user_id, [mid], requested_by="rest_api")
 
     assert receipt.status == "completed_with_residual"
@@ -249,6 +255,34 @@ async def test_erase_records_db_residual(no_chroma):
     assert receipt.detail["summary"]["residual_rows"] == 1
 
 
+async def test_erase_records_cross_user_cascade_rows_as_residual(no_chroma):
+    """R29c: a cross-user child is removed by the DB cascade, but its vector was
+    never enumerated (unknowable from the erasing user's scope) — the receipt
+    must carry that residual class instead of claiming a clean completion."""
+    user_id, mid, foreign_child = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    db = _FakeDB(
+        owned={mid: _memory_row(mid, user_id)},
+        foreign_child_ids={mid: [foreign_child]},
+        cross_user_children=1,
+    )
+
+    receipt = await erase_memories(db, user_id, [mid], requested_by="rest_api")
+
+    target = receipt.detail["targets"][0]
+    assert target["db_residual"]["cross_user_children"] == 1
+    assert target["affected_memory_ids"] == []  # never collected, never disclosed
+    assert target["vectors_deleted"] == [str(mid)]  # another user's vector is not ours to delete
+    assert receipt.status == "completed_with_residual"
+    assert receipt.detail["summary"]["residual_rows"] == 1
+
+    # The count is taken BEFORE the closure delete: past it the cascade has
+    # already removed the rows and the residual would be invisible.
+    sqls = [_sql(stmt).lower() for stmt in db.statements]
+    counted = next(i for i, sql in enumerate(sqls) if "memories.user_id !=" in sql)
+    deleted = next(i for i, sql in enumerate(sqls) if "delete from memories" in sql)
+    assert counted < deleted
+
+
 async def test_erase_survives_chroma_outage(no_chroma, monkeypatch):
     user_id, mid = uuid.uuid4(), uuid.uuid4()
     db = _FakeDB(owned={mid: _memory_row(mid, user_id)})
@@ -256,7 +290,7 @@ async def test_erase_survives_chroma_outage(no_chroma, monkeypatch):
     async def _chroma_down(_ids):
         raise ConnectionError("chroma down")
 
-    monkeypatch.setattr(erasure_service, "_chroma_present_ids", _chroma_down)
+    monkeypatch.setattr(erasure_service, "_vector_present_ids", _chroma_down)
     receipt = await erase_memories(db, user_id, [mid], requested_by="rest_api")
 
     # Spec §5.4 / P1 gate: an unknown residual check must not read as a plain
@@ -307,7 +341,7 @@ async def test_transitive_descendants_deleted_and_verified(no_chroma, monkeypatc
         verified_ids.append(list(_ids))
         return set()
 
-    monkeypatch.setattr(erasure_service, "_chroma_present_ids", _capture)
+    monkeypatch.setattr(erasure_service, "_vector_present_ids", _capture)
     receipt = await erase_memories(db, user_id, [mid], requested_by="rest_api")
 
     target = receipt.detail["targets"][0]

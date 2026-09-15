@@ -25,7 +25,7 @@ async def test_ready_returns_ok_when_dependencies_are_ready(monkeypatch):
                 "postgres": {"status": "ok", "latency_ms": 1.0},
                 "redis": {"status": "ok", "latency_ms": 1.0},
                 "minio": {"status": "ok", "latency_ms": 1.0},
-                "chroma": {"status": "ok", "latency_ms": 1.0},
+                "qdrant": {"status": "ok", "latency_ms": 1.0},
             },
         }
 
@@ -48,7 +48,7 @@ async def test_ready_returns_503_when_dependencies_are_degraded(monkeypatch):
                 "postgres": {"status": "ok", "latency_ms": 1.0},
                 "redis": {"status": "ok", "latency_ms": 1.0},
                 "minio": {"status": "ok", "latency_ms": 1.0},
-                "chroma": {
+                "qdrant": {
                     "status": "failed",
                     "latency_ms": 10.0,
                     "error": "connection refused",
@@ -64,7 +64,7 @@ async def test_ready_returns_503_when_dependencies_are_degraded(monkeypatch):
     assert response.status_code == 503
     body = response.json()
     assert body["status"] == "degraded"
-    assert body["checks"]["chroma"]["status"] == "failed"
+    assert body["checks"]["qdrant"]["status"] == "failed"
 
 
 async def test_ready_includes_mcp_hub_check_when_enabled():

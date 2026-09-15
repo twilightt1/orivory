@@ -4,13 +4,17 @@ Changes vs. original:
   - Uses build_parent_child_chunks() from smart chunker
   - Inserts PARENT chunks into document_chunks (DB) — returned to LLM
   - Inserts CHILD chunks into document_chunks with parent_id metadata
-  - Embeds only CHILD chunks into ChromaDB
+  - Embeds only CHILD chunks, into the ACTIVE chunk generation (Qdrant)
+  - The chunk rows and their durable index intents (delete for the ids
+    leaving, upsert for the children entering) share ONE transaction; the
+    vector write is the post-commit attempt, never the record of truth
   - Caches PARENT chunks in Redis via parent_store
   - BM25 index built on PARENT content (better semantic units)
 """
 from __future__ import annotations
 
 import logging
+import uuid
 
 log = logging.getLogger(__name__)
 
@@ -23,18 +27,21 @@ class IngestionStageError(RuntimeError):
 
 def _stage_error(stage: str, exc: Exception) -> IngestionStageError:
     message = str(exc) or exc.__class__.__name__
-    if stage == "chroma_upsert":
-        try:
-            from app.config import settings
-
-            message = (
-                f"ChromaDB unavailable at {settings.CHROMA_HOST}:{settings.CHROMA_PORT}. "
-                "Start docker compose service chromadb and retry ingestion. "
-                f"Original error: {message}"
-            )
-        except Exception:
-            message = f"ChromaDB unavailable. Original error: {message}"
     return IngestionStageError(stage, message)
+
+
+def _document_owner(db, doc) -> str:
+    """The document's conversation owner — the tenant its chunks are indexed under.
+
+    Never a caller-supplied id: the chunk payload's tenant clause and the
+    intents' ``tenant_id`` both come from here.
+    """
+    from app.models.conversation import Conversation
+
+    conversation = db.get(Conversation, doc.conversation_id)
+    if conversation is None:
+        raise ValueError(f"document {doc.id} has no conversation owner")
+    return str(conversation.user_id)
 
 
 def process_document_sync(document_id: str) -> None:
@@ -64,18 +71,18 @@ def process_document_sync(document_id: str) -> None:
 
 
 def _ingest(db, document_id: str) -> None:
-    from sqlalchemy import delete
+    from sqlalchemy import delete, select
 
     from app import storage as minio
     from app.models.document import Document
     from app.models.document_chunk import DocumentChunk
     from app.retrieval.bm25_retriever import bm25_retriever
+    from app.retrieval.memory.outbox import (
+        enqueue_chunk_delete_sync,
+        enqueue_chunk_upsert_sync,
+    )
     from app.retrieval.parent_store import store_parents_sync
     from app.retrieval.retrieval_cache import invalidate_query_cache_sync
-    from app.retrieval.vector_retriever import (
-        delete_document_chunks_sync,
-        upsert_chunks_sync,
-    )
     from app.utils.chunker import build_parent_child_chunks, extract_text
 
     doc = db.get(Document, document_id)
@@ -112,39 +119,46 @@ def _ingest(db, document_id: str) -> None:
     except Exception as exc:
         raise _stage_error("chunking", exc) from exc
 
+    # Canonical chunk transaction (spec §5.1): every id leaving SQL carries a
+    # durable delete intent, every child row carries a durable upsert intent,
+    # and all of it commits with the rows below. Indexing never happens before
+    # that commit — a crash leaves a replayable intent, never an orphan point.
     try:
-        delete_document_chunks_sync(conversation_id, document_id)
-        db.execute(delete(DocumentChunk).where(DocumentChunk.document_id == document_id))
+        user_id = _document_owner(db, doc)
+        old_ids = db.execute(
+            select(DocumentChunk.id).where(DocumentChunk.document_id == doc.id)
+        ).scalars().all()
+        db.execute(delete(DocumentChunk).where(DocumentChunk.document_id == doc.id))
         db.flush()
-    except Exception as exc:
-        raise _stage_error("cleanup_existing_chunks", exc) from exc
+        quarantined = enqueue_chunk_delete_sync(db, chunk_ids=old_ids, tenant_id=user_id)
 
-    try:
-        for parent in parents:
+        # A reingest mints NEW chunk ids (the chunker mints a uuid4 per chunk),
+        # so the old points are removed by the delete intents above and the new
+        # rows start at revision 1 — no in-place bump is needed (ruling R16).
+        for chunk in (*parents, *children):
             db.add(
                 DocumentChunk(
-                    id=parent.id,
-                    document_id=document_id,
-                    content=parent.content,
-                    chunk_index=parent.index,
-                    chunk_metadata=parent.metadata,
+                    id=uuid.UUID(str(chunk.id)),
+                    document_id=doc.id,
+                    content=chunk.content,
+                    chunk_index=chunk.index,
+                    revision=1,
+                    chunk_metadata=chunk.metadata,
                 )
             )
         db.flush()
-
         for child in children:
-            db.add(
-                DocumentChunk(
-                    id=child.id,
-                    document_id=document_id,
-                    content=child.content,
-                    chunk_index=child.index,
-                    chunk_metadata=child.metadata,
-                )
+            quarantined += enqueue_chunk_upsert_sync(
+                db, chunk_id=child.id, tenant_id=user_id, revision=1,
+                conversation_id=conversation_id,
             )
-        db.flush()
+        if quarantined:
+            log.warning(
+                "Chunk ids quarantined (not UUIDs): never indexed",
+                extra={"doc_id": document_id, "n": len(quarantined)},
+            )
     except Exception as exc:
-        raise _stage_error("db_insert_chunks", exc) from exc
+        raise _stage_error("chunk_transaction", exc) from exc
 
     try:
         store_parents_sync(
@@ -153,15 +167,6 @@ def _ingest(db, document_id: str) -> None:
         )
     except Exception as exc:
         raise _stage_error("redis_parent_cache", exc) from exc
-
-    child_dicts = [
-        {"id": child.id, "content": child.content, "metadata": child.metadata}
-        for child in children
-    ]
-    try:
-        upsert_chunks_sync(conversation_id, child_dicts)
-    except Exception as exc:
-        raise _stage_error("chroma_upsert", exc) from exc
 
     parent_dicts = [
         {"id": parent.id, "content": parent.content, "metadata": parent.metadata}
@@ -179,6 +184,17 @@ def _ingest(db, document_id: str) -> None:
         db.commit()
     except Exception as exc:
         raise _stage_error("db_commit", exc) from exc
+
+    # Immediate attempt after the commit (spec §5.2): the intents above are the
+    # durable proof, so a vector outage must not fail an ingested document.
+    try:
+        _index_document_chunks(db, document_id=document_id, children=children,
+                               user_id=user_id, conversation_id=conversation_id)
+    except Exception as exc:
+        log.warning(
+            "Immediate chunk index attempt failed; the intents stay pending",
+            extra={"doc_id": document_id, "error": str(exc)},
+        )
 
     try:
         invalidate_query_cache_sync(conversation_id)
@@ -209,6 +225,32 @@ def _ingest(db, document_id: str) -> None:
             "children": len(children),
         },
     )
+
+
+def _index_document_chunks(db, *, document_id: str, children, user_id: str,
+                           conversation_id: str) -> None:
+    """The post-commit fast path: purge the document's old points, write the new.
+
+    Both steps are idempotent and both are covered by intents: the filtered
+    delete sweeps the previous ingest's points even when their per-id delete
+    intents have not drained, and each child's upsert intent is acked only
+    after its own vector landed.
+    """
+    from app.models.document_chunk import DocumentChunk
+    from app.retrieval.memory.outbox import KIND_CHUNK, mark_done_sync
+    from app.retrieval.vector_retriever import (
+        delete_document_chunks_sync,
+        upsert_chunks_sync,
+    )
+
+    delete_document_chunks_sync(conversation_id, document_id, user_id=user_id)
+
+    rows = [db.get(DocumentChunk, uuid.UUID(str(child.id))) for child in children]
+    rows = [row for row in rows if row is not None]
+    if not rows or not upsert_chunks_sync(rows, user_id=user_id):
+        return
+    for row in rows:
+        mark_done_sync(db, entity_id=row.id, revision=row.revision, kind=KIND_CHUNK)
 
 
 def _project_document_to_memories(db, document_id: str, parents) -> None:

@@ -30,9 +30,6 @@ def test_active_backend_name_dispatch(monkeypatch):
     monkeypatch.setattr(embedder.settings, "LOCAL_EMBED_MODEL", "e5")
     assert active_backend_name() == "local-e5"
 
-    monkeypatch.setattr(embedder.settings, "LOCAL_EMBED_MODEL", "minilm")
-    assert active_backend_name() == "local"
-
     monkeypatch.setattr(embedder.settings, "LOCAL_EMBED_MODEL", "arctic")
     assert active_backend_name() == "local-arctic"
 

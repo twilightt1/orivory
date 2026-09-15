@@ -44,7 +44,36 @@ project adheres to [Semantic Versioning](https://semver.org/).
   (ONNX MiniLM, no key/no cost), `RETRIEVAL_SEMANTIC_RERANK=false`
   (opt-in khi eval chứng minh cần).
 
+### Changed
+- **P1b: vector store Chroma → Qdrant** — readiness key `chroma` → `qdrant`
+  (server probe `GET {QDRANT_URL}/readyz`; lite probe mở đúng owner client
+  embedded, không dựng client thứ hai), compose service `qdrant/qdrant`
+  (volume `qdrantdata`, healthcheck `/readyz`, giữ `depends_on`), lite image
+  `QDRANT_MODE=local` + `QDRANT_LOCAL_PATH=/data/qdrant`, CI chờ `/readyz`,
+  eval harness metadata `qdrant local (in-process)` + probe `qdrant_client`.
+  Runbook cutover (stop app → inventory/backup/backfill/verify/cutover → start
+  app; ngưỡng đo ≈65k row/60' @1000 ký tự) ở `docs/OPERATIONS_RUNBOOK.md`;
+  đường lùi một release ở `docs/ROLLBACK_P1B.md`.
+- **P1b pooling swap là RANKING CHANGE (spec constraint 1)** — masked mean →
+  CLS đổi MỌI vector (memory + query), nên vector cũ không bao giờ được serve
+  lẫn: generation manifest + contract guard từ chối generation lệch contract
+  và `migrate_qdrant.py backfill` dựng lại generation đó. Bằng chứng:
+  [eval/ablation_mean_vs_cls.json](eval/ablation_mean_vs_cls.json) — recall@1
+  0.875 (CLS) vs 0.750 (mean), recall@3 1.000 vs 0.875, recall@5 1.000 vs
+  1.000 — **small-sample evidence (12 passages / 8 queries), KHÔNG phải đo
+  chất lượng ổn định**; gate parity blocking là P0 corpus baseline, không phải
+  ablation này.
+- **Memory filter siết lại cho Qdrant** — float operand trên
+  `$eq/$ne/$in/$nin/$contains`, operand không phải scalar, và range operator
+  trên field không phải range (`pinned`, `tags`, `source_type`) giờ raise
+  `ValueError`; `$ne`/`$nin` compile thành `must_not` clauses (docs/API.md §4).
+
 ### Removed
+- **`chromadb` khỏi runtime (P1b)** — bỏ khỏi `pyproject.toml`,
+  `requirements.txt` và `uv.lock` (uv lock gỡ 33 package transitive, trong đó
+  `kubernetes`); `Dockerfile.lite` bỏ luôn `pip uninstall kubernetes` (R36:
+  qdrant-client không kéo dep tương đương). Rollback tool một release chạy
+  venv riêng từ `requirements-rollback.txt` — giờ là chỗ pin chromadb duy nhất.
 - **`frontend/`** — Next.js app khỏi tree + compose + CI (Lite không
   ship nó; agent là UI).
 - **LangGraph agents** — 16 agent files khỏi `app/agents/` (giữ

@@ -2,7 +2,7 @@
 # Orivory one-command installer — the `npx claude-mem install` equivalent.
 #
 # Bootstraps the lite deployment (single container: SQLite + in-process
-# Chroma), creates the account + agent token, and proves first recall.
+# Qdrant), creates the account + agent token, and proves first recall.
 # Needs curl + docker + python3 (JSON parsing only); everything idempotent.
 #
 #   curl -fsSL https://raw.githubusercontent.com/twilightt1/orivory/main/install.sh | bash

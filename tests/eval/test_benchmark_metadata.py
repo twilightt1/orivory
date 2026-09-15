@@ -12,7 +12,7 @@ def test_stack_metadata_reflects_actual_backend(monkeypatch):
         sample_seed=7,
         concurrency=4,
     )
-    assert meta["embeddings_actual"]["pooling"] == "legacy-mean"
+    assert meta["embeddings_actual"]["pooling"] == "cls"
     assert "jina" not in meta["embeddings_actual"]["model_id"].lower()
     assert meta["recall_top_k"] == 10
     assert meta["git_head"] and "git_dirty" in meta

@@ -1,12 +1,20 @@
+from urllib.parse import urlsplit
+
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+def _is_local_host(url: str) -> bool:
+    return (urlsplit(url).hostname or "") in _LOCAL_HOSTS
 
 
 class Settings(BaseSettings):
 
     # ── Lite mode ──────────────────────────────────────────────────────────────
     # LITE_MODE=1 gives a zero-external-services deployment: SQLite storage,
-    # in-process Chroma, in-memory caches (no Redis), synchronous in-process
+    # in-process Qdrant, in-memory caches (no Redis), synchronous in-process
     # background work (no worker), filesystem uploads (no MinIO). Default
     # DATABASE_URL / REDIS_URL point at the lite defaults; full-stack compose
     # overrides them.
@@ -15,6 +23,12 @@ class Settings(BaseSettings):
     DATABASE_URL: str = "sqlite+aiosqlite:////data/orivory.db"
     DATABASE_POOL_SIZE: int = 10
     DATABASE_MAX_OVERFLOW: int = 20
+
+    # The port the API listens on. `scripts/migrate_qdrant.py` probes it (plus
+    # its `migrate.lock`) to refuse to run while the app is alive — the P1b
+    # migration needs a quiesced store (spec §6.2 step 2, ruling R25). The
+    # operator flow is documented in docs/OPERATIONS_RUNBOOK.md ("P1b cutover").
+    APP_PORT: int = 8000
 
 
     REDIS_URL: str = ""
@@ -61,18 +75,29 @@ class Settings(BaseSettings):
     MINIO_SECURE: bool = False
 
 
-    CHROMA_HOST: str = "localhost"
-    CHROMA_PORT: int = 8001
-    # lite: "local" runs ChromaDB in-process (PersistentClient) against
-    # CHROMA_LOCAL_PATH — no chroma container needed.
-    CHROMA_MODE: str = "http"  # http | local
     LEDGER_RETENTION_DAYS: int = 90
     # Compression-before-storage (claude-mem adopt-learn): off by default —
     # opt-in per deployment; failures degrade to storing raw content.
     COMPRESSION_ENABLED: bool = False
     COMPRESSION_THRESHOLD_CHARS: int = 2000
     COMPRESSION_MODEL: str = "gpt-4o-mini"
-    CHROMA_LOCAL_PATH: str = "/data/chroma"
+
+    # ── Qdrant vector backend ─────────────────────────────────────────────────
+    # "local" runs Qdrant embedded in-process against QDRANT_LOCAL_PATH — one
+    # process owns that folder (qdrant-client locks it; a second client on the
+    # same folder refuses); "server" talks to QDRANT_URL.
+    QDRANT_URL: str = "http://localhost:6333"
+    QDRANT_API_KEY: str = ""
+    QDRANT_MODE: str = "server"  # server | local
+    QDRANT_LOCAL_PATH: str = "/data/qdrant"
+
+    # The RETIRED pre-P1b vector store's directory. Nothing in the app serves
+    # from it: the only reader is the P1b migration CLI's backup source
+    # (`scripts/migrate_qdrant.py::_backup_sources`); the one-release rollback
+    # tool takes the directory as its `--chroma-path` argument instead. A
+    # deployment that never ran Chroma leaves it at the default and the backup
+    # simply reports it "missing".
+    LEGACY_CHROMA_PATH: str = "/data/chroma"
 
     # lite: "fs" stores uploads on the local filesystem instead of MinIO.
     STORAGE_BACKEND: str = "minio"  # minio | fs
@@ -123,16 +148,17 @@ class Settings(BaseSettings):
     #           kept so old deployments boot. Not supported for recall quality.
     # Use jina for embeddings instead of OpenAI
     USE_JINA_EMBEDDINGS: bool = True
-    # Local ONNX MiniLM embeddings (chromadb-bundled, 384-dim, no API key).
-    # Takes precedence over Jina/OpenAI when true — keeps lite mode and
-    # benchmarks fully self-contained. Do not mix backends in one store.
+    # Local ONNX embeddings (384-dim, no API key). Takes precedence over
+    # Jina/OpenAI when true — keeps lite mode and benchmarks self-contained.
+    # Do not mix backends in one store.
     USE_LOCAL_EMBEDDINGS: bool = False
     # Which local model backs USE_LOCAL_EMBEDDINGS: "arctic"
-    # (snowflake-arctic-embed-xs, default — best English bench) or "minilm"
-    # (chroma-bundled, legacy) or "e5" (multilingual, opt-in Vietnamese).
-    # Both 384-dim but semantically incompatible — the dim guard records them
-    # as different backends and refuses to mix them; switching on an
-    # existing store requires reindexing into a fresh collection.
+    # (snowflake-arctic-embed-xs, default — best English bench, CLS pooling) or
+    # "e5" (multilingual, opt-in Vietnamese, mean pooling). Both 384-dim but
+    # semantically incompatible — the dim guard records them as different
+    # backends and refuses to mix them; switching on an existing store
+    # requires reindexing into a fresh collection. Anything else (the old
+    # chroma-bundled "minilm", a typo) is refused at load.
     LOCAL_EMBED_MODEL: str = "arctic"
     # Where the e5 onnx/tokenizer files live (downloaded once on first use).
     # Empty = ~/.cache/orivory/e5; the lite image sets /data/models/e5 so the
@@ -201,9 +227,16 @@ class Settings(BaseSettings):
             if not self.JWT_SECRET_KEY:
                 import secrets
                 self.JWT_SECRET_KEY = secrets.token_urlsafe(48)
-            # In-process background work, local chroma, filesystem storage unless overridden.
-            if self.CHROMA_MODE == "http" and self.CHROMA_HOST == "localhost":
-                self.CHROMA_MODE = "local"
+            # In-process background work, embedded Qdrant, filesystem storage
+            # unless overridden.
+            # Same flip for Qdrant: no API key + a localhost URL means there is
+            # no server to talk to, so own a local folder instead.
+            if (
+                self.QDRANT_MODE == "server"
+                and not self.QDRANT_API_KEY
+                and _is_local_host(self.QDRANT_URL)
+            ):
+                self.QDRANT_MODE = "local"
             if self.STORAGE_BACKEND == "minio" and not self.MINIO_ACCESS_KEY:
                 self.STORAGE_BACKEND = "fs"
             # Zero-key lite must still remember: no embedding API key means
@@ -237,6 +270,15 @@ class Settings(BaseSettings):
     def _validate_ai_runtime_settings(self) -> None:
         if self.EMBED_BATCH_SIZE < 1 or self.EMBED_BATCH_SIZE > 2048:
             raise ValueError("EMBED_BATCH_SIZE must be between 1 and 2048")
+        if self.LOCAL_EMBED_MODEL not in {"arctic", "e5"}:
+            # The chromadb-bundled MiniLM branch was removed in P1b: a stale
+            # "minilm" (or any typo) must fail at load instead of silently
+            # embedding with a contract nothing can name or verify.
+            raise ValueError("LOCAL_EMBED_MODEL must be one of: arctic, e5")
+        if self.QDRANT_MODE not in {"server", "local"}:
+            # A typo'd mode would silently boot a server client against a folder
+            # path (or the reverse); refuse instead.
+            raise ValueError("QDRANT_MODE must be one of: server, local")
         allowed_modes = {"warn_only", "fail_open", "fail_closed"}
         if self.EVALUATOR_FAILURE_MODE not in allowed_modes:
             raise ValueError(

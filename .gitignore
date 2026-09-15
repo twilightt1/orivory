@@ -12,13 +12,10 @@ ENV/
 .DS_Store
 *.log
 data/
-chroma_db/
 minio_data/
 alembic/versions/*.pyc
 run_error_logs.md
 ignoregit/
-chroma/
-chromadata/
 .ruff_cache/
 .mypy_cache/
 .coverage

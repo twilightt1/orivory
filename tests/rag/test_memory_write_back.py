@@ -41,7 +41,7 @@ class TestSafeUpsert:
             "app.retrieval.memory.vector_store.upsert_memory", fake_upsert
         )
         mem = _memory()
-        ok = await write_back.safe_upsert_to_chroma(mem)
+        ok = await write_back.safe_upsert_to_index(mem)
         assert ok is True
         assert called["id"] == mem.id
 
@@ -53,7 +53,7 @@ class TestSafeUpsert:
         monkeypatch.setattr(
             "app.retrieval.memory.vector_store.upsert_memory", boom
         )
-        ok = await write_back.safe_upsert_to_chroma(_memory())
+        ok = await write_back.safe_upsert_to_index(_memory())
         assert ok is False  # swallowed, not raised
 
 

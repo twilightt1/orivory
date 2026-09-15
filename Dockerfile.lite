@@ -1,5 +1,5 @@
 # Lite image — the whole memory hub in one container: API + MCP server,
-# SQLite storage, in-process Chroma, in-memory caches, eager tasks, local
+# SQLite storage, in-process Qdrant, in-memory caches, eager tasks, local
 # file uploads. Zero external services.
 #
 #   docker build -f Dockerfile.lite -t orivory:lite .
@@ -16,8 +16,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     LITE_MODE=1 \
     DATABASE_URL=sqlite+aiosqlite:////data/orivory.db \
     REDIS_URL= \
-    CHROMA_MODE=local \
-    CHROMA_LOCAL_PATH=/data/chroma \
+    QDRANT_MODE=local \
+    QDRANT_LOCAL_PATH=/data/qdrant \
     LOCAL_E5_DIR=/data/models/e5 \
     STORAGE_BACKEND=fs \
     FS_STORAGE_PATH=/data/uploads
@@ -31,10 +31,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* \
     && pip install --no-cache-dir -r requirements.txt \
     # ponytail: gcc only builds wheels; purge it (~200MB) — runtime needs none.
-    # kubernetes (~82M) is a chromadb dep nothing imports on the local path
-    # (verified: add+query work without it). Re-check if chromadb is bumped.
-    && apt-get purge -y gcc && apt-get autoremove -y \
-    && pip uninstall -y kubernetes
+    # R36: the old `pip uninstall -y kubernetes` went WITH chromadb — kubernetes
+    # was chromadb's dependency (verified: `packages requiring kubernetes:
+    # [chromadb]`) and nothing imports it. qdrant-client brings grpcio/httpx/
+    # numpy/portalocker/protobuf/pydantic/urllib3 — no fat unused extra to strip.
+    && apt-get purge -y gcc && apt-get autoremove -y
 
 RUN groupadd --system app && useradd --system --gid app --home-dir /app app \
     && mkdir -p /data && chown -R app:app /data /app

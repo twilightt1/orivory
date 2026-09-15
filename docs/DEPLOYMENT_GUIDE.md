@@ -11,7 +11,7 @@ Orivory expects these services to be available:
 - Celery worker for ingestion/email jobs
 - Postgres
 - Redis
-- ChromaDB
+- Qdrant
 - MinIO
 
 ## Environment Setup
@@ -35,6 +35,11 @@ Production must use:
 - non-default `MINIO_ACCESS_KEY` and `MINIO_SECRET_KEY`
 - real provider keys for `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, and `JINA_API_KEY`
 - strong `POSTGRES_PASSWORD`
+
+Also set when they differ from the defaults: `QDRANT_URL` (the Qdrant
+endpoint the app dials; `http://qdrant:6333` inside compose) and `APP_PORT`
+(the API's listen port — the P1b migration CLI probes it, plus `migrate.lock`,
+to refuse to run while the app is alive).
 
 The app validates these guardrails at startup in production mode.
 

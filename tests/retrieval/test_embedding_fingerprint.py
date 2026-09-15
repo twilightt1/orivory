@@ -24,15 +24,19 @@ FINGERPRINT_KEYS = {
 }
 
 
-def test_current_fingerprint_preserves_arctic_legacy_contract(monkeypatch):
+def test_current_fingerprint_uses_the_arctic_cls_contract(monkeypatch):
     monkeypatch.setattr(settings, "USE_LOCAL_EMBEDDINGS", True)
     monkeypatch.setattr(settings, "LOCAL_EMBED_MODEL", "arctic")
 
     fingerprint = fp.current_fingerprint()
 
     assert set(fingerprint) == FINGERPRINT_KEYS
-    assert fingerprint == fp.LEGACY_MEAN_FINGERPRINT
+    assert fingerprint == fp.ARCTIC_CLS_FINGERPRINT
+    assert fingerprint["pooling"] == "cls"
     assert fingerprint["model_revision"] == fp.ARCTIC_MODEL_REVISION
+    # The mean-pooled contract stays importable for the ablation/rollback tool.
+    assert fp.LEGACY_MEAN_FINGERPRINT["pooling"] == "legacy-mean"
+    assert fingerprint != fp.LEGACY_MEAN_FINGERPRINT
 
 
 @pytest.mark.parametrize(
@@ -132,16 +136,11 @@ def test_current_fingerprint_uses_active_embedding_contract(
     assert fingerprint == expected
 
 
-def test_current_fingerprint_represents_minilm(monkeypatch):
-    monkeypatch.setattr(settings, "USE_LOCAL_EMBEDDINGS", True)
-    monkeypatch.setattr(settings, "LOCAL_EMBED_MODEL", "minilm")
-
-    fingerprint = fp.current_fingerprint()
-
-    assert fingerprint["model_id"] == "all-MiniLM-L6-v2"
-    assert fingerprint["provider"] == "chromadb-onnx"
-    assert fingerprint["dim"] == 384
-    assert fingerprint["artifact_digest"] == fp.MINILM_ARTIFACT_SHA256
+def test_legacy_mean_fingerprint_stays_deterministic():
+    """Same-dim contract swaps must still produce distinct cache keys."""
+    assert fp.fingerprint_generation(fp.LEGACY_MEAN_FINGERPRINT) != fp.fingerprint_generation(
+        fp.ARCTIC_CLS_FINGERPRINT
+    )
 
 
 def test_current_fingerprint_uses_configured_dimensions(monkeypatch):

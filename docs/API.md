@@ -1063,6 +1063,8 @@ List memories with filtering and semantic search.
 
 > **Note — `total` counts visible rows only:** dirty (stale-derived) memories are excluded from the page and from the total; superseded rows stay listed, labeled `state: "superseded"`.
 
+> **Note — memory filter language (P1b, Qdrant):** the `where` object accepted by the memory search/recall path takes one operator per field, restricted to the allowlist `source_type`, `captured_at`, `salience`, `pinned`, `tags` (`user_id` is always the authenticated principal and is rejected as a filter). Values must be scalars (`bool`/`int`/`str`) or, for `$in`/`$nin`, a list. Tightened against the Chroma-era behaviour, each of these now raises `ValueError`: a **float** operand on `$eq`/`$ne`/`$in`/`$nin`/`$contains` (a float is a range question — use `$gt`/`$gte`/`$lt`/`$lte` on `salience`), a non-scalar operand where a scalar is required (e.g. `{"tags": {"$contains": ["a", "b"]}}` — `$contains` takes ONE element and matches it against the list), and range operators on fields that are not ranges (`pinned`, `tags`, `source_type`). `$ne` and `$nin` compile to `must_not` clauses, and because a missing field never matches an include, a memory carrying no `tags` key is still returned by `tags: {"$ne": "x"}`.
+
 ---
 
 ### GET /api/v1/memories/{id}
@@ -2798,7 +2800,7 @@ Scopes are enforced per call: a token with only `memory:read` cannot `add_memory
 
 ## 14. Erasure Receipts
 
-Erasing a memory removes the row **and every derived artifact** (child memories, entity links, source links, ChromaDB vectors), then runs a post-deletion verification pass: re-query the vector store and re-count residual DB rows per target. Each erasure call returns one **receipt** with per-target detail. Receipts are user-scoped and are deleted with the user.
+Erasing a memory removes the row **and every derived artifact** (child memories, entity links, source links, vector-store entries), then runs a post-deletion verification pass: re-query the vector store and re-count residual DB rows per target. Each erasure call returns one **receipt** with per-target detail. Receipts are user-scoped and are deleted with the user.
 
 > **Honest v0 verification:** v0 verifies erasure by **absence-checks** — the receipt confirms that vectors and DB rows are *gone*. It does not probe whether facts can be re-inferred from correlated knowledge-graph data (KG-correlation re-inference probing is a planned follow-up). Also note that `Entity`/`Relation` nodes themselves survive memory erasure in v0 (link counts are recorded in the receipt; orphan pruning is a follow-up). Don't market this as "adversarially verified" until the deeper protocol ships.
 
@@ -2860,7 +2862,7 @@ curl -s -X POST https://api.orivory.io/api/v1/erasure-receipts \
 
 Rollup precedence: `completed_with_errors` > `completed_with_residual` > `completed_unverified` > `completed`. `detail.verification`/`detail.index_pending` are omitted when the call erased nothing (a forget that deleted nothing verified nothing).
 
-`vector_residual_checked: false` means the Chroma re-query was unavailable during verification (the DB delete still succeeded — Postgres is the source of truth). A `false` flag alone does not imply residual data.
+`vector_residual_checked: false` means the vector-store re-query was unavailable during verification (the DB delete still succeeded — Postgres is the source of truth). A `false` flag alone does not imply residual data.
 
 ### GET /api/v1/erasure-receipts
 

@@ -23,7 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from app.database import Base, get_db
 from app.main import app
-from app.retrieval.embedder import EmbeddingDimensionMismatch, active_backend_name
+from app.retrieval.embedder import EmbeddingDimensionMismatch
 from app.retrieval.embedding_fingerprint import (
     canonical_fingerprint,
     current_fingerprint,
@@ -118,36 +118,59 @@ async def test_recall_endpoint_returns_503_on_vector_unavailable(tmp_path, monke
 async def test_search_raises_when_collection_unavailable(monkeypatch):
     """Acquire failure is a typed outage (a readiness signal), not []."""
     async def unavailable():
-        raise ConnectionError("Chroma refused")
+        raise ConnectionError("Qdrant refused")
 
-    monkeypatch.setattr(vector_store, "_get_collection", unavailable)
+    monkeypatch.setattr(vector_store, "_open_collection", lambda _dim: unavailable())
     with pytest.raises(VectorUnavailableError):
         await vector_store.search_memories([0.1] * 8, user_id=str(uuid.uuid4()))
 
 
-def _current_contract_metadata() -> dict:
-    """Collection metadata that satisfies the real embedding-contract guard."""
+def _current_contract() -> dict:
+    """Generation info that satisfies the real embedding-contract guard."""
     canonical = canonical_fingerprint(current_fingerprint())
     return {
-        "orivory_embed_backend": active_backend_name(),
-        "orivory_embed_dim": int(current_fingerprint()["dim"]),
-        "orivory_embed_fingerprint": canonical,
-        "orivory_embed_generation": fingerprint_generation(canonical),
+        "info": {"dim": int(current_fingerprint()["dim"]), "distance": "Cosine"},
+        "manifest_fingerprint": fingerprint_generation(canonical),
     }
 
 
+def _fake_store(monkeypatch, *, count: object = 4, query_error: Exception | None = None):
+    """A fake Qdrant face with a count and a query step, no real store."""
+    from app.retrieval import vector_backend
+
+    contract = _current_contract()
+
+    class Client:
+        async def count(self, _generation):
+            if isinstance(count, Exception):
+                raise count
+            return SimpleNamespace(count=count)
+
+        async def query_points(self, **_kwargs):
+            if query_error is not None:
+                raise query_error
+            return SimpleNamespace(points=[])
+
+    monkeypatch.setattr(
+        vector_store,
+        "_open_collection",
+        lambda _dim: _async_result((Client(), "generation", contract["manifest_fingerprint"])),
+    )
+    monkeypatch.setattr(
+        vector_backend,
+        "collection_info_async",
+        lambda *_args, **_kwargs: _async_result(contract["info"]),
+    )
+    return contract
+
+
+async def _async_result(value):
+    return value
+
+
 async def test_search_raises_when_count_fails_after_acquisition(monkeypatch):
-    """Chroma dying between acquire and count must not read as no-match."""
-    class DyingCollection:
-        metadata: dict = {}
-
-        async def count(self):
-            raise ConnectionError("store died after acquisition")
-
-    async def dying_collection():
-        return DyingCollection()
-
-    monkeypatch.setattr(vector_store, "_get_collection", dying_collection)
+    """Qdrant dying between acquire and count must not read as no-match."""
+    _fake_store(monkeypatch, count=ConnectionError("store died after acquisition"))
     with pytest.raises(VectorUnavailableError) as excinfo:
         await vector_store.search_memories([0.1] * 8, user_id="user-1")
     assert "count" in str(excinfo.value)
@@ -155,57 +178,26 @@ async def test_search_raises_when_count_fails_after_acquisition(monkeypatch):
 
 async def test_search_raises_when_query_fails_after_count(monkeypatch):
     """A query failure is typed even when count() and the contract guard pass."""
-    meta = _current_contract_metadata()
-
-    class DyingCollection:
-        metadata = meta
-
-        async def count(self):
-            return 4
-
-        async def query(self, **_kwargs):
-            raise ConnectionError("store died mid-query")
-
-    async def dying_collection():
-        return DyingCollection()
-
-    monkeypatch.setattr(vector_store, "_get_collection", dying_collection)
+    contract = _fake_store(monkeypatch, query_error=ConnectionError("store died mid-query"))
     with pytest.raises(VectorUnavailableError) as excinfo:
         await vector_store.search_memories(
-            [0.1] * meta["orivory_embed_dim"], user_id="user-1"
+            [0.1] * contract["info"]["dim"], user_id="user-1"
         )
     assert "query" in str(excinfo.value)
 
 
 async def test_search_keeps_contract_mismatch_typed(monkeypatch):
-    """A stale collection contract stays EmbeddingDimensionMismatch, never the
+    """A stale generation contract stays EmbeddingDimensionMismatch, never the
     availability error the count/query guards raise."""
-    meta = _current_contract_metadata()
-    meta["orivory_embed_dim"] = int(meta["orivory_embed_dim"]) + 1
+    contract = _fake_store(monkeypatch)
+    contract["info"]["dim"] = int(contract["info"]["dim"]) + 1
 
-    class MismatchedCollection:
-        metadata = meta
-
-        async def count(self):
-            return 4
-
-    async def mismatched_collection():
-        return MismatchedCollection()
-
-    monkeypatch.setattr(vector_store, "_get_collection", mismatched_collection)
     with pytest.raises(EmbeddingDimensionMismatch):
         await vector_store.search_memories([0.1] * 8, user_id="user-1")
 
 
 async def test_search_mismatch_raised_by_count_is_not_retyped(monkeypatch):
     """Ordering pin: EmbeddingDimensionMismatch passes the count guard unchanged."""
-    class MismatchRaisingCollection:
-        async def count(self):
-            raise EmbeddingDimensionMismatch("contract mismatch mid-count")
-
-    async def mismatch_raising_collection():
-        return MismatchRaisingCollection()
-
-    monkeypatch.setattr(vector_store, "_get_collection", mismatch_raising_collection)
+    _fake_store(monkeypatch, count=EmbeddingDimensionMismatch("contract mismatch mid-count"))
     with pytest.raises(EmbeddingDimensionMismatch):
         await vector_store.search_memories([0.1] * 8, user_id="user-1")

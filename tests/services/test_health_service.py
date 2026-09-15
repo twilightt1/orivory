@@ -1,17 +1,45 @@
+import httpx
 import pytest
 
 from app.database import IS_SQLITE
 from app.services import health_service
 
-# These two assert the full-stack checker map (postgres + minio + …); lite mode
-# deliberately exposes its own map (sqlite + storage + …), so they only apply
-# under a Postgres-shaped DATABASE_URL.
-pytestmark = [
-    pytest.mark.service,
-    pytest.mark.skipif(IS_SQLITE, reason="full-stack readiness map; lite mode exposes its own checks"),
-]
+pytestmark = pytest.mark.service
+
+# The two checker-map tests assert the full-stack map (postgres + minio + …);
+# lite mode deliberately exposes its own map (sqlite + storage + …), so they
+# only apply under a Postgres-shaped DATABASE_URL. The probe test below is
+# backend-agnostic and must NOT inherit that skip — it is the only pin on the
+# server-mode endpoint.
+full_stack_only = pytest.mark.skipif(
+    IS_SQLITE, reason="full-stack readiness map; lite mode exposes its own checks"
+)
+lite_only = pytest.mark.skipif(
+    not IS_SQLITE, reason="lite readiness map; only a SQLite install exposes it"
+)
 
 
+@lite_only
+@pytest.mark.asyncio
+async def test_check_readiness_lite_key_set(monkeypatch):
+    """Mirror of the full-stack key-set pin: lite answers sqlite/storage."""
+    async def ok():
+        return None
+
+    monkeypatch.setattr(health_service, "_check_sqlite", ok)
+    monkeypatch.setattr(health_service, "_check_redis", ok)
+    monkeypatch.setattr(health_service, "_check_storage", ok)
+    monkeypatch.setattr(health_service, "_check_qdrant", ok)
+    monkeypatch.setattr(health_service, "_check_mcp_hub", ok)
+
+    result = await health_service.check_readiness()
+
+    assert result["status"] == "ok"
+    assert set(result["checks"]) == {"sqlite", "redis", "storage", "qdrant", "mcp_hub"}
+    assert all(check["status"] == "ok" for check in result["checks"].values())
+
+
+@full_stack_only
 @pytest.mark.asyncio
 async def test_check_readiness_ok(monkeypatch):
     async def ok():
@@ -20,16 +48,17 @@ async def test_check_readiness_ok(monkeypatch):
     monkeypatch.setattr(health_service, "_check_postgres", ok)
     monkeypatch.setattr(health_service, "_check_redis", ok)
     monkeypatch.setattr(health_service, "_check_minio", ok)
-    monkeypatch.setattr(health_service, "_check_chroma", ok)
+    monkeypatch.setattr(health_service, "_check_qdrant", ok)
     monkeypatch.setattr(health_service, "_check_mcp_hub", ok)
 
     result = await health_service.check_readiness()
 
     assert result["status"] == "ok"
-    assert set(result["checks"]) == {"postgres", "redis", "minio", "chroma", "mcp_hub"}
+    assert set(result["checks"]) == {"postgres", "redis", "minio", "qdrant", "mcp_hub"}
     assert all(check["status"] == "ok" for check in result["checks"].values())
 
 
+@full_stack_only
 @pytest.mark.asyncio
 async def test_check_readiness_degraded_when_dependency_fails(monkeypatch):
     async def ok():
@@ -41,14 +70,14 @@ async def test_check_readiness_degraded_when_dependency_fails(monkeypatch):
     monkeypatch.setattr(health_service, "_check_postgres", ok)
     monkeypatch.setattr(health_service, "_check_redis", ok)
     monkeypatch.setattr(health_service, "_check_minio", ok)
-    monkeypatch.setattr(health_service, "_check_chroma", failed)
+    monkeypatch.setattr(health_service, "_check_qdrant", failed)
     monkeypatch.setattr(health_service, "_check_mcp_hub", ok)
 
     result = await health_service.check_readiness()
 
     assert result["status"] == "degraded"
-    assert result["checks"]["chroma"]["status"] == "failed"
-    assert "connection refused" in result["checks"]["chroma"]["error"]
+    assert result["checks"]["qdrant"]["status"] == "failed"
+    assert "connection refused" in result["checks"]["qdrant"]["error"]
     assert result["checks"]["postgres"]["status"] == "ok"
 
 
@@ -59,3 +88,56 @@ def test_sanitize_error_limits_length_and_removes_newlines():
 
     assert "\n" not in message
     assert len(message) == 300
+
+
+@pytest.mark.asyncio
+async def test_check_qdrant_server_mode_probes_readyz_with_a_2s_bound(monkeypatch):
+    """Server mode = GET {QDRANT_URL}/readyz with a 2s bound; non-200 fails.
+
+    Nothing else pins that endpoint without live infra, so a future edit could
+    silently retarget the probe.
+    """
+    from app.retrieval import vector_backend
+
+    urls: list[str] = []
+    timeouts: list[float] = []
+    statuses: list[int] = [200]
+
+    class _Response:
+        def __init__(self, status_code: int) -> None:
+            self.status_code = status_code
+
+        def raise_for_status(self) -> None:
+            if self.status_code != 200:
+                raise httpx.HTTPStatusError(
+                    "not ready",
+                    request=httpx.Request("GET", urls[-1]),
+                    response=httpx.Response(self.status_code),
+                )
+
+    class _Client:
+        def __init__(self, timeout: float) -> None:
+            timeouts.append(timeout)
+
+        async def __aenter__(self) -> "_Client":
+            return self
+
+        async def __aexit__(self, *exc_info: object) -> bool:
+            return False
+
+        async def get(self, url: str) -> _Response:
+            urls.append(url)
+            return _Response(statuses[0])
+
+    monkeypatch.setattr(httpx, "AsyncClient", _Client)
+    monkeypatch.setattr(vector_backend, "is_local_mode", lambda: False)
+    monkeypatch.setattr(health_service.settings, "QDRANT_URL", "http://qdrant.test:6333/")
+
+    await health_service._check_qdrant()
+
+    assert urls == ["http://qdrant.test:6333/readyz"]
+    assert timeouts == [2.0]
+
+    statuses[0] = 500
+    with pytest.raises(httpx.HTTPStatusError):
+        await health_service._check_qdrant()

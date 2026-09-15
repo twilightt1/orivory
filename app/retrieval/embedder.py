@@ -24,7 +24,6 @@ def __getattr__(name):
 
 _async_client: AsyncOpenAI | None = None
 _sync_client: OpenAI | None = None
-_local_embed_fn = None  # chromadb ONNX MiniLM (USE_LOCAL_EMBEDDINGS + minilm)
 
 # Collection metadata keys recording which embedding backend, dimension and
 # contract a collection was created with. Flipping embedding settings after
@@ -47,9 +46,9 @@ class EmbeddingDimensionMismatch(ValueError):
 def active_backend_name() -> str:
     """Which embedding backend the current settings select."""
     if settings.USE_LOCAL_EMBEDDINGS:
-        return {"arctic": "local-arctic", "e5": "local-e5"}.get(
-            settings.LOCAL_EMBED_MODEL, "local"
-        )
+        # No fallback: LOCAL_EMBED_MODEL is validated at config load, and the
+        # removed MiniLM backend must never be named "local" again.
+        return {"arctic": "local-arctic", "e5": "local-e5"}[settings.LOCAL_EMBED_MODEL]
     if settings.USE_JINA_EMBEDDINGS and settings.JINA_API_KEY:
         return "jina"
     return "openai"
@@ -187,6 +186,62 @@ def check_collection_dim(
             f"collection — mixing backends silently corrupts recall."
         )
     return None
+
+
+def check_generation_contract(
+    info: dict,
+    embedding_dim: int,
+    *,
+    manifest_fingerprint: str | None,
+    collection_is_empty: bool,
+    fingerprint: str | dict | None = None,
+) -> None:
+    """Verify a Qdrant generation against the embedding contract (spec §4.2).
+
+    The legacy (Chroma) guard below reads a collection's own metadata stamp; a Qdrant
+    collection has none — its contract lives in TWO places that must agree:
+
+    - the PHYSICAL collection: dim/metric, read from
+      :func:`app.retrieval.vector_backend.collection_info`;
+    - the MANIFEST row: the active ``index_generations.fingerprint`` for the
+      kind, which names the embedding contract those vectors were built with.
+
+    ``manifest_fingerprint is None`` means no active manifest row: an EMPTY
+    generation is then unclaimed (allowed — the ladder/cutover claims it), a
+    POPULATED one is unknown data and must be quarantined, never served.
+    Read-only by construction: nothing here writes the manifest (that is the
+    cutover's job), so a read path can never claim a generation.
+    """
+    if manifest_fingerprint is None and not collection_is_empty:
+        raise EmbeddingDimensionMismatch(
+            "populated generation has no manifest row — quarantine/rebuild"
+        )
+    expected_fingerprint = _canonical_fingerprint(fingerprint)
+    if manifest_fingerprint is not None and (
+        manifest_fingerprint != fingerprint_generation(expected_fingerprint)
+    ):
+        raise EmbeddingDimensionMismatch(
+            "same dim but different embedding contract: generation manifest is "
+            f"{manifest_fingerprint!r} vs {fingerprint_generation(expected_fingerprint)!r} — "
+            "fresh reindex required"
+        )
+    distance = str(info.get("distance", "")).lower()
+    if distance != "cosine":
+        raise EmbeddingDimensionMismatch(
+            f"generation distance metric is {distance!r}, expected cosine — fresh reindex required"
+        )
+    try:
+        recorded_dim = int(info["dim"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise EmbeddingDimensionMismatch(
+            "generation has no readable vector dim — quarantine/rebuild"
+        ) from exc
+    if recorded_dim != int(embedding_dim):
+        raise EmbeddingDimensionMismatch(
+            f"Embedding backend/dim mismatch: generation holds dim={recorded_dim}, but the "
+            f"current config produces dim={int(embedding_dim)}. Restore the previous embedding "
+            "backend or reindex into a fresh generation — mixing dims silently corrupts recall."
+        )
 
 
 def stamp_collection_dim(
@@ -473,29 +528,31 @@ def _embed_sync_with_jina(texts: list[str]) -> list[list[float]]:
 
 
 def _embed_with_local(texts: list[str], *, query: bool = False) -> list[list[float]]:
-    """Embed fully locally — e5-multilingual (default) or bundled MiniLM.
+    """Embed fully locally — arctic XS (default) or e5-multilingual.
 
-    384-dim vectors either way. e5 applies its required ``query:``/``passage:``
-    prefixes; MiniLM takes raw text. Do NOT mix backends in one store.
+    384-dim vectors either way, but different contracts: arctic pools CLS and
+    prefixes queries only, e5 pools the masked mean and requires both
+    ``query:``/``passage:`` prefixes. Do NOT mix backends in one store — the
+    dim guard records them as different backends and refuses.
+
+    ``LOCAL_EMBED_MODEL`` is validated at config load (arctic | e5), so the
+    removed bundled MiniLM path is not reachable here any more.
     """
-    if settings.LOCAL_EMBED_MODEL == "e5":
-        from app.retrieval import e5_local
+    from app.retrieval import e5_local
 
+    model = settings.LOCAL_EMBED_MODEL
+    if model == "e5":
         if query:
             return e5_local.embed_queries(texts)
         return e5_local.embed_passages(texts)
-    if settings.LOCAL_EMBED_MODEL == "arctic":
-        from app.retrieval import e5_local
-
-        if query:
-            return e5_local.arctic_embed_queries(texts)
-        return e5_local.arctic_embed_passages(texts)
-    global _local_embed_fn
-    if _local_embed_fn is None:
-        import chromadb.utils.embedding_functions as ef
-
-        _local_embed_fn = ef.ONNXMiniLM_L6_V2()
-    return [list(map(float, v)) for v in _local_embed_fn(texts)]
+    if model != "arctic":
+        # Config load refuses anything but arctic|e5; a hand-patched settings
+        # object must not silently embed as arctic either (same fence as
+        # ``active_backend_name``).
+        raise ValueError(f"unknown LOCAL_EMBED_MODEL {model!r} — expected 'arctic' or 'e5'")
+    if query:
+        return e5_local.arctic_embed_queries(texts)
+    return e5_local.arctic_embed_passages(texts)
 
 
 async def embed_texts(texts: list[str]) -> list[list[float]]:

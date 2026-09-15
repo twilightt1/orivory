@@ -24,9 +24,6 @@ E5_MODEL_REVISION = "761b726dd34fb83930e26aab4e9ac3899aa1fa78"
 ARCTIC_ARTIFACT_SHA256 = ARCTIC_MODEL_SHA256
 E5_ARTIFACT_SHA256 = MODEL_SHA256
 E5_TOKENIZER_SHA256 = TOKENIZER_SHA256
-# Chroma publishes and verifies this bundled ONNX archive before extraction.
-MINILM_ARTIFACT_SHA256 = "913d7300ceae3b2dbc2c50d1de4baacab4be7b9380491c27fab7418616a16ec3"
-MINILM_TOKENIZER_SHA256 = "da0e79933b9ed51798a3ae27893d3c5fa4a201126cef75586296df9b4d2c62a0"
 
 
 def _contract(
@@ -87,6 +84,13 @@ LEGACY_MEAN_FINGERPRINT = _contract(
     provider="onnxruntime-cpu",
 )
 
+# P1b cutover: production arctic XS pools the [CLS] token — the pooling the
+# model was trained with — instead of the legacy masked mean. Derived from the
+# legacy contract so ``pooling`` is provably the only field that differs.
+# ``LEGACY_MEAN_FINGERPRINT`` stays importable: the mean-vs-CLS ablation and
+# the Chroma rollback tool both need to name the old generation.
+ARCTIC_CLS_FINGERPRINT: dict[str, Any] = {**LEGACY_MEAN_FINGERPRINT, "pooling": "cls"}
+
 
 def canonical_fingerprint(fingerprint: str | dict[str, Any]) -> str:
     """Serialize a fingerprint deterministically for metadata and cache keys."""
@@ -118,13 +122,13 @@ def fingerprint_generation(fingerprint: str | dict[str, Any]) -> str:
 def current_fingerprint() -> dict[str, Any]:
     """Fingerprint for the active embedding contract.
 
-    P0 keeps local Arctic XS on legacy mean pooling until the separate CLS
-    parity probe passes its gate. API providers expose null immutable artifact
-    provenance because the provider does not publish a revision through this
-    interface; the fields remain explicit instead of claiming one.
+    P1b puts local Arctic XS on CLS pooling (``ARCTIC_CLS_FINGERPRINT``); e5
+    keeps mean. API providers expose null immutable artifact provenance
+    because the provider does not publish a revision through this interface;
+    the fields remain explicit instead of claiming one.
     """
     if settings.USE_LOCAL_EMBEDDINGS and settings.LOCAL_EMBED_MODEL == "arctic":
-        return dict(LEGACY_MEAN_FINGERPRINT)
+        return dict(ARCTIC_CLS_FINGERPRINT)
     if settings.USE_LOCAL_EMBEDDINGS and settings.LOCAL_EMBED_MODEL == "e5":
         return _contract(
             model_id="Xenova/multilingual-e5-small",
@@ -142,23 +146,6 @@ def current_fingerprint() -> dict[str, Any]:
             precision="float32",
             provider="onnxruntime-cpu",
             graph_outputs=["last_hidden_state"],
-        )
-    if settings.USE_LOCAL_EMBEDDINGS:
-        return _contract(
-            model_id="all-MiniLM-L6-v2",
-            revision=None,
-            artifact_digest=MINILM_ARTIFACT_SHA256,
-            tokenizer_digest=MINILM_TOKENIZER_SHA256,
-            pooling="mean",
-            query_prefix="",
-            passage_prefix="",
-            max_tokens=256,
-            truncation="head",
-            padding="fixed-256",
-            normalize=True,
-            dim=384,
-            precision="float32",
-            provider="chromadb-onnx",
         )
     if settings.USE_JINA_EMBEDDINGS and settings.JINA_API_KEY:
         return _contract(
@@ -195,6 +182,38 @@ def current_fingerprint() -> dict[str, Any]:
         provider="openai-compatible-api",
         graph_outputs=["embedding"],
     )
+
+
+_GENERATION_FAMILIES = {"memory": "orivory_memories", "chunk": "orivory_chunks"}
+
+
+def generation_name(kind: str, fingerprint: str | dict[str, Any] | None = None) -> str:
+    """Name the vector generation/collection for ``kind`` and a contract.
+
+    ``orivory_memories__<fp8>`` / ``orivory_chunks__<fp8>``, where ``fp8`` is
+    the first 8 hex characters of :func:`fingerprint_generation` — the same
+    token the payload and the ``index_generations`` manifest carry, shortened
+    to a usable name. The migration/cutover tool names the NEW generation with
+    this helper; the runtime fallbacks in ``app.retrieval.memory.outbox`` keep
+    their old spellings for un-migrated databases.
+    ``None`` means "the active contract"; a falsy-but-explicit fingerprint
+    (``{}`` / ``""``) is a caller bug, never a synonym for ``None``.
+    """
+    try:
+        family = _GENERATION_FAMILIES[kind]
+    except KeyError:
+        raise ValueError(
+            f"unknown index kind {kind!r} — expected one of {sorted(_GENERATION_FAMILIES)}"
+        ) from None
+    if fingerprint is None:
+        fingerprint = current_fingerprint()
+    if not fingerprint:
+        # Rollback (T6) and ablation (T8) name generations they built: silently
+        # naming the ACTIVE one would point them at the wrong vectors.
+        raise ValueError(
+            f"empty embedding fingerprint {fingerprint!r} — pass None to name the active generation"
+        )
+    return f"{family}__{fingerprint_generation(fingerprint)[:8]}"
 
 
 def cache_key(fingerprint: dict, kind: str, text: str) -> str:

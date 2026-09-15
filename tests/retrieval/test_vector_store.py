@@ -1,94 +1,61 @@
 """
 Unit tests for app/retrieval/memory/vector_store.py
 
-Tests the ChromaDB-backed memory vector store functions.
+The store's backend is Qdrant (P1b): the payload contract, the point shape and
+the client calls are pinned here with fakes; the real-store behaviour
+(recall parity, filters, the manifest guard) lives in
+``tests/retrieval/test_qdrant_parity.py``.
 """
-from unittest.mock import MagicMock, patch
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 from uuid import uuid4
-
-import pytest
 
 # Import the module to test
 from app.retrieval.memory import vector_store
 
 
-class TestRetryDecorator:
-    """Tests for the _with_retry decorator."""
+class _FakeClient:
+    """Records the calls the store makes through one face."""
 
-    @pytest.mark.asyncio
-    async def test_retry_succeeds_on_first_try(self):
-        """Function should succeed on first try without retry."""
-        call_count = 0
+    def __init__(self, *, count: int = 1, records=()) -> None:
+        self.calls: list[tuple[str, dict]] = []
+        self._count = count
+        self._records = list(records)
 
-        @vector_store._with_retry(retries=3)
-        async def flaky_function():
-            nonlocal call_count
-            call_count += 1
-            return "success"
+    def count(self, collection_name):
+        self.calls.append(("count", {"collection_name": collection_name}))
+        return SimpleNamespace(count=self._count)
 
-        result = await flaky_function()
-        assert result == "success"
-        assert call_count == 1
+    def upsert(self, *, collection_name, points):
+        self.calls.append(("upsert", {"collection_name": collection_name, "points": points}))
 
-    @pytest.mark.asyncio
-    async def test_retry_succeeds_after_failures(self):
-        """Function should succeed after transient failures."""
-        call_count = 0
+    def delete(self, *, collection_name, points_selector):
+        self.calls.append(("delete", {"collection_name": collection_name,
+                                      "points_selector": points_selector}))
 
-        @vector_store._with_retry(retries=3, base_delay=0.01)
-        async def flaky_function():
-            nonlocal call_count
-            call_count += 1
-            if call_count < 3:
-                raise ConnectionError("Could not connect")
-            return "success"
+    def retrieve(self, *, collection_name, ids, with_payload=True):
+        self.calls.append(("retrieve", {"collection_name": collection_name, "ids": list(ids),
+                                        "with_payload": with_payload}))
+        return [record for record in self._records if record.id in set(ids)]
 
-        result = await flaky_function()
-        assert result == "success"
-        assert call_count == 3
+    def query_points(self, **kwargs):
+        self.calls.append(("query_points", kwargs))
+        return SimpleNamespace(points=[])
 
-    @pytest.mark.asyncio
-    async def test_retry_fails_after_max_retries(self):
-        """Should raise after exhausting retries."""
-        @vector_store._with_retry(retries=2, base_delay=0.01)
-        async def always_fails():
-            raise ConnectionError("Could not connect")
 
-        with pytest.raises(ConnectionError):
-            await always_fails()
-
-    @pytest.mark.asyncio
-    async def test_retry_raises_non_transient_errors(self):
-        """Should raise immediately for non-transient errors."""
-        @vector_store._with_retry(retries=3)
-        async def bad_error():
-            raise ValueError("Not a transient error")
-
-        with pytest.raises(ValueError):
-            await bad_error()
-
-    def test_retry_sync_succeeds_on_first_try(self):
-        """Sync function should succeed on first try."""
-        call_count = 0
-
-        @vector_store._with_retry(retries=3)
-        def sync_flaky_function():
-            nonlocal call_count
-            call_count += 1
-            return "success"
-
-        result = sync_flaky_function()
-        assert result == "success"
-        assert call_count == 1
-
-    def test_retry_sync_fails_after_max_retries(self):
-        """Sync function should raise after exhausting retries."""
-        @vector_store._with_retry(retries=2, base_delay=0.01)
-        def sync_always_fails():
-            raise ConnectionError("Could not connect")
-
-        with pytest.raises(ConnectionError):
-            sync_always_fails()
+def _sync_face(monkeypatch, client, *, generation="Orivory_memories", fingerprint="f" * 64,
+               count=1):
+    """Bind the store's sync seam to ``client`` (guard already satisfied)."""
+    monkeypatch.setattr(
+        vector_store,
+        "_checked_collection_sync",
+        lambda _dim: (client, generation, count),
+    )
+    monkeypatch.setattr(
+        vector_store,
+        "_open_collection_sync",
+        lambda _dim: (client, generation, fingerprint),
+    )
 
 
 class TestMemoryToDocument:
@@ -126,10 +93,10 @@ class TestMemoryToDocument:
 
 
 class TestMemoryToMetadata:
-    """Tests for _memory_to_metadata helper."""
+    """Tests for the Qdrant payload builder."""
 
     def test_metadata_basic_fields(self):
-        """Should include required metadata fields."""
+        """Should include the memory family's contract fields."""
         memory_id = uuid4()
         user_id = uuid4()
 
@@ -144,12 +111,15 @@ class TestMemoryToMetadata:
 
         result = vector_store._memory_to_metadata(mock_memory)
 
+        assert result["kind"] == "memory"
         assert result["user_id"] == str(user_id)
         assert result["memory_id"] == str(memory_id)
         assert result["source_type"] == "manual_note"
         assert result["salience"] == 0.75
         assert result["pinned"] is False
         assert result["tags"] == ["tag1", "tag2"]
+        # A MagicMock has no cm_* markers: the lifecycle state is "current".
+        assert result["visibility_state"] == "current"
 
     def test_metadata_with_captured_at(self):
         """Should format captured_at as ISO string."""
@@ -168,8 +138,8 @@ class TestMemoryToMetadata:
 
         assert result["captured_at"] == "2025-01-15T10:30:00+00:00"
 
-    def test_metadata_casts_types(self):
-        """Should cast salience to float and pinned to bool."""
+    def test_metadata_omits_absent_values(self):
+        """No nulls in a Qdrant payload: an absent value is an absent key."""
         mock_memory = MagicMock()
         mock_memory.id = uuid4()
         mock_memory.user_id = uuid4()
@@ -183,12 +153,10 @@ class TestMemoryToMetadata:
 
         assert isinstance(result["salience"], float)
         assert isinstance(result["pinned"], bool)
-        # Empty/None tags are OMITTED (ChromaDB rejects empty-list metadata
-        # values) — see _memory_to_metadata docstring.
         assert "tags" not in result
+        assert "captured_at" not in result
 
     def test_metadata_handles_none_tags(self):
-        """None tags are omitted (ChromaDB rejects empty lists)."""
         mock_memory = MagicMock()
         mock_memory.id = uuid4()
         mock_memory.user_id = uuid4()
@@ -202,6 +170,20 @@ class TestMemoryToMetadata:
 
         assert "tags" not in result
 
+    def test_metadata_labels_the_lifecycle_state(self):
+        from app.retrieval.memory.correction import CM_DERIVED_DIRTY, CM_SUPERSEDED_BY
+
+        mock_memory = MagicMock()
+        mock_memory.id = uuid4()
+        mock_memory.user_id = uuid4()
+        mock_memory.extra_metadata = {CM_SUPERSEDED_BY: str(uuid4())}
+        mock_memory.tags = []
+
+        assert vector_store._memory_to_metadata(mock_memory)["visibility_state"] == "superseded"
+
+        mock_memory.extra_metadata = {CM_DERIVED_DIRTY: True}
+        assert vector_store._memory_to_metadata(mock_memory)["visibility_state"] == "dirty"
+
 
 class TestCollectionName:
     """Tests for COLLECTION_NAME constant."""
@@ -211,130 +193,179 @@ class TestCollectionName:
         assert vector_store.COLLECTION_NAME == "Orivory_memories"
 
 
-class TestGetSyncClient:
-    """Tests for _get_sync_client function."""
-
-    def test_get_sync_client_returns_client(self, monkeypatch):
-        """_get_sync_client should return a ChromaDB sync client."""
-        # Local mode bypasses HttpClient (real PersistentClient); pin http.
-        monkeypatch.setattr(vector_store.settings, "CHROMA_MODE", "http")
-        with patch.object(vector_store, "_sync_client", None):
-            with patch("chromadb.HttpClient") as mock_client_class:
-                mock_client = MagicMock()
-                mock_client_class.return_value = mock_client
-
-                client = vector_store._get_sync_client()
-
-                assert client is mock_client
-                mock_client_class.assert_called_once()
-
-    def test_get_sync_client_caches_client(self, monkeypatch):
-        """_get_sync_client should cache the client after first call."""
-        monkeypatch.setattr(vector_store.settings, "CHROMA_MODE", "http")
-        with patch.object(vector_store, "_sync_client", None):
-            with patch("chromadb.HttpClient") as mock_client_class:
-                mock_client = MagicMock()
-                mock_client_class.return_value = mock_client
-
-                client1 = vector_store._get_sync_client()
-                client2 = vector_store._get_sync_client()
-
-                assert client1 is client2
-                assert mock_client_class.call_count == 1
-
-
 class TestUpsertMemorySync:
     """Tests for upsert_memory_sync function."""
 
-    def test_upsert_memory_sync_calls_collection(self):
-        """Should call collection upsert with correct parameters."""
-        mock_memory = MagicMock()
-        mock_memory.id = uuid4()
-        mock_memory.user_id = uuid4()
-        mock_memory.title = "Test"
-        mock_memory.content = "Content"
-        mock_memory.source_type = "manual"
-        mock_memory.captured_at = None
-        mock_memory.salience = 0.5
-        mock_memory.pinned = False
-        mock_memory.tags = []
+    def test_upsert_memory_sync_writes_one_point(self, monkeypatch):
+        memory = MagicMock()
+        memory.id = uuid4()
+        memory.user_id = uuid4()
+        memory.title = "Test"
+        memory.content = "Content"
+        memory.source_type = "manual"
+        memory.captured_at = None
+        memory.salience = 0.5
+        memory.pinned = False
+        memory.tags = []
+        memory.revision = 2
 
-        mock_collection = MagicMock()
-        mock_client = MagicMock()
-        mock_client.get_or_create_collection.return_value = mock_collection
+        client = _FakeClient()
+        _sync_face(monkeypatch, client, generation="generation-a")
+        monkeypatch.setattr(
+            vector_store, "embed_texts_sync", lambda _texts: [[0.1] * 8]
+        )
 
-        with patch.object(vector_store, "_get_sync_client", return_value=mock_client), \
-             patch.object(vector_store, "embed_texts_sync", return_value=[[0.1] * 1536]):
-            vector_store.upsert_memory_sync(mock_memory)
+        vector_store.upsert_memory_sync(memory)
 
-        mock_client.get_or_create_collection.assert_called_once()
-        mock_collection.upsert.assert_called_once()
+        # The contract check lives inside the patched seam; the point itself is
+        # what this test pins.
+        assert [name for name, _ in client.calls] == ["upsert"]
+        upsert = client.calls[0][1]
+        assert upsert["collection_name"] == "generation-a"
+        (point,) = upsert["points"]
+        assert point.id == str(memory.id)
+        assert point.vector == [0.1] * 8
+        # The payload is the contract plus the embedded document text.
+        assert point.payload["content"] == "Title: Test\nContent"
+        assert point.payload["kind"] == "memory"
+        assert point.payload["orivory_memory_revision"] == 2
+
+    def test_upsert_memories_sync_batches_into_one_point_per_memory(self, monkeypatch):
+        memories = [MagicMock(id=uuid4(), user_id=uuid4(), title=None, content=f"body {i}",
+                              source_type="manual", captured_at=None, salience=0.5,
+                              pinned=False, tags=[], revision=1) for i in range(3)]
+        client = _FakeClient()
+        _sync_face(monkeypatch, client)
+        monkeypatch.setattr(vector_store, "embed_texts_sync", lambda texts: [[0.2] * 8 for _ in texts])
+
+        assert vector_store.upsert_memories_sync(memories) == 3
+        assert vector_store.upsert_memories_sync([]) == 0
+
+        upsert = next(kwargs for name, kwargs in client.calls if name == "upsert")
+        assert len(upsert["points"]) == 3
+        assert [point.payload["content"] for point in upsert["points"]] == [
+            "body 0", "body 1", "body 2",
+        ]
 
 
 class TestDeleteMemoriesSync:
     """Tests for delete_memories_sync function."""
 
-    def test_delete_memories_sync_calls_collection(self):
-        """Should call collection delete with correct parameters."""
+    def test_delete_memories_sync_deletes_by_point_ids(self, monkeypatch):
         memory_ids = [str(uuid4()) for _ in range(3)]
+        client = _FakeClient()
+        _sync_face(monkeypatch, client)
 
-        mock_collection = MagicMock()
-        mock_client = MagicMock()
-        mock_client.get_or_create_collection.return_value = mock_collection
+        vector_store.delete_memories_sync(memory_ids)
 
-        with patch.object(vector_store, "_get_sync_client", return_value=mock_client):
-            vector_store.delete_memories_sync(memory_ids)
+        (name, kwargs), = client.calls
+        assert name == "delete"
+        assert list(kwargs["points_selector"].points) == memory_ids
 
-        mock_collection.delete.assert_called_once()
-        call_kwargs = mock_collection.delete.call_args.kwargs
-        assert "ids" in call_kwargs
-        assert call_kwargs["ids"] == memory_ids
+    def test_delete_memories_sync_empty_list(self, monkeypatch):
+        client = _FakeClient()
+        _sync_face(monkeypatch, client)
 
-    def test_delete_memories_sync_empty_list(self):
-        """Should handle empty list gracefully."""
-        mock_collection = MagicMock()
-        mock_client = MagicMock()
-        mock_client.get_or_create_collection.return_value = mock_collection
+        vector_store.delete_memories_sync([])
 
-        with patch.object(vector_store, "_get_sync_client", return_value=mock_client):
-            vector_store.delete_memories_sync([])
+        # Should not call the store for an empty list.
+        assert client.calls == []
 
-        # Should not call delete for empty list
-        mock_collection.delete.assert_not_called()
+    def test_delete_memories_sync_never_raises(self, monkeypatch):
+        def _boom(_dim):
+            raise ConnectionError("qdrant down")
+
+        monkeypatch.setattr(vector_store, "_open_collection_sync", _boom)
+
+        vector_store.delete_memories_sync([str(uuid4())])  # best-effort by contract
 
 
 class TestGetExistingMemoryIdsSync:
     """Tests for get_existing_memory_ids_sync function."""
 
-    def test_get_existing_memory_ids_returns_set(self):
-        """Should return a set of existing memory IDs."""
+    def test_get_existing_memory_ids_returns_set(self, monkeypatch):
         memory_ids = [str(uuid4()) for _ in range(3)]
+        records = [SimpleNamespace(id=memory_ids[0]), SimpleNamespace(id=memory_ids[1])]
+        client = _FakeClient(records=records)
+        _sync_face(monkeypatch, client)
 
-        mock_collection = MagicMock()
-        mock_collection.get.return_value = {
-            "ids": [memory_ids[0], memory_ids[1]]
-        }
-        mock_client = MagicMock()
-        mock_client.get_or_create_collection.return_value = mock_collection
+        result = vector_store.get_existing_memory_ids_sync(memory_ids)
 
-        with patch.object(vector_store, "_get_sync_client", return_value=mock_client):
-            result = vector_store.get_existing_memory_ids_sync(memory_ids)
+        assert result == {memory_ids[0], memory_ids[1]}
+        retrieve = next(kwargs for name, kwargs in client.calls if name == "retrieve")
+        assert retrieve["ids"] == memory_ids
+        assert retrieve["with_payload"] is False
 
-        assert isinstance(result, set)
-        assert len(result) == 2
-        assert memory_ids[0] in result
-        assert memory_ids[1] in result
+    def test_get_existing_memory_ids_handles_missing(self, monkeypatch):
+        client = _FakeClient(records=[])
+        _sync_face(monkeypatch, client)
 
-    def test_get_existing_memory_ids_handles_missing(self):
-        """Should handle case where no memories exist."""
-        memory_ids = [str(uuid4())]
+        assert vector_store.get_existing_memory_ids_sync([str(uuid4())]) == set()
 
-        mock_collection = MagicMock()
-        mock_collection.get.return_value = {"ids": []}
-        mock_client = MagicMock()
-        mock_client.get_or_create_collection.return_value = mock_collection
+    def test_get_existing_memory_ids_empty_list_short_circuits(self, monkeypatch):
+        def _never(_dim):
+            raise AssertionError("no store call for an empty id list")
 
-        with patch.object(vector_store, "_get_sync_client", return_value=mock_client):
-            result = vector_store.get_existing_memory_ids_sync(memory_ids)
+        monkeypatch.setattr(vector_store, "_checked_collection_sync", _never)
 
-        assert result == set()
+        assert vector_store.get_existing_memory_ids_sync([]) == set()
+
+
+class TestSearchMemories:
+    """The item shape and the degradation contract of the read path."""
+
+    async def test_search_maps_points_to_items(self, monkeypatch):
+        point_id = str(uuid4())
+        client = _FakeClient(count=2)
+        client.query_points = lambda **kwargs: SimpleNamespace(
+            points=[
+                SimpleNamespace(
+                    id="point-b",
+                    score=0.5,
+                    payload={"memory_id": point_id, "content": "Title: T\nbody", "kind": "memory"},
+                )
+            ]
+        )
+        _async_face(monkeypatch, client)
+
+        hits = await vector_store.search_memories([0.1] * 8, user_id="owner")
+
+        assert hits == [
+            {
+                "memory_id": point_id,
+                "content": "Title: T\nbody",
+                "score": 0.5,
+                "metadata": {"memory_id": point_id, "kind": "memory"},
+                "rank": 0,
+                "source": "vector",
+            }
+        ]
+
+    async def test_search_returns_empty_for_an_empty_generation(self, monkeypatch):
+        client = _FakeClient(count=0)
+        _async_face(monkeypatch, client)
+
+        assert await vector_store.search_memories([0.1] * 8, user_id="owner") == []
+        assert [name for name, _ in client.calls] == ["count"]
+
+
+def _async_face(monkeypatch, client) -> None:
+    """Bind the store's async seam to a sync fake.
+
+    ``_SyncAsAsync`` is the same adapter the local face uses in production, so
+    the fake records exactly the calls the real client would receive. The
+    contract guard has its own tests (``test_qdrant_parity``): here it is a
+    no-op so each test pins one thing.
+    """
+    from app.retrieval import vector_backend
+    from app.retrieval.vector_backend import _SyncAsAsync
+
+    async def _open(_dim):
+        return _SyncAsAsync(client), "generation-a", "f" * 64
+
+    async def _info(*_args, **_kwargs):
+        return {"dim": 8, "distance": "Cosine"}
+
+    monkeypatch.setattr(vector_store, "_open_collection", _open)
+    monkeypatch.setattr(vector_backend, "collection_info_async", _info)
+    monkeypatch.setattr(vector_store, "check_generation_contract", lambda *a, **k: None)

@@ -42,7 +42,7 @@ for line in ENV_FILE.open():
         os.environ.setdefault(key.strip(), value.strip())
 
 os.environ["LITE_MODE"] = "1"
-os.environ["CHROMA_MODE"] = "local"
+os.environ["QDRANT_MODE"] = "local"
 os.environ["JWT_SECRET_KEY"] = "benchmark-run-secret-key-not-for-prod"
 _RESULTS_DIR = ROOT / "eval/benchmarks/results"
 _RESULTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -50,7 +50,7 @@ os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{_RESULTS_DIR}/.system_run.db
 os.environ.setdefault("OPENROUTER_API_KEY", os.environ.get("OPENAI_API_KEY", ""))
 if os.environ.get("OPENAI_BASE_URL"):
     os.environ["OPENROUTER_BASE_URL"] = os.environ["OPENAI_BASE_URL"]
-os.environ["CHROMA_LOCAL_PATH"] = str(_RESULTS_DIR / "chroma")
+os.environ["QDRANT_LOCAL_PATH"] = str(_RESULTS_DIR / "qdrant")
 
 from uuid import uuid4  # noqa: E402
 
