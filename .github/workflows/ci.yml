@@ -337,7 +337,12 @@ jobs:
         run: cp .env.test.example .env
 
       - name: Start services
-        run: docker compose up -d postgres qdrant
+        # The compose flow starts postgres + qdrant, then the one-shot
+        # `migrate` service, then `app` (depends_on: migrate completed). The
+        # smoke job must run the whole stack: TestAPIHealth's checks against
+        # localhost:8000 were a silent skip while only the two data services
+        # came up.
+        run: docker compose up -d
 
       - name: Wait for services to be healthy
         shell: bash
@@ -345,7 +350,8 @@ jobs:
           set -euo pipefail
           for i in {1..90}; do
             if docker compose exec -T postgres pg_isready -U postgres -d ragdb 2>/dev/null && \
-               curl -fsS http://localhost:6333/readyz >/dev/null 2>&1; then
+               curl -fsS http://localhost:6333/readyz >/dev/null 2>&1 && \
+               curl -fsS http://localhost:8000/health >/dev/null 2>&1; then
               echo "All services healthy!"
               exit 0
             fi
@@ -354,7 +360,7 @@ jobs:
           done
           echo "Service startup timeout"
           docker compose ps
-          docker compose logs postgres qdrant
+          docker compose logs postgres qdrant migrate app
           exit 1
 
       - name: Run smoke tests

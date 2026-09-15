@@ -6,7 +6,7 @@ lite-build:
 	docker build -f Dockerfile.lite -t ghcr.io/twilightt1/orivory:lite .
 
 # The whole memory hub in one container: API + MCP server, SQLite, in-process
-# Chroma, in-memory caches, filesystem uploads. No Postgres/Redis/MinIO/Chroma.
+# Qdrant, in-memory caches, filesystem uploads. No Postgres/Redis/MinIO/Qdrant server.
 lite-run:
 	docker run -d --name orivory-lite -p 8000:8000 -v orivory-data:/data \
 		-e OPENAI_API_KEY=$${OPENAI_API_KEY:-} ghcr.io/twilightt1/orivory:lite
@@ -15,7 +15,7 @@ lite-run:
 quickstart: lite-build lite-run
 	@echo "Orivory is up:  http://localhost:8000  (MCP: /mcp)"
 
-# ── Full stack (Postgres + Redis + ChromaDB + MinIO + workers + UI) ─────────
+# ── Full stack (Postgres + Redis + Qdrant + MinIO + workers + UI) ───────────
 
 dev:
 	uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload

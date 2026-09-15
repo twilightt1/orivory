@@ -3,7 +3,7 @@
 Regression (full-repo review, verified with `docker compose config` on
 Compose v5.5.0): `docker-compose.prod.yml` used `ports: []` / `volumes: []`
 to strip dev mappings, but Compose MERGES sequences instead of replacing
-them — postgres/redis/chroma/minio stayed host-published and dev bind-mounts
+them — postgres/redis/qdrant/minio stayed host-published and dev bind-mounts
 survived into prod. The old gate grepped the YAML string for "ports: []" and
 reported PASS while the exposure persisted.
 

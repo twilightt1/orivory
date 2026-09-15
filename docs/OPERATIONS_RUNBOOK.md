@@ -203,8 +203,9 @@ refuses — intended (the migration needs a quiesced store).
 
 ### Maintenance window (measured)
 
-Measured on the calibration dry run: ≈1.8k short rows/s single-process, which
-extrapolates at ~1000 chars per row to:
+Measured on the calibration dry run: ≈1.8k short rows/s ≈ 17.9k chars/s
+single-process. Char throughput is the honest basis once rows get longer: at
+~1000 chars per row that is ≈18 rows/s, which extrapolates to:
 
 | eligible rows | projected backfill | fits a 60-min window? |
 |---|---|---|

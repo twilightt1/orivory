@@ -92,9 +92,11 @@ class Settings(BaseSettings):
     QDRANT_LOCAL_PATH: str = "/data/qdrant"
 
     # The RETIRED pre-P1b vector store's directory. Nothing in the app serves
-    # from it: only the P1b migration CLI (backup) and the one-release rollback
-    # tool read it. A deployment that never ran Chroma leaves it at the default
-    # and the backup simply reports it "missing".
+    # from it: the only reader is the P1b migration CLI's backup source
+    # (`scripts/migrate_qdrant.py::_backup_sources`); the one-release rollback
+    # tool takes the directory as its `--chroma-path` argument instead. A
+    # deployment that never ran Chroma leaves it at the default and the backup
+    # simply reports it "missing".
     LEGACY_CHROMA_PATH: str = "/data/chroma"
 
     # lite: "fs" stores uploads on the local filesystem instead of MinIO.
