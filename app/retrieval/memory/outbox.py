@@ -16,8 +16,16 @@ A drain applies one intent at a time: a dead row collapses to a delete, a
 stale revision is skipped (a newer intent owns the entity), an applied upsert
 re-reads its own row once — the drain runs concurrently with writers, so a row
 deleted or superseded while its snapshot was in flight has the point just
-written deleted (row gone) or left to the newer intent (revision advanced,
-``skipped``): :func:`_settle_written_snapshot`. An intent whose
+written deleted (row gone) or REWRITTEN from the row the re-check read
+(revision advanced, still reported ``skipped``; ruling R22): the newer
+revision's intent may already have been acked by the request-path write-through
+(``mark_done``), leaving the superseded payload ownerless forever — the
+freshness barrier cannot see it because nothing is pending — and the rewrite is
+idempotent when that intent IS still pending (it lands the same payload).
+Accepted residual, documented not coded: a THIRD write landing between the
+re-check and the rewrite is still unfenced; the true fix is a revision-fenced
+write and Qdrant has no compare-and-set, so it is out of P3 scope. See
+:func:`_settle_written_snapshot`. An intent whose
 ``target_generation`` is no longer the kind's active one blocks terminally
 (the cutover moved the pointer; the migration's backfill covers that write),
 a contract mismatch blocks terminally, a transient failure retries with
@@ -592,7 +600,9 @@ async def _apply_memory_intent(db: AsyncSession, row: IndexOutbox) -> str:
         return "applied"
     await upsert_memory(memory)
     return await _settle_written_snapshot(
-        db, row, Memory, entity_id, lambda: _delete_vector_or_fail(str(entity_id))
+        db, row, Memory, entity_id,
+        rewrite=upsert_memory,
+        purge=lambda: _delete_vector_or_fail(str(entity_id)),
     )
 
 
@@ -612,8 +622,9 @@ async def _apply_chunk_intent(db: AsyncSession, row: IndexOutbox) -> str:
 
     A dead row and a delete intent both mean "forget": the point is deleted by
     id and only a confirmed readback lets the intent be acked. A live row with
-    a newer revision is skipped — the newer intent owns the point. An applied
-    upsert is re-checked against its row afterwards (:func:`_settle_written_snapshot`).
+    a newer revision has the point just written REWRITTEN from the refreshed
+    row (reported ``skipped``; R22) — see :func:`_settle_written_snapshot`.
+    An applied upsert is re-checked against its row afterwards.
     """
     entity_id = uuid.UUID(row.entity_id)
     chunk = await db.get(DocumentChunk, entity_id)
@@ -635,15 +646,28 @@ async def _apply_chunk_intent(db: AsyncSession, row: IndexOutbox) -> str:
         await _delete_chunk_vector_or_fail([str(entity_id)])
         return "applied"
     await upsert_chunks([chunk], user_id=owner_id)
+
+    async def rewrite(fresh: DocumentChunk) -> None:
+        # R22: land the refreshed row's payload — under the tenant SQL names for
+        # it NOW, not the one resolved before the write — and delete it outright
+        # when that identity is gone (the pre-write branch's rule, re-applied to
+        # the state the re-check saw).
+        fresh_owner = await _chunk_owner(db, fresh)
+        if fresh_owner is None:
+            await _delete_chunk_vector_or_fail([str(entity_id)])
+        else:
+            await upsert_chunks([fresh], user_id=fresh_owner)
+
     return await _settle_written_snapshot(
         db, row, DocumentChunk, entity_id,
-        lambda: _delete_chunk_vector_or_fail([str(entity_id)]),
+        rewrite=rewrite,
+        purge=lambda: _delete_chunk_vector_or_fail([str(entity_id)]),
     )
 
 
-async def _settle_written_snapshot(db: AsyncSession, row: IndexOutbox, model, entity_id,
-                                   purge) -> str:
-    """Settle a JUST-WRITTEN upsert snapshot against the row it came from (R6/R21).
+async def _settle_written_snapshot(db: AsyncSession, row: IndexOutbox, model, entity_id, *,
+                                   rewrite, purge) -> str:
+    """Settle a JUST-WRITTEN upsert snapshot against the row it came from (R6/R21/R22).
 
     The drain runs concurrently with writers, so between the applier's read and
     its write the row can be deleted (the point then outlives its row) or
@@ -659,10 +683,28 @@ async def _settle_written_snapshot(db: AsyncSession, row: IndexOutbox, model, en
 
     - row gone → the point just written is deleted (``purge``, which raises
       unless the store confirmed absence) and the intent reports ``applied``;
-    - revision advanced → ``skipped``: the newer revision's own intent owns the
-      point. This applier neither overwrites nor deletes that state — a repair
-      write here could only race the same window again;
+    - revision advanced → the point is REWRITTEN from the refreshed row
+      (``rewrite``) and the intent still reports ``skipped`` (R22). Standing
+      down is only safe while the newer intent is still pending: the
+      request-path write-through can have acked it already (``mark_done``), and
+      the superseded payload then has no owner — the freshness barrier cannot
+      see it, nothing is pending. Rewriting is idempotent when the newer intent
+      IS still pending: it lands the same payload that intent will land, one
+      bounded write, no loop, no new session;
     - row unchanged → ``applied``, i.e. the ordinary case.
+
+    Two premises are load-bearing:
+
+    - the row is read fresh (the ``populate_existing`` note above);
+    - that read is a STATEMENT-level snapshot — PG READ COMMITTED, or pysqlite's
+      per-SELECT view (the driver only opens an implicit BEGIN for writes). At a
+      stricter isolation level (REPEATABLE READ / SERIALIZABLE) the re-check
+      answers from the transaction's own snapshot and silently degrades to the
+      same no-op class the ``populate_existing`` warning covers.
+
+    Accepted residual (R22): a THIRD write landing between this re-read and the
+    rewrite stays unfenced — fencing it needs a revision-fenced write, and
+    Qdrant has no compare-and-set. Out of P3 scope; documented, not coded.
     """
     intent_revision = int(row.revision)
     fresh = await db.get(model, entity_id, populate_existing=True)
@@ -670,6 +712,7 @@ async def _settle_written_snapshot(db: AsyncSession, row: IndexOutbox, model, en
         await purge()
         return "applied"
     if int(getattr(fresh, "revision", 0) or 0) > intent_revision:
+        await rewrite(fresh)
         return "skipped"
     return "applied"
 

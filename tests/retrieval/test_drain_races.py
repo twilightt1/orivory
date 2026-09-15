@@ -14,11 +14,13 @@ a real embedded Qdrant on a private ``tmp_path`` folder plus a private SQLite
 file patched in as the module engines, so it can never read or write the
 ambient ``DATABASE_URL``.
 
-What R21 fixes, and what it deliberately does not: a row that vanished while the
+What R21 fixes, and what R22 changed about it: a row that vanished while the
 snapshot was in flight gets the point deleted (the applier reports ``applied``);
-a row whose revision moved on makes the applier STAND DOWN (``skipped``) — the
-newer intent owns the point, and this applier neither overwrites nor deletes it
-(R6: bounded, one fresh read per applied upsert, never a reconciliation pass).
+a row whose revision moved on has the point REWRITTEN from the refreshed row
+(the applier still reports ``skipped``) — standing down would leave the
+superseded payload behind whenever the newer intent was already acked by the
+request-path write-through, with nothing pending to repair it. Still bounded
+(R6): one extra read per applied upsert, never a reconciliation pass.
 """
 from __future__ import annotations
 
@@ -338,13 +340,16 @@ async def test_a_chunk_deleted_mid_flight_never_keeps_the_point(env, world, monk
 # ── (b) a correction bumps the revision while the upsert is in flight ───────
 
 
-async def test_a_memory_correction_mid_flight_stands_the_applier_down(env, world, monkeypatch):
-    """R21: revision moved on ⇒ ``skipped``; the newer intent owns the point.
+async def test_a_memory_correction_mid_flight_rewrites_the_stale_payload(env, world, monkeypatch):
+    """R22: revision moved on ⇒ the point carries the REFRESHED row; ``skipped``.
 
     The correction commits while the snapshot is in flight and enqueues its own
     intent in the same transaction (the codebase's invariant). The applier must
-    not claim the superseded snapshot as applied — and must not repair it either:
-    the newer intent is what lands the new payload.
+    not claim the superseded snapshot as applied — and must not stand down
+    either: if that newer intent was already acked by the request-path
+    write-through, the superseded payload would be left with no owner at all. It
+    writes the refreshed row instead, which stays idempotent while the newer
+    intent is still pending.
     """
     memory_id = _pending_memory("v1", world.user_id)
     real = vector_store.upsert_memory
@@ -369,11 +374,19 @@ async def test_a_memory_correction_mid_flight_stands_the_applier_down(env, world
     assert raced == [2]
     # RED before the fix: applied=1, skipped=0 — the stale snapshot was claimed.
     assert report == {"claimed": 1, "applied": 0, "skipped": 1, "blocked": 0, "failed": 0}
+    # NOT left stale and NOT deleted: the point carries the refreshed row the
+    # re-check read. RED before R22 (stand-down): the superseded payload is what
+    # survives the pass; RED for a stand-down that purges: the point is gone.
+    payload = _memory_point(memory_id)
+    assert payload is not None
+    assert payload["orivory_memory_revision"] == 2
+    assert payload["content"] == "v2"
     # The superseded intent is acked (not retried), and the newer one is what
-    # R21 leans on being there: it is still pending, owning the point.
+    # owns the point: still pending, and the rewrite landed the same payload it
+    # will land (idempotent).
     assert [row.status for row in await _intents()] == ["done", "pending"]
 
-    # The newer intent owns the point: the next pass lands revision 2, and the
+    # The newer intent still lands revision 2 on the next pass, and the
     # superseded payload does not survive it.
     second = await outbox.drain_pending()
     assert second["applied"] == 1, second
@@ -383,8 +396,8 @@ async def test_a_memory_correction_mid_flight_stands_the_applier_down(env, world
     assert [row.status for row in await _intents()] == ["done", "done"]
 
 
-async def test_a_chunk_correction_mid_flight_stands_the_applier_down(env, world, monkeypatch):
-    """Same shape on the chunk face: ``skipped`` for the superseded revision."""
+async def test_a_chunk_correction_mid_flight_rewrites_the_stale_payload(env, world, monkeypatch):
+    """Same shape on the chunk face: the point carries the refreshed chunk (R22)."""
     chunk_id = _pending_chunk(world, "v1 chunk")
     real = vector_retriever.upsert_chunks
     raced: list[int] = []
@@ -413,6 +426,13 @@ async def test_a_chunk_correction_mid_flight_stands_the_applier_down(env, world,
 
     assert raced == [2]
     assert report == {"claimed": 1, "applied": 0, "skipped": 1, "blocked": 0, "failed": 0}
+    # R22, chunk twin of the memory pin: neither stale nor deleted — the point
+    # carries the refreshed chunk (RED before R22: revision 1 / "v1 chunk"
+    # survives; RED for a purging stand-down: the point is gone).
+    payload = _chunk_point(chunk_id)
+    assert payload is not None
+    assert payload["revision"] == 2
+    assert payload["content"] == "v2 chunk"
     assert [row.status for row in await _intents()] == ["done", "pending"]
 
     assert (await outbox.drain_pending())["applied"] == 1
@@ -423,6 +443,34 @@ async def test_a_chunk_correction_mid_flight_stands_the_applier_down(env, world,
 
 
 # ── R6: the re-check is bounded to upserts ──────────────────────────────────
+
+
+async def test_an_applied_upsert_pays_exactly_one_extra_row_read(env, world):
+    """R6/R22 positive bound: an applied upsert pays the re-check — exactly ONE.
+
+    The delete-face test below pins the zero; together they pin the bound at
+    "one extra read per applied upsert". A second re-read (a repair pass) or any
+    loop would fail here, and a re-check silently dropped would fail the races
+    above.
+    """
+    memory_id = _pending_memory("bounded", world.user_id)
+
+    reads: list[str] = []
+
+    def count_row_reads(_conn, _cursor, statement, _parameters, _context, _many):
+        if "FROM memories" in statement:
+            reads.append(statement)
+
+    engine = database.engine.sync_engine
+    event.listen(engine, "before_cursor_execute", count_row_reads)
+    try:
+        report = await outbox.drain_pending()
+    finally:
+        event.remove(engine, "before_cursor_execute", count_row_reads)
+
+    assert report == {"claimed": 1, "applied": 1, "skipped": 0, "blocked": 0, "failed": 0}
+    assert _memory_point(memory_id) is not None
+    assert len(reads) == 2  # the pre-read + ONE re-check read, never a loop
 
 
 async def test_a_delete_intent_pays_no_extra_row_read(env, world):
