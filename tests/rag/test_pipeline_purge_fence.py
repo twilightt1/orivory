@@ -356,6 +356,31 @@ def test_a_window_drain_leaves_every_live_row_a_point(fence, monkeypatch):
     assert set(_row_ids(fence)) >= second  # the rows the points belong to are live
 
 
+def test_healthy_fast_path_purges_the_ids_that_left_sql(fence):
+    """The fast path alone, no drain anywhere (ruling R9).
+
+    The two tests above interleave a drain, which claims the old ids' delete
+    intents *before* the fast path runs — so they hold even with the purge call
+    gone. This one leaves the window empty: the first generation's points are in
+    the store from the first ingest's own write, and the only thing that can
+    take them away is the id-scoped purge at the end of ``_index_document_chunks``.
+    """
+    _ingest(fence)
+    first = _child_ids(fence)
+    assert first and first <= _stored_ids()
+
+    _ingest(fence)  # healthy: the fast path runs to completion
+
+    second = _child_ids(fence)
+    assert second and first.isdisjoint(second)  # a reingest mints new ids
+    present = _stored_ids()
+    assert second <= present, "the fast path wrote the new generation"
+    assert first.isdisjoint(present), (
+        "the old generation's rows left SQL but its points are still in the "
+        "store: the fast-path purge did not run"
+    )
+
+
 # ── R8: the purge is id-scoped and still tenant-scoped ─────────────────────
 
 
