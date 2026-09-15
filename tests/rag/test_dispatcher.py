@@ -149,7 +149,10 @@ async def test_index_attempt_is_scoped_to_the_source_owner(db, source, monkeypat
         return True
 
     monkeypatch.setattr(write_back, "safe_upsert_to_index", fake_upsert)
-    monkeypatch.setattr(write_back, "safe_enqueue_graph_build", lambda _memory_id: None)
+    async def fake_enqueue(_memory_id):  # the helper is a coroutine (P2/T9)
+        return None
+
+    monkeypatch.setattr(write_back, "safe_enqueue_graph_build", fake_enqueue)
 
     svc = SourceSyncService(db)
     stranger = User(email=f"stranger-{uuid4()}@example.com", hashed_password=None)

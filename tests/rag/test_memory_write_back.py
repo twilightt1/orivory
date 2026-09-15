@@ -58,16 +58,16 @@ class TestSafeUpsert:
 
 
 class TestSafeEnqueueGraph:
-    def test_never_raises_when_builder_fails(self, monkeypatch):
+    async def test_never_raises_when_builder_fails(self, monkeypatch):
         # Force the sync builder to raise; helper must swallow it.
         def boom(*a, **k):
             raise RuntimeError("graph store down")
 
         monkeypatch.setattr("app.graph.builder.build_memory_graph_sync", boom)
         # Should not raise
-        write_back.safe_enqueue_graph_build(uuid.uuid4())
+        await write_back.safe_enqueue_graph_build(uuid.uuid4())
 
-    def test_calls_builder_sync(self, monkeypatch):
+    async def test_calls_builder_sync(self, monkeypatch):
         import app.graph.builder as gb
 
         calls = {}
@@ -78,7 +78,7 @@ class TestSafeEnqueueGraph:
 
         monkeypatch.setattr(gb, "build_memory_graph_sync", fake_build)
         mid = uuid.uuid4()
-        write_back.safe_enqueue_graph_build(mid)
+        await write_back.safe_enqueue_graph_build(mid)
         assert calls["memory_id"] == str(mid)
 
 
@@ -90,7 +90,7 @@ class TestIndexNewMemory:
         async def fake_upsert(memory):
             calls["embed"] += 1
 
-        def fake_enqueue(memory_id):
+        async def fake_enqueue(memory_id):
             calls["graph"] += 1
 
         monkeypatch.setattr(

@@ -146,7 +146,9 @@ class SourceSyncService:
                 # Indexed now: ack the intent this batch committed, so a boot
                 # drain does not re-embed it.
                 await mark_done(self.db, entity_id=memory.id, revision=memory.revision)
-            safe_enqueue_graph_build(memory.id)
+            # Off the loop, on the loop's behalf (P2/T9): the helper hands the
+            # sync builder to a worker thread and never raises.
+            await safe_enqueue_graph_build(memory.id)
 
     # ── internals ────────────────────────────────────────────────────────────
 
