@@ -17,9 +17,10 @@ class RerankUnavailable(RuntimeError):
 
 
 class RerankInvalidResponse(RuntimeError):
-    """A 2xx whose body is not a usable rerank response (no ``results`` list,
-    or no usable row in it). Per-ROW damage is skipped, never typed: one bad
-    ``index``/``relevance_score`` must not throw the whole pool away."""
+    """A 2xx whose body is not a usable rerank response: no ``results`` list,
+    an EMPTY one, or no usable row in it (ruling R14(p2)). Per-ROW damage is
+    skipped, never typed: one bad ``index``/``relevance_score`` must not throw
+    the whole pool away."""
 
 
 _client: httpx.AsyncClient | None = None
@@ -41,8 +42,9 @@ async def rerank(query: str, chunks: list[dict], *, top_n: int | None = None) ->
 
     Raises :class:`RerankUnavailable` (transport/status/timeout — bounded by
     ``JINA_RERANKER_TIMEOUT_SECONDS``) or :class:`RerankInvalidResponse`
-    (unusable body). A malformed ROW is skipped instead of killing the pool
-    (ruling R11(p2) — one bad ``index`` used to raise and drop every row).
+    (unusable body: no ``results`` list, an empty one, or nothing usable in
+    it). A malformed ROW is skipped instead of killing the pool (ruling
+    R11(p2) — one bad ``index`` used to raise and drop every row).
     """
     if not chunks:
         return []
@@ -84,6 +86,7 @@ async def rerank(query: str, chunks: list[dict], *, top_n: int | None = None) ->
         raise RerankInvalidResponse("Jina rerank response has no usable 'results' list")
 
     reranked = []
+    seen: set = set()
     for item in rows:
         if not isinstance(item, dict):
             continue
@@ -96,17 +99,28 @@ async def rerank(query: str, chunks: list[dict], *, top_n: int | None = None) ->
         except (TypeError, ValueError):
             log.warning("Skipping rerank row without a numeric score", extra={"index": index})
             continue
-        original = chunks[index].copy()
+        original = chunks[index]
+        key = original.get("memory_id", index)
+        if key in seen:
+            # One memory, one row (M1): a row repeating an already-ranked index
+            # would return the same memory twice and occupy a head slot that a
+            # distinct row should have had. The FIRST row for a memory wins.
+            continue
+        seen.add(key)
+        original = original.copy()
         # A 0.0 relevance IS a score: consumers read it by key presence
         # (retriever.py), never by truthiness.
         original["rerank_score"] = score
         reranked.append(original)
 
-    if rows and not reranked:
-        # Not one usable row out of a non-empty answer: the transport answered,
-        # but with nothing the caller can rank on — that is an invalid response,
-        # not an empty rerank (which would silently keep dense order uncounted).
-        raise RerankInvalidResponse(f"Jina rerank: all {len(rows)} rows were unusable")
+    if not reranked:
+        # Ruling R14(p2): an EMPTY ``results`` list is the same failure as rows
+        # that are all unusable — the transport answered and left nothing to
+        # rank on. Returning [] here would hide it as "nothing to rerank"
+        # (dense order, uncounted); as an invalid response it is counted and
+        # dense order continues all the same.
+        detail = f"all {len(rows)} rows were unusable" if rows else "an empty 'results' list"
+        raise RerankInvalidResponse(f"Jina rerank: {detail}")
 
     reranked.sort(key=lambda x: x["rerank_score"], reverse=True)
     log.info("Reranked", extra={"in": len(chunks), "out": len(reranked), "top_n": limit})

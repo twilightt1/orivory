@@ -65,7 +65,8 @@ if os.environ.get("OPENAI_BASE_URL"):
 # point it inside the results dir.
 os.environ["QDRANT_LOCAL_PATH"] = str(_RESULTS_DIR / "qdrant")
 # Benchmark answers from top-15: the reranker's own top_n must not truncate
-# the pool below that (default JINA_RERANKER_TOP_N=5 is the API default).
+# the pool below that — pin the cap here, independent of the shipped default
+# (20 since R13(p2)).
 os.environ["JINA_RERANKER_TOP_N"] = "15"
 os.environ["RETRIEVAL_SEMANTIC_RERANK"] = "1"
 

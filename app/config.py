@@ -177,13 +177,17 @@ class Settings(BaseSettings):
     # before salience/decay modifiers. Off by default — per-deployment.
     RETRIEVAL_SEMANTIC_RERANK: bool = False
     JINA_RERANKER_MODEL: str = "jina-reranker-v2-base-multilingual"
-    # Per-call CAPS on the reranker's own answer, never the rerank window: the
+    # Per-call CAP on the reranker's own answer, never the rerank window: the
     # per-call `top_n` is the request's own top_k clamped to this value
     # (ruling R4(p2)). The returned result count does NOT depend on it — a
     # rerank that answers with fewer rows than it was handed is merged back
     # into dense order (`retriever.recall`), so raising it only widens the
-    # reranked HEAD of a large top_k.
-    JINA_RERANKER_TOP_N: int = 5
+    # reranked HEAD of a large top_k. Ruling R13(p2): the default (20) covers
+    # the default `top_k=10` x RETRIEVAL_RERANK_POOL_MULTIPLIER=2.0 window, so
+    # one served window is never half reranked and half dense x boost x decay.
+    # Serving a larger window, raise it to `top_k x pool multiplier`; it stays
+    # a cap, and the extra ranks cost only what the opt-in rerank flag spends.
+    JINA_RERANKER_TOP_N: int = 20
     # Rerank pool: dense candidates fetched per requested result (ruling
     # R4(p2), signed default 2.0). One pool feeds the eligibility filter, the
     # reranker and scoring; a pool smaller than top_k cannot satisfy the count
