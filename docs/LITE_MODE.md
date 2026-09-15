@@ -14,7 +14,7 @@ docker run -d --name orivory -p 8000:8000 -v orivory-data:/data \
 |---|---|
 | FastAPI API + MCP server (`/mcp`) | Postgres → **SQLite** (WAL, FK enforced) |
 | In-process Qdrant (persistent, `/data/qdrant`) | Redis → **in-memory** fallback (caches, rate limits) |
-| Background tasks run **eagerly** in-process | Celery workers/beat/flower → **not needed** |
+| Ingestion + the P3 index drain run in-process | worker/beat/broker → **not needed** (the slim branch has none) |
 | Filesystem uploads (`/data/uploads`) | MinIO → **local FS** |
 
 The Next.js frontend is not in the lite image — lite targets AI agents via
@@ -35,8 +35,9 @@ brain). Point Claude Desktop / Cursor / OpenClaw at
   horizontal scale. For teams or heavy agents, use the full compose stack.
 - **JWT secret is ephemeral** — auto-generated per container; users re-login
   after an upgrade unless they set `JWT_SECRET_KEY` explicitly.
-- **No Celery retries/queues** — tasks run inline; a crash mid-task loses
-  that task (fine: Postgres is truth, indexing is recoverable via reindex).
+- **No task queue** — work runs inline in the API process; a crash mid-task
+  loses that task (fine: SQL is truth, and anything a write enqueued into
+  `index_outbox` is replayed by the P3 drain loop on the next run).
 
 ## Full stack still exists
 
@@ -52,7 +53,7 @@ share the same code paths — `LITE_MODE=1` only swaps the drivers.
 | UUID columns | `GUID` type (coerces str→UUID, asyncpg-safe) | same |
 | Vectors | Qdrant container (`QDRANT_URL`) | embedded Qdrant (`QDRANT_MODE=local`, `QDRANT_LOCAL_PATH`) |
 | Cache/rate-limit | Redis | `InMemoryRedis` (process-local) |
-| Tasks | Celery workers + beat | `task_always_eager=True` |
+| Tasks | inline in the API process | same (in-process, no broker) |
 | Uploads | MinIO | filesystem under `FS_STORAGE_PATH` |
 
 Model column types are cross-dialect now (`sa.Uuid`-derived `GUID`, `JSON`

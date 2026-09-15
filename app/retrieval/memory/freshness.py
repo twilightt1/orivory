@@ -47,32 +47,33 @@ log = logging.getLogger(__name__)
 __all__ = ["IndexFreshnessTimeout", "await_freshness"]
 
 
-async def _pending_count(tenant: str) -> int:
-    """This tenant's pending MEMORY index intents, in a FRESH transaction.
+async def _memory_intent_counts(tenant: str) -> dict[str, int]:
+    """This tenant's MEMORY index intents BY STATUS, in a FRESH transaction.
 
     ``kind == KIND_MEMORY``: the count answers "is the MEMORY index fresh for
     this tenant?" — only this module's caller reads memory vectors. A tenant's
     untended chunk backlog (a bulk import) is not this read path's business and
     must not 503 every memory recall for the whole budget.
 
+    Grouped by status, not a pending-only count, so the budget-exhausted path
+    can say WHICH class is keeping the tenant non-fresh (carried item C2):
+    ``pending`` may still land, ``blocked`` never will.
+
     Never the caller's session: the drain commits through its own, and a
     long-lived read transaction (SQLite especially) would keep answering from
     the snapshot taken before those commits.
     """
     async with AsyncSessionLocal() as db:
-        return int(
-            (
-                await db.execute(
-                    select(func.count())
-                    .select_from(IndexOutbox)
-                    .where(
-                        IndexOutbox.status == "pending",
-                        IndexOutbox.tenant_id == tenant,
-                        IndexOutbox.kind == KIND_MEMORY,
-                    )
-                )
-            ).scalar_one()
+        rows = await db.execute(
+            select(IndexOutbox.status, func.count())
+            .select_from(IndexOutbox)
+            .where(
+                IndexOutbox.tenant_id == tenant,
+                IndexOutbox.kind == KIND_MEMORY,
+            )
+            .group_by(IndexOutbox.status)
         )
+        return {str(status): int(count or 0) for status, count in rows.all()}
 
 
 async def await_freshness(*, user_id: str, timeout: float, poll: float = 0.05) -> float:
@@ -83,10 +84,11 @@ async def await_freshness(*, user_id: str, timeout: float, poll: float = 0.05) -
 
     Raises :class:`IndexFreshnessTimeout` when, at the end of ``timeout``, the
     intents are still pending — or when they could not be PROVEN landed, i.e.
-    the pending-count read or the drain kept failing. Fail closed (R14): a
+    the intent-count read or the drain kept failing. Fail closed (R14): a
     recall must never answer "no matches" for a write that may be unindexed. A
     transient error is a warning and the loop retries it until the deadline; it
-    is never a licence to return early.
+    is never a licence to return early. The timeout names WHICH class is
+    keeping the tenant non-fresh — the counts by status ride the warning.
     """
     t0 = time.perf_counter()
     if not settings.OUTBOX_DRAIN_ENABLED:
@@ -96,9 +98,11 @@ async def await_freshness(*, user_id: str, timeout: float, poll: float = 0.05) -
         return time.perf_counter() - t0
     tenant = uuid.UUID(str(user_id)).hex  # the outbox's tenant column
     deadline = t0 + timeout
+    counts: dict[str, int] = {}
     while True:
         try:
-            if not await _pending_count(tenant):
+            counts = await _memory_intent_counts(tenant)
+            if not counts.get("pending", 0):
                 return time.perf_counter() - t0
         except Exception as e:
             # Nothing proven landed: keep waiting (R14), don't read the index.
@@ -122,6 +126,17 @@ async def await_freshness(*, user_id: str, timeout: float, poll: float = 0.05) -
         except Exception as e:
             log.warning("Freshness barrier drain failed: %s", e)
         await asyncio.sleep(min(poll, max(deadline - time.perf_counter(), 0.0)))
+    # Carried item C2: 'still in flight' (pending) and 'never landing' (blocked)
+    # answer to different operator actions, so the timeout says which classes
+    # this tenant has. An unreadable outbox logs both as None — nothing was
+    # proven either way.
+    log.warning(
+        "Freshness barrier exhausted its budget for tenant %s: pending=%s blocked=%s after %.2fs",
+        tenant,
+        counts.get("pending"),
+        counts.get("blocked"),
+        time.perf_counter() - t0,
+    )
     raise IndexFreshnessTimeout(
         f"index intents for tenant {tenant} were still pending after "
         f"{time.perf_counter() - t0:.2f}s (budget {timeout}s)"

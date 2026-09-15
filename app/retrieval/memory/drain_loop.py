@@ -18,10 +18,17 @@ import asyncio
 import structlog
 
 from app.config import settings
+from app.observability.fallbacks import count_fallback
 from app.retrieval.memory.outbox import drain_pending
 from app.services.erasure_service import reconcile_erasure_receipts
 
 log = structlog.get_logger()
+
+# The fallback every failed drain round counts (ruling R24). The intents are
+# untouched — still pending, retried with backoff — but a rising rate means the
+# retry path itself is bleeding (a store down for a week looks identical to
+# every write landing when only the fast path is watched).
+DRAIN_FAILED_FALLBACK = "index.outbox_drain_failed"
 
 # How long a stop may take before the task is cancelled outright. A drain batch
 # commits per row, so cancelling mid-batch loses nothing but the current row's
@@ -101,6 +108,7 @@ async def run_drain_loop(*, interval: float, batch_size: int, stop: asyncio.Even
             log.info("outbox drain", **report)
             applied = report.get("applied", 0)
         except Exception as e:  # the loop must outlive any failure
+            count_fallback(DRAIN_FAILED_FALLBACK)
             log.warning("outbox drain failed", error=str(e))
             applied = 0
         if applied:

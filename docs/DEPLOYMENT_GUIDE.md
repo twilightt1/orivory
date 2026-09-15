@@ -8,7 +8,6 @@ Local development should continue using [docker-compose.yml](../docker-compose.y
 Orivory expects these services to be available:
 
 - FastAPI app
-- Celery worker for ingestion/email jobs
 - Postgres
 - Redis
 - Qdrant
@@ -23,7 +22,7 @@ cp .env.example .env
 ```
 
 > **Note:** the dev `docker-compose.yml` ships a one-shot `migrate` service —
-> `app` and `celery_worker` start only after `alembic upgrade head` completes
+> `app` starts only after `alembic upgrade head` completes
 > (the `service_completed_successfully` gate). In production, run migrations
 > as a deploy step with the same guarantee.
 
@@ -117,7 +116,10 @@ curl -fsS -H "Authorization: Bearer $ADMIN_ACCESS_TOKEN" \
   http://localhost:8000/api/v1/admin/diagnostics
 ```
 
-Diagnostics includes Celery and ingestion status in addition to dependency readiness, but it must remain admin-only.
+Diagnostics includes dependency readiness, ingestion status and the
+`index_outbox` summary (pending / done / blocked intents — see
+[OPERATIONS_RUNBOOK.md](OPERATIONS_RUNBOOK.md#background-indexing-p3)), but it
+must remain admin-only.
 
 ## Reverse Proxy Notes
 

@@ -94,11 +94,12 @@ cd orivory
 cp .env.example .env            # add your LLM API key(s)
 
 docker compose up -d            # migrations run automatically (migrate gate),
-                                # then app, celery workers, frontend
+                                # then the app — ingestion and the P3 index
+                                # drain run INSIDE it (no worker to start)
 ```
 
 - **App**: http://localhost:8000 · API docs: http://localhost:8000/docs
-- **Frontend**: http://localhost:3000 · **Flower**: http://localhost:5555
+- **MCP** (agents): http://localhost:8000/mcp
 
 Health & self-diagnosis: `/health` (liveness) and `/ready` — deployment-aware
 per-dependency checks (postgres/sqlite, redis, minio/storage, qdrant, mcp_hub).

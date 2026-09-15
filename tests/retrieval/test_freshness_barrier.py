@@ -211,7 +211,7 @@ async def test_b_the_endpoint_never_answers_200_when_the_queue_is_unreadable(tmp
     async def _boom(_tenant):
         raise RuntimeError("outbox unreadable")
 
-    monkeypatch.setattr(freshness, "_pending_count", _boom)
+    monkeypatch.setattr(freshness, "_memory_intent_counts", _boom)
 
     async with _recall_client(tmp_path, monkeypatch, user_id=uuid.uuid4()) as (client, _sessions):
         response = await client.post(
@@ -238,7 +238,7 @@ async def test_b_an_unreadable_outbox_retries_then_fails_closed(env, owner, monk
         calls.append(tenant)
         raise RuntimeError("outbox unreadable")
 
-    monkeypatch.setattr(freshness, "_pending_count", _boom)
+    monkeypatch.setattr(freshness, "_memory_intent_counts", _boom)
 
     t0 = time.perf_counter()
     with pytest.raises(IndexFreshnessTimeout):
@@ -321,6 +321,43 @@ async def test_b_a_hung_drain_cannot_outlive_the_budget(env, owner, monkeypatch)
 
     assert elapsed >= 0.2
     assert elapsed < 1.0  # bounded by the budget, not by the store
+
+
+async def test_b_an_exhausted_budget_says_which_class_is_kept_off_fresh(env, owner, monkeypatch, caplog):
+    """C2: 'still in flight' (pending) and 'never landing' (blocked) read alike.
+
+    A blocked intent never lands and is NOT pending, so the barrier waits for
+    the pending one — and when the budget is spent the operator has to be told
+    both classes, or the 503 reads as a transient hiccup forever.
+    """
+    await _activate_memory_manifest(env)
+    await _write_memory(env, owner, CONTENT)  # one PENDING memory intent
+    async with env() as db:
+        db.add(
+            IndexOutbox(
+                kind=outbox.KIND_MEMORY,
+                entity_id=uuid.uuid4().hex,
+                tenant_id=owner.hex,
+                revision=1,
+                operation=outbox.OPERATION_UPSERT,
+                target_generation=outbox.TARGET_GENERATION,
+                status="blocked",
+                last_error="generation superseded by the cutover",
+            )
+        )
+        await db.commit()
+
+    async def _boom(*, batch_size):
+        raise RuntimeError("drain exploded")  # nothing can land
+
+    monkeypatch.setattr(drain_loop, "drain_once", _boom)
+
+    with caplog.at_level("WARNING", logger="app.retrieval.memory.freshness"):
+        with pytest.raises(IndexFreshnessTimeout):
+            await freshness.await_freshness(user_id=str(owner), timeout=0.05, poll=0.01)
+
+    assert "pending=1" in caplog.text
+    assert "blocked=1" in caplog.text
 
 
 # ── (c) nothing pending: no drain, no wait ──────────────────────────────────
