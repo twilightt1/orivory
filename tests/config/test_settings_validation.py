@@ -96,6 +96,20 @@ def test_rejects_invalid_evaluator_failure_mode():
         _base_settings(EVALUATOR_FAILURE_MODE="unsafe")
 
 
+@pytest.mark.parametrize("rrf_k", [0, -1])
+def test_rejects_invalid_rrf_k(rrf_k):
+    """k <= 0 makes `1 / (k + rank + 1)` zero-divide at rank 0; the constant
+    is validated at load like the other typed knobs, and the vector-outage
+    fallback fuses with the hybrid flag OFF — an operator typo must be a boot
+    failure, not an unhandled 500."""
+    with pytest.raises(ValidationError, match="RETRIEVAL_RRF_K"):
+        _base_settings(RETRIEVAL_RRF_K=rrf_k)
+
+
+def test_accepts_rrf_k_at_the_boundary():
+    assert _base_settings(RETRIEVAL_RRF_K=1).RETRIEVAL_RRF_K == 1
+
+
 def test_normalizes_evaluator_failure_mode():
     settings = _base_settings(EVALUATOR_FAILURE_MODE="FAIL_CLOSED")
 

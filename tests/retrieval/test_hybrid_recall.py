@@ -66,6 +66,13 @@ VECTOR_COPY = "STALE VECTOR COPY — must never leave before SQL authorization"
 A1 = uuid.UUID("11111111-1111-1111-1111-111111111111")
 A2 = uuid.UUID("22222222-2222-2222-2222-222222222222")
 A3 = uuid.UUID("33333333-3333-3333-3333-333333333333")
+# The refill row of the R21(p2) test: the largest matching id, so it is LAST
+# in the lexical leg as well as in the widened dense page.
+R1 = uuid.UUID("44444444-4444-4444-4444-444444444444")
+# Dense-only rows of the never-shrink test: the racer drops D1, the widened
+# page adds N1.
+D1 = uuid.UUID("55555555-5555-5555-5555-555555555555")
+N1 = uuid.UUID("66666666-6666-6666-6666-666666666666")
 B1 = uuid.UUID("00000000-0000-0000-0000-000000000001")
 B2 = uuid.UUID("00000000-0000-0000-0000-000000000002")
 B3 = uuid.UUID("00000000-0000-0000-0000-000000000003")
@@ -116,6 +123,24 @@ class _FakeResult:
 
     def all(self):
         return self._rows
+
+
+class _ShiftingStore:
+    """The dense leg with a DIFFERENT page per call: a widened fetch can race
+    a concurrent index change — a row the previous page returned is gone, a
+    new one took its place."""
+
+    def __init__(self, *pages):
+        self.pages = [list(page) for page in pages]
+        self.calls: list[int] = []
+
+    async def __call__(self, _embedding, *, user_id, top_k=10, where=None):
+        page = self.pages[min(len(self.calls), len(self.pages) - 1)]
+        self.calls.append(top_k)
+        return [
+            {"memory_id": str(memory_id), "content": VECTOR_COPY, "score": score}
+            for memory_id, score in page[:top_k]
+        ]
 
 
 class _PostgresishSession:
@@ -233,6 +258,26 @@ class TestUuidKeyedFusion:
         assert len(fused) == 1
         assert fused[0]["score"] == pytest.approx(1 / 61)
 
+    def test_malformed_rows_are_skipped_never_fatal(self):
+        """A leg row without a usable ``memory_id`` cannot key the fusion —
+        the old hard index raised KeyError on the ON path, and inside the
+        vector-outage handler that escaped as a 500 instead of the typed 503.
+        A row with an unusable own score still HAS its rank (fusion is by
+        rank): it is kept, with that leg's score ``None``, and the ranks of
+        the rows around it are not renumbered."""
+        dense = [{"memory_id": str(A1), "score": 0.9},
+                 {"score": 0.8},                        # no memory_id at all
+                 {"memory_id": None, "score": 0.7},     # no usable identity
+                 "not-a-row",                           # not even a dict
+                 {"memory_id": str(A2), "score": "garbage"}]
+
+        fused = fuse_by_uuid(dense, [], k=60)
+
+        assert [row["memory_id"] for row in fused] == [str(A1), str(A2)]
+        assert fused[0]["score"] == pytest.approx(1 / 61)   # rank 0
+        assert fused[1]["score"] == pytest.approx(1 / 65)   # rank 4, as posed
+        assert fused[1]["dense_score"] is None
+
 
 # ── recall wiring (R2 / R19) ────────────────────────────────────────────────
 
@@ -258,6 +303,7 @@ class TestHybridRecall:
         response = await _recall(factory, monkeypatch, store, top_k=3, hybrid=True)
 
         # A2 (both legs) > A1 (lexical only) > A3 (dense only).
+        assert store.calls == [6], "the R4 pool — a short page earns no refill"
         assert [result.id for result in response.results] == [A2, A1, A3]
         scores = {result.id: result.score for result in response.results}
         assert scores[A2] == pytest.approx(_rrf(0, 1) * DECAY_MULT, abs=1e-6)
@@ -310,14 +356,96 @@ class TestHybridRecall:
         assert scores[A1] == pytest.approx(_rrf(0, k=1) * DECAY_MULT, abs=1e-6)
         assert scores[A3] == pytest.approx(_rrf(1, k=1) * DECAY_MULT, abs=1e-6)
 
+    async def test_refill_re_fuses_through_the_dense_leg_before_scoring(
+        self, offline_env, recall_db, monkeypatch
+    ):
+        """R21(p2)/I1: the refill widens the DENSE leg and re-fuses — it never
+        appends a row carrying its bare cosine next to the RRF sums.
+
+        The first page fills its pool (6) with four index-only rows and the two
+        fused ones, so the SQL filter starves the pool below top_k and earns
+        the ONE extra fetch at the ``top_k * 4`` cap. The widened page's new
+        row (R1, cosine 0.30 — below every first-page row, far above any RRF
+        sum) matches the query only VECTOR-wise, so it is invisible to the
+        lexical leg and reachable only through the widened fetch: an appended
+        R1 would enter scoring on the cosine scale and `0.30 x decay` would
+        outrank the whole fused head (`~0.032 x decay`), serving [R1, A2, A3].
+        Re-fused, R1 is dense rank 6 alone (`1/67`), below A2's `1/65 + 1/61`,
+        and the served order is [A2, A3, R1] with every served score on the
+        one RRF scale.
+        """
+        _, factory = recall_db
+        await _seed(factory,
+                    _mem(A2, TENANT_A, MATCHING),
+                    _mem(A3, TENANT_A, MATCHING),
+                    _mem(R1, TENANT_A, UNMATCHED))
+        ghosts = [uuid.uuid4() for _ in range(4)]  # in the index, gone from SQL
+        store = _Store([
+            *[(ghost, 0.99 - index / 100.0) for index, ghost in enumerate(ghosts)],
+            (A2, 0.95), (A3, 0.94),
+            (R1, 0.30),  # not in the first page: only the widened fetch sees it
+        ])
+
+        response = await _recall(factory, monkeypatch, store, top_k=3, hybrid=True)
+
+        assert store.calls == [6, 12], "the R4 pool, then ONE refill at top_k * 4"
+        assert [result.id for result in response.results] == [A2, A3, R1]
+        scores = {result.id: result.score for result in response.results}
+        assert scores[A2] == pytest.approx(_rrf(4, 0) * DECAY_MULT, abs=1e-6)
+        assert scores[A3] == pytest.approx(_rrf(5, 1) * DECAY_MULT, abs=1e-6)
+        assert scores[R1] == pytest.approx(_rrf(6) * DECAY_MULT, abs=1e-6)
+        counts = response.trace.counts
+        assert counts["dense"] == 6 and counts["lexical"] == 2 and counts["fused"] == 6
+        assert counts["refill"] == 1, "the one row the widened fusion added"
+        assert response.trace.stage_ms["refill"] > 0.0
+
+    async def test_refill_never_shrinks_a_pool_the_racer_dropped(
+        self, offline_env, recall_db, monkeypatch
+    ):
+        """The re-fused pool is a union, not a replacement: the widened fetch
+        can race a concurrent index change and come back WITHOUT a row the
+        first page already returned (D1, dense-only, so nothing else can carry
+        it). The refill exists to grow a starved pool — it must never be the
+        thing that drops a row the caller already had. D1 keeps its
+        first-page RRF sum and the row the race ADDED (N1) joins it."""
+        _, factory = recall_db
+        await _seed(factory,
+                    _mem(A2, TENANT_A, MATCHING),
+                    _mem(D1, TENANT_A, UNMATCHED),   # first page only
+                    _mem(N1, TENANT_A, UNMATCHED))   # widened page only
+        ghosts = [uuid.uuid4() for _ in range(4)]
+        # Ranks: G0 0 G1 1 G2 2 A2 3 D1 4 G3 5 — D1 is dense-only, rank 4.
+        first = [*[(ghost, 0.99 - index * 0.02) for index, ghost in enumerate(ghosts[:3])],
+                 (A2, 0.93), (D1, 0.91), (ghosts[3], 0.89)]
+        # The race: D1 is gone from the index, N1 took its place at rank 5.
+        widened = [*[(ghost, 0.99 - index * 0.02) for index, ghost in enumerate(ghosts[:3])],
+                   (A2, 0.93), (ghosts[3], 0.89), (N1, 0.20)]
+        store = _ShiftingStore(first, widened)
+
+        response = await _recall(factory, monkeypatch, store, top_k=3, hybrid=True)
+
+        assert store.calls == [6, 12]
+        assert [result.id for result in response.results] == [A2, D1, N1]
+        scores = {result.id: result.score for result in response.results}
+        assert scores[A2] == pytest.approx(_rrf(3, 0) * DECAY_MULT, abs=1e-6)
+        assert scores[D1] == pytest.approx(_rrf(4) * DECAY_MULT, abs=1e-6)  # kept
+        assert scores[N1] == pytest.approx(_rrf(5) * DECAY_MULT, abs=1e-6)  # added
+        counts = response.trace.counts
+        assert counts["lexical"] == 1 and counts["refill"] == 1
+        assert counts["eligible"] == 3, "the pool grew, and never lost D1"
+
     async def test_lexical_leg_filters_tenant_and_visibility_before_its_limit(
         self, offline_env, recall_db, monkeypatch
     ):
         """Every row has identical text, so BM25 ties and the FTS tie-break is
-        the canonical id ascending: the foreign rows and the superseded row
-        hold the smaller ids and would fill a post-LIMIT page of 2. Only a
-        pre-LIMIT tenant + visibility filter leaves the tenant's current row
-        in the leg — and `counts["lexical"] == 1` is what proves it."""
+        the canonical id ascending: B1 wins it, B2 next — foreign ids, so a
+        page cut BEFORE the tenant clause is [B1, B2] and the tenant's own row
+        is never fetched at all. The discriminator is the served RESULT below
+        (`[CURRENT]`, never a foreign or superseded id, and never empty).
+        `counts["lexical"] == 1` only corroborates: with one current tenant
+        row in the corpus, a leg whose VISIBILITY clause ran after its LIMIT
+        also counts 1 (the superseded row dropped leaves exactly the current
+        one), so the count alone cannot prove the clause ordering."""
         _, factory = recall_db
         await _seed(factory,
                     _mem(B1, TENANT_B, MATCHING),

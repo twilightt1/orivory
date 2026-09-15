@@ -205,7 +205,9 @@ class Settings(BaseSettings):
     # The RRF constant `sum(1 / (k + rank + 1))` over ZERO-BASED ranks (ruling
     # R11b(p2)). 60 is both the spec's starting value and the old document
     # helper's default; the fused pool is ordered by this sum, never by the
-    # legs' scores (dense cosine and global BM25 are not comparable).
+    # legs' scores (dense cosine and global BM25 are not comparable). Validated
+    # at load (>= 1): a negative k zero-divides at rank 0, and the outage
+    # fallback reads it with the hybrid flag OFF.
     RETRIEVAL_RRF_K: int = 60
     # Bound on ONE rerank HTTP call (ruling R11(p2)): a hung transport must not
     # hold the recall path for the client's own 30 s default. Overrunning it is
@@ -357,6 +359,11 @@ class Settings(BaseSettings):
             raise ValueError(
                 "EVALUATOR_FAILURE_MODE must be one of: warn_only, fail_open, fail_closed"
             )
+        if self.RETRIEVAL_RRF_K < 1:
+            # `1 / (k + rank + 1)` zero-divides at rank 0 for k = -1 — and the
+            # vector-outage fallback fuses with the flag OFF, so the typo would
+            # turn the typed 503 into an unhandled 500.
+            raise ValueError("RETRIEVAL_RRF_K must be >= 1")
 
     def _validate_production_settings(self) -> None:
         self._require_strong_jwt_secret()

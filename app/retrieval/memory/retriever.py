@@ -275,6 +275,12 @@ class MemoryRetriever:
         num_candidates = len(candidates)
         if not dense_down:
             counts["dense"] = dense_page  # the first fetch, pre-filter (T3)
+        # The lexical page the hybrid fusion ran over, kept for the refill:
+        # R21(p2) re-fuses the WIDENED dense page with this SAME page. `None`
+        # means no fusion ran at all (flag off, no FTS, or the leg failed
+        # open) — the pool is then on the store's own cosine scale, and the
+        # refill keeps the plain append path.
+        lexical_page: list[dict] | None = None
 
         # 4a) Hybrid fusion (opt-in, rulings R2/R11b). Both legs return
         # ids/scores only, so nothing but ids reaches hydration — the SQL
@@ -303,6 +309,7 @@ class MemoryRetriever:
                 else:
                     stage_ms["lexical"] = (time.perf_counter() - t_lexical) * 1000.0
                     counts["lexical"] = len(lexical_rows)
+                    lexical_page = lexical_rows
                     candidates = fuse_by_uuid(candidates, lexical_rows, k=self.rrf_k)
                     counts["fused"] = len(candidates)
                     num_candidates = len(candidates)
@@ -353,6 +360,17 @@ class MemoryRetriever:
         # larger limit would only repeat it), hard-capped at top_k * 4. The
         # refill rows are hydrated, SQL-authorized and filtered exactly like
         # the first page's — nothing enters scoring unchecked.
+        #
+        # R21(p2): on the hybrid path that fetch is the WIDENED DENSE leg of a
+        # re-fusion, never an append list. The widened page and the SAME
+        # lexical page are fused again and the whole pool is re-authorized, so
+        # every row that reaches scoring carries an RRF sum: an appended
+        # refill row would carry its bare cosine (~0.3) next to sums capped at
+        # 2/(k+1) ~ 0.033 and outrank the entire fused head — silently
+        # discarding the fusion ordering in exactly the slice the refill
+        # exists for. The widened page is the same snapshot's top-N with a
+        # larger N, so it normally only adds rows; the re-fusion below still
+        # unions the previous pool back in, so the pool cannot shrink.
         if not dense_down and len(candidates) < top_k and dense_page >= pool:
             added = 0  # rows the refill really ADDS to the pool (T3 counter)
             t_refill = time.perf_counter()
@@ -360,25 +378,22 @@ class MemoryRetriever:
                 refill_rows = await search_memories(
                     embedding, user_id=str(self.user_id), top_k=top_k * 4
                 )
-                seen_ids = {str(cand.get("memory_id", "")) for cand in candidates}
-                fresh: list[dict] = []
-                refill_ids: list[UUID] = []
-                for cand in refill_rows or []:
-                    mid = str(cand.get("memory_id", ""))
-                    if not mid or mid in seen_ids:
-                        continue
-                    try:
-                        refill_ids.append(UUID(mid))
-                    except (AttributeError, TypeError, ValueError):
-                        log.debug("Skipping malformed refill candidate")
-                        continue
-                    seen_ids.add(mid)
-                    fresh.append(cand)
-                if fresh:
-                    hydrated_refill = await self._hydrate(refill_ids)
-                    for cand in fresh:
-                        mid = str(cand["memory_id"])
-                        mem = hydrated_refill.get(mid)
+                if self.hybrid and lexical_page is not None:
+                    before = len(candidates)
+                    widened = fuse_by_uuid(
+                        refill_rows or [], lexical_page, k=self.rrf_k
+                    )
+                    refill_ids: list[UUID] = []
+                    for cand in widened:
+                        try:
+                            refill_ids.append(UUID(str(cand.get("memory_id", ""))))
+                        except (AttributeError, TypeError, ValueError):
+                            log.debug("Skipping malformed refill candidate")
+                    refetched = await self._hydrate(refill_ids)
+                    visible: list[dict] = []
+                    for cand in widened:
+                        mid = str(cand.get("memory_id", ""))
+                        mem = refetched.get(mid)
                         if mem is None or _state_of(mem) in ("superseded", "dirty"):
                             continue
                         authorized = dict(cand)
@@ -388,9 +403,54 @@ class MemoryRetriever:
                             if mem.title
                             else mem.content
                         )
-                        candidates.append(authorized)
+                        visible.append(authorized)
                         hydrated[mid] = mem
-                        added += 1
+                    # Assigned only once the re-authorized pool is complete: a
+                    # failure above leaves the old pool (already SQL-authorized)
+                    # in place, never a raw fused page carrying vector copies.
+                    # Never shrink: a widened page that (racing a concurrent
+                    # index change) no longer returns a row the caller already
+                    # had keeps that row — its first-page RRF sum still stands.
+                    fused_ids = {str(cand.get("memory_id", "")) for cand in visible}
+                    kept = [
+                        cand
+                        for cand in candidates
+                        if str(cand.get("memory_id", "")) not in fused_ids
+                    ]
+                    added = len(visible) + len(kept) - before
+                    candidates = [*visible, *kept]
+                else:
+                    seen_ids = {str(cand.get("memory_id", "")) for cand in candidates}
+                    fresh: list[dict] = []
+                    refill_ids = []
+                    for cand in refill_rows or []:
+                        mid = str(cand.get("memory_id", ""))
+                        if not mid or mid in seen_ids:
+                            continue
+                        try:
+                            refill_ids.append(UUID(mid))
+                        except (AttributeError, TypeError, ValueError):
+                            log.debug("Skipping malformed refill candidate")
+                            continue
+                        seen_ids.add(mid)
+                        fresh.append(cand)
+                    if fresh:
+                        hydrated_refill = await self._hydrate(refill_ids)
+                        for cand in fresh:
+                            mid = str(cand["memory_id"])
+                            mem = hydrated_refill.get(mid)
+                            if mem is None or _state_of(mem) in ("superseded", "dirty"):
+                                continue
+                            authorized = dict(cand)
+                            authorized["memory_id"] = mid
+                            authorized["content"] = (
+                                f"Title: {mem.title}\n{mem.content}"
+                                if mem.title
+                                else mem.content
+                            )
+                            candidates.append(authorized)
+                            hydrated[mid] = mem
+                            added += 1
             except (EmbeddingDimensionMismatch, VectorUnavailableError):
                 # The same contract as the first search: a store outage is a
                 # readiness signal, never a short result list.
