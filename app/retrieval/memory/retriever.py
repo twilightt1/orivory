@@ -12,6 +12,10 @@ Pipeline (one call to :py:meth:`MemoryRetriever.recall`):
     4. Vector search in Qdrant — one pool of
        `ceil(top_k * RETRIEVAL_RERANK_POOL_MULTIPLIER)` candidates (ruling
        R4(p2)) for the reranker, the filter and scoring to share.
+    4a. When ``RETRIEVAL_HYBRID_ENABLED`` (opt-in, ruling R2(p2)): the SQLite
+       FTS5 lexical leg over the same query, rank-fused with the dense pool by
+       RRF over canonical memory UUIDs (ruling R11b(p2)). The lexical leg
+       returns ids and scores only.
     5. Hydrate the top candidates with full ``Memory`` rows from Postgres,
        including ``entity_links`` (so we can apply entity boost).
     6. Apply entity_boost + time_decay to each candidate.
@@ -21,10 +25,13 @@ Pipeline (one call to :py:meth:`MemoryRetriever.recall`):
 Every step degrades gracefully, EXCEPT three typed signals that must never be
 served as an empty result: an embedding contract mismatch, an unreachable
 vector store, and a freshness barrier that timed out (a write still in flight
-is not a no-match). Those propagate to the API as a 503 readiness error (see
-``app.main`` handlers). Everything else (LLM down, DB read errors) still
-returns a 200 with an empty ``results`` list and a trace indicating what was
-attempted.
+is not a no-match). The vector outage keeps that rule where this deployment
+has no lexical index too (Postgres); where one exists (SQLite FTS5), the
+recall answers from the lexical leg instead and counts the fallback (ruling
+R19). Those remaining typed signals propagate to the API as a 503 readiness
+error (see ``app.main`` handlers). Everything else (LLM down, DB read errors)
+still returns a 200 with an empty ``results`` list and a trace indicating what
+was attempted.
 """
 from __future__ import annotations
 
@@ -43,6 +50,8 @@ from app.models.entity import MemoryEntity
 from app.models.memory import Memory
 from app.observability.fallbacks import count_fallback
 from app.retrieval.embedder import EmbeddingDimensionMismatch, embed_query
+from app.retrieval.hybrid_retriever import fuse_by_uuid
+from app.retrieval.memory import lexical_index
 from app.retrieval.memory.context import fetch_personal_context
 from app.retrieval.memory.correction import needs_rewrite as _needs_rewrite
 from app.retrieval.memory.correction import state_of as _state_of
@@ -76,6 +85,8 @@ class MemoryRetriever:
         pool_multiplier: float | None = None,
         decay_floor: float = 0.1,
         semantic_rerank: bool | None = None,
+        hybrid: bool | None = None,
+        rrf_k: int | None = None,
     ) -> None:
         self.db = db
         self.user_id = user_id
@@ -97,6 +108,16 @@ class MemoryRetriever:
             if semantic_rerank is None
             else semantic_rerank
         )
+        # None → defer to the deployment flag (settings.RETRIEVAL_HYBRID_ENABLED,
+        # shipped OFF by ruling R2(p2)): with the flag off the recall below is
+        # the dense-only pipeline this class always was — the lexical index is
+        # not probed and the trace gains no hybrid counters.
+        self.hybrid = (
+            settings.RETRIEVAL_HYBRID_ENABLED if hybrid is None else hybrid
+        )
+        # The RRF constant (ruling R11b(p2)); a seam so a test and the T7
+        # ablation can pin a k without moving the deployment global.
+        self.rrf_k = settings.RETRIEVAL_RRF_K if rrf_k is None else rrf_k
 
     # ── main entry point ─────────────────────────────────────────────────
 
@@ -199,23 +220,92 @@ class MemoryRetriever:
         pool = max(top_k, math.ceil(top_k * self.pool_multiplier))
         t_search = time.perf_counter()
         candidates: list[dict] = []
+        dense_down = False
         try:
             candidates = await search_memories(
                 embedding,
                 user_id=str(self.user_id),
                 top_k=pool,
             )
-        except (EmbeddingDimensionMismatch, VectorUnavailableError):
-            # A contract mismatch or a vector outage is a readiness/data
-            # integrity failure, not an ordinary no-match result.
+        except EmbeddingDimensionMismatch:
+            # A contract mismatch is a readiness/data integrity failure in
+            # every mode, not an ordinary no-match result.
             raise
+        except VectorUnavailableError:
+            # R19(p2): a vector outage is not a no-match. Where this
+            # deployment owns a lexical index (SQLite FTS5), the recall
+            # answers from it and counts the fallback; where it does not
+            # (Postgres), the typed readiness error stands.
+            t_lexical = time.perf_counter()
+            try:
+                lexical_rows = await self._lexical_leg(
+                    rewritten if not llm_fallback else query, pool
+                )
+            except Exception as e:
+                # A lexical leg that cannot even be read is not an answer
+                # either: fall through to the typed outage.
+                log.error("lexical fallback failed", extra={"error": str(e)})
+                lexical_rows = None
+            finally:
+                stage_ms["lexical"] = (time.perf_counter() - t_lexical) * 1000.0
+            if lexical_rows is None:
+                raise
+            count_fallback("retrieval.vector_unavailable")
+            log.warning(
+                "vector store unavailable — answering from the lexical leg",
+                extra={"user_id": str(self.user_id), "lexical": len(lexical_rows)},
+            )
+            # A single leg, through the same rank rule: a lexical row's fused
+            # score is 1/(k+rank+1) — positive and monotone in rank, unlike
+            # raw BM25 (negative, lower-is-better) which the score chain below
+            # would sort upside down.
+            candidates = fuse_by_uuid([], lexical_rows, k=self.rrf_k)
+            counts["lexical"] = len(lexical_rows)
+            dense_down = True
         except Exception as e:
             log.error("search_memories failed", extra={"error": str(e)})
         finally:
             stage_ms["search_ms"] = (time.perf_counter() - t_search) * 1000.0
 
+        # The DENSE page size drives the refill gate below (a page that filled
+        # its limit is what justifies one more fetch): fusion and the outage
+        # fallback add rows on top of it but must not change when a refill is
+        # earned. `num_candidates` is the pool the answer was built from.
+        dense_page = 0 if dense_down else len(candidates)
         num_candidates = len(candidates)
-        counts["dense"] = num_candidates  # the first fetch, pre-filter (T3)
+        if not dense_down:
+            counts["dense"] = dense_page  # the first fetch, pre-filter (T3)
+
+        # 4a) Hybrid fusion (opt-in, rulings R2/R11b). Both legs return
+        # ids/scores only, so nothing but ids reaches hydration — the SQL
+        # authorization below still owns every byte of text.
+        if self.hybrid and not dense_down:
+            t_lexical = time.perf_counter()
+            try:
+                lexical_rows = await self._lexical_leg(
+                    rewritten if not llm_fallback else query, pool
+                )
+            except Exception as e:
+                # Fail open: the FTS index is derived data, and the dense
+                # answer already in hand must not die with it. Logged, not
+                # counted — no registered fallback path describes this, and a
+                # mislabelled counter is worse than a log line.
+                stage_ms["lexical"] = (time.perf_counter() - t_lexical) * 1000.0
+                log.error(
+                    "lexical leg failed — dense-only answer",
+                    extra={"error": str(e), "kind": type(e).__name__},
+                )
+            else:
+                if lexical_rows is None:
+                    # No FTS on this deployment (R3(p2)): the leg never ran,
+                    # so it writes no counter and no stage ms (C3).
+                    log.info("hybrid recall without a lexical index — dense-only")
+                else:
+                    stage_ms["lexical"] = (time.perf_counter() - t_lexical) * 1000.0
+                    counts["lexical"] = len(lexical_rows)
+                    candidates = fuse_by_uuid(candidates, lexical_rows, k=self.rrf_k)
+                    counts["fused"] = len(candidates)
+                    num_candidates = len(candidates)
 
         # 5) Hydrate and authorize from SQL before any candidate text can be
         # sent to a remote reranker. Vector payload content is stale/untrusted.
@@ -263,7 +353,7 @@ class MemoryRetriever:
         # larger limit would only repeat it), hard-capped at top_k * 4. The
         # refill rows are hydrated, SQL-authorized and filtered exactly like
         # the first page's — nothing enters scoring unchecked.
-        if len(candidates) < top_k and num_candidates >= pool:
+        if not dense_down and len(candidates) < top_k and dense_page >= pool:
             added = 0  # rows the refill really ADDS to the pool (T3 counter)
             t_refill = time.perf_counter()
             try:
@@ -519,6 +609,28 @@ class MemoryRetriever:
         return response
 
     # ── helpers ─────────────────────────────────────────────────────────
+
+    async def _lexical_leg(self, query: str, limit: int) -> list[dict] | None:
+        """The FTS5 lexical leg, or ``None`` when this deployment has no index.
+
+        ``is_available`` answers False on a non-SQLite connection WITHOUT
+        touching it (ruling R3(p2)), so Postgres pays one boolean instead of a
+        caught exception. The search itself is the SYNC surface T4 pinned —
+        ``run_sync`` hands over the sync Session, whose ``connection()`` is the
+        Connection that surface takes — and it returns ``{"memory_id",
+        "score", "rank"}``: ids and scores only, zero-based ranks, tenant +
+        visibility filtered before its LIMIT, and global BM25 in ``score``
+        which nothing downstream may read as tenant-local (fusion is by rank,
+        R11b(p2)).
+        """
+
+        def _search(session):
+            conn = session.connection()
+            if not lexical_index.is_available(conn):
+                return None
+            return lexical_index.search(conn, query, user_id=self.user_id, limit=limit)
+
+        return await self.db.run_sync(_search)
 
     async def _hydrate(self, memory_ids: list[UUID]) -> dict[str, Memory]:
         """Fetch Memory rows + entity_links in one query, keyed by id (str)."""

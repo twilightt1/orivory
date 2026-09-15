@@ -360,7 +360,10 @@ async def recall_memory(
     vector store, or a recall that waited out its freshness budget for a write
     still in flight answer 503 with a typed body (``embedding_contract_mismatch``
     / ``vector_unavailable`` / ``index_freshness_timeout``) — never a silent
-    empty recall.
+    empty recall. A vector outage reaches that 503 only where the deployment
+    has no lexical index (ruling R19): on SQLite the recall answers from the
+    FTS5 lexical leg instead, with ``trace.counts["lexical"]`` set, no
+    ``dense`` key, and ``retrieval.vector_unavailable`` counted.
     """
     retriever = MemoryRetriever(
         db=db,

@@ -193,6 +193,20 @@ class Settings(BaseSettings):
     # reranker and scoring; a pool smaller than top_k cannot satisfy the count
     # invariant, so the effective fetch is `max(top_k, ceil(top_k * this))`.
     RETRIEVAL_RERANK_POOL_MULTIPLIER: float = 2.0
+    # Hybrid recall (P2/T5): when ON, recall runs the SQLite FTS5 lexical leg
+    # over the same query next to the dense one and fuses the two by RRF
+    # (app/retrieval/hybrid_retriever.fuse_by_uuid). Ships OFF — only the T7
+    # ablation artifact may flip it (ruling R2(p2)) — and the OFF path stays
+    # byte-equivalent to the dense-only recall: no lexical query is issued and
+    # the trace carries no `lexical`/`fused` counters. The vector-outage
+    # fallback to the lexical leg is NOT gated by this flag (ruling R19): it
+    # only ever replaces the typed 503.
+    RETRIEVAL_HYBRID_ENABLED: bool = False
+    # The RRF constant `sum(1 / (k + rank + 1))` over ZERO-BASED ranks (ruling
+    # R11b(p2)). 60 is both the spec's starting value and the old document
+    # helper's default; the fused pool is ordered by this sum, never by the
+    # legs' scores (dense cosine and global BM25 are not comparable).
+    RETRIEVAL_RRF_K: int = 60
     # Bound on ONE rerank HTTP call (ruling R11(p2)): a hung transport must not
     # hold the recall path for the client's own 30 s default. Overrunning it is
     # a `RerankUnavailable` — dense order continues, counted.
