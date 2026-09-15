@@ -13,7 +13,11 @@ P1b keeps the memory store and the document-chunk index on Qdrant
 (:mod:`app.retrieval.memory.vector_store`, :mod:`app.retrieval.vector_retriever`)
 and resolves each kind's physical generation through :func:`active_generation`.
 A drain applies one intent at a time: a dead row collapses to a delete, a
-stale revision is skipped (a newer intent owns the entity), an intent whose
+stale revision is skipped (a newer intent owns the entity), an applied upsert
+re-reads its own row once — the drain runs concurrently with writers, so a row
+deleted or superseded while its snapshot was in flight has the point just
+written deleted (row gone) or left to the newer intent (revision advanced,
+``skipped``): :func:`_settle_written_snapshot`. An intent whose
 ``target_generation`` is no longer the kind's active one blocks terminally
 (the cutover moved the pointer; the migration's backfill covers that write),
 a contract mismatch blocks terminally, a transient failure retries with
@@ -583,10 +587,13 @@ async def _apply_memory_intent(db: AsyncSession, row: IndexOutbox) -> str:
         # this one would index an older revision over it.
         return "skipped"
     if row.operation == OPERATION_DELETE:
+        # A delete intent has no snapshot to go stale: no post-write re-check.
         await _delete_vector_or_fail(str(memory.id))
-    else:
-        await upsert_memory(memory)
-    return "applied"
+        return "applied"
+    await upsert_memory(memory)
+    return await _settle_written_snapshot(
+        db, row, Memory, entity_id, lambda: _delete_vector_or_fail(str(entity_id))
+    )
 
 
 async def _delete_vector_or_fail(entity_id: str) -> None:
@@ -605,7 +612,8 @@ async def _apply_chunk_intent(db: AsyncSession, row: IndexOutbox) -> str:
 
     A dead row and a delete intent both mean "forget": the point is deleted by
     id and only a confirmed readback lets the intent be acked. A live row with
-    a newer revision is skipped — the newer intent owns the point.
+    a newer revision is skipped — the newer intent owns the point. An applied
+    upsert is re-checked against its row afterwards (:func:`_settle_written_snapshot`).
     """
     entity_id = uuid.UUID(row.entity_id)
     chunk = await db.get(DocumentChunk, entity_id)
@@ -627,6 +635,42 @@ async def _apply_chunk_intent(db: AsyncSession, row: IndexOutbox) -> str:
         await _delete_chunk_vector_or_fail([str(entity_id)])
         return "applied"
     await upsert_chunks([chunk], user_id=owner_id)
+    return await _settle_written_snapshot(
+        db, row, DocumentChunk, entity_id,
+        lambda: _delete_chunk_vector_or_fail([str(entity_id)]),
+    )
+
+
+async def _settle_written_snapshot(db: AsyncSession, row: IndexOutbox, model, entity_id,
+                                   purge) -> str:
+    """Settle a JUST-WRITTEN upsert snapshot against the row it came from (R6/R21).
+
+    The drain runs concurrently with writers, so between the applier's read and
+    its write the row can be deleted (the point then outlives its row) or
+    superseded by a newer revision (a correction enqueues its own intent in the
+    same commit). Either way the point just written came from a snapshot that is
+    no longer the row's state, and acking it as-is would leave the store wrong
+    with nothing pending to fix it.
+
+    One extra read per applied upsert, same session — ``populate_existing`` is
+    what makes it a real read: the pre-read left the instance in the identity
+    map, so a plain ``get`` would answer from the snapshot and never see the
+    race. The re-check is deliberately bounded (never a reconciliation pass):
+
+    - row gone → the point just written is deleted (``purge``, which raises
+      unless the store confirmed absence) and the intent reports ``applied``;
+    - revision advanced → ``skipped``: the newer revision's own intent owns the
+      point. This applier neither overwrites nor deletes that state — a repair
+      write here could only race the same window again;
+    - row unchanged → ``applied``, i.e. the ordinary case.
+    """
+    intent_revision = int(row.revision)
+    fresh = await db.get(model, entity_id, populate_existing=True)
+    if fresh is None:
+        await purge()
+        return "applied"
+    if int(getattr(fresh, "revision", 0) or 0) > intent_revision:
+        return "skipped"
     return "applied"
 
 
