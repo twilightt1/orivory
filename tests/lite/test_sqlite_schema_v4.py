@@ -124,6 +124,11 @@ async def _rebuild(eng) -> dict:
         return await conn.run_sync(lexical_index.rebuild)
 
 
+async def _coverage(eng) -> dict:
+    async with eng.connect() as conn:
+        return await conn.run_sync(lexical_index.coverage)
+
+
 @pytest_asyncio.fixture
 async def v3_db(tmp_path, monkeypatch):
     """A real v3 install: the v1+v2 schema with rows, ``user_version`` stamped 3.
@@ -368,6 +373,39 @@ async def test_rebuild_is_the_repair_path_and_reports_the_drift(v3_db):
     assert (await _rebuild(eng))["rebuilt"] is False
 
 
+async def test_rebuild_repairs_duplicate_only_drift(v3_db):
+    """I1: canonical 4 / indexed 5 with CLEAN set differences is still drift.
+
+    ``missing`` and ``orphan`` are both 0 here, so the set checks alone pass the
+    duplicate through; only the count comparison sees it. Left in place it makes
+    ``search`` return the same memory twice (the join has no DISTINCT), so the
+    backfill must fire on the counts too.
+    """
+    eng, _ = v3_db
+    await database.bootstrap_sqlite()
+
+    async with eng.begin() as conn:  # a write that bypassed the triggers
+        await conn.execute(text(
+            "INSERT INTO memory_fts (title, content, memory_id, user_id)"
+            " SELECT title, content, memory_id, user_id FROM memory_fts"
+            " WHERE memory_id = :id"), {"id": CURRENT})
+
+    assert await _coverage(eng) == \
+        {"canonical": 4, "indexed": 5, "missing": 0, "orphan": 0}
+
+    report = await _rebuild(eng)
+    assert (report["canonical"], report["indexed"], report["missing"], report["orphan"]) == \
+        (4, 5, 0, 0), "the report names the pre-repair counts"
+    assert report["rebuilt"] is True, "a duplicate is drift the counts see"
+    assert report["indexed_after"] == 4
+
+    assert await _coverage(eng) == \
+        {"canonical": 4, "indexed": 4, "missing": 0, "orphan": 0}, "repaired"
+    assert [hit["memory_id"] for hit in await _search(eng, "alpha", user_id=TENANT_A)] == \
+        [str(uuid.UUID(CURRENT))], "the memory is returned once, not twice"
+    assert (await _rebuild(eng))["rebuilt"] is False, "healthy again"
+
+
 # ── the query: literal escaping, the query budget, and the clauses before LIMIT ──
 
 
@@ -396,8 +434,12 @@ async def test_search_never_parses_user_text_as_fts_grammar(v3_db):
     def ids(hits):
         return [hit["memory_id"] for hit in hits]
 
-    assert ids(await _search(eng, 'alpha " OR "', user_id=TENANT_A)) == [str(uuid.UUID(nasty))], (
-        "unescaped this is a syntax error; as literals it is \"alpha\" AND \"OR\"")
+    # A SHAPE pin, not the discriminator: raw, `alpha " OR "` is valid FTS5 too —
+    # the quoted phrase is just the token `or`, which this row happens to contain.
+    # The probes whose raw forms are a syntax/column error are what make this
+    # discriminate: `NEAR(` and `beta -gamma` below, `-alpha` / `a^2 (b)` above.
+    assert ids(await _search(eng, 'alpha \" OR \"', user_id=TENANT_A)) == [str(uuid.UUID(nasty))], (
+        "as literals it is \"alpha\" AND \"OR\"")
     assert ids(await _search(eng, "NEAR(", user_id=TENANT_A)) == [str(uuid.UUID(nasty))], (
         "NEAR is a word, not the proximity operator")
     assert ids(await _search(eng, "beta -gamma", user_id=TENANT_A)) == [str(uuid.UUID(nasty))], (

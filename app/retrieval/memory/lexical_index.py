@@ -12,6 +12,17 @@ no place in model metadata, there is no ORM model for it, and Postgres gets no
 FTS at all (no Alembic step). On a non-SQLite deployment this module reports
 :class:`LexicalUnavailable` — typed, never a silent "no matches" (ruling R3).
 
+Known limitation, deliberate (spec §7.4): BM25's ``idf``/``avgdl`` are
+INDEX-GLOBAL — ``memory_fts`` is one table over every tenant, so another
+tenant's corpus shifts this tenant's ordering (reproduced: 300 long foreign
+rows flip an intra-tenant order). No authorization impact: the tenant and
+visibility clauses are applied BEFORE the LIMIT, so a foreign or superseded
+row is never returned — but nothing in the result says the order was computed
+against a bigger corpus. The ``score`` :func:`search` returns is the raw
+global ``bm25``: T5 fuses by ``rank`` and must never read that score as
+tenant-local or as comparable across requests. Measuring the skew is owned by
+Task 7's ablation artifact.
+
 Surface (SYNC, like the ladder — an async caller wraps it with
 ``await session.run_sync(lambda conn: lexical_index.search(conn, ...))``):
 
@@ -150,6 +161,9 @@ def coverage(conn: Connection) -> dict[str, int]:
 def rebuild(conn: Connection) -> dict[str, Any]:
     """Backfill the index from ``memories`` when coverage drifted.
 
+    Drift is a missing row, an orphan row, OR a duplicate one: the duplicate
+    leaves ``missing``/``orphan`` at zero and only moves the counts — and left
+    in place it is returned twice by the DISTINCT-free join in :func:`search`.
     The ladder calls this once, on the v3 -> v4 transition; an operator calls it
     to repair drift (a write that bypassed the triggers, a hand-edited file).
     A healthy index is left untouched — report ``rebuilt: False`` and return.
@@ -160,7 +174,8 @@ def rebuild(conn: Connection) -> dict[str, Any]:
             f"this connection is {conn.dialect.name}"
         )
     before = coverage(conn)
-    rebuilt = bool(before["missing"] or before["orphan"])
+    rebuilt = bool(before["missing"] or before["orphan"]
+                   or before["indexed"] != before["canonical"])
     if rebuilt:
         log.warning("Rebuilding the FTS5 memory index", extra=before)
         conn.exec_driver_sql(f"DELETE FROM {TABLE}")
