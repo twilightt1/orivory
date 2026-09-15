@@ -152,13 +152,17 @@ class Settings(BaseSettings):
     # (not the loop's default pool) keeps ORT's own threads accountable. The
     # `*_sync` faces stay caller-threaded: their callers are already off-loop.
     EMBED_EXECUTOR_WORKERS: int = 2
-    # ONNX Runtime intra-op threads per embedding session. ORT defaults to one
-    # thread PER CORE; this bound makes the process's embedding thread count
-    # explicit instead of implicit. It is per-call latency, not just parallelism:
-    # intra_op=1 measured ~4x slower per call than ORT's default on an M-series
-    # box (T1 report C1: 54 ms vs 13 ms for one 864-char document) — 0 lets ORT
-    # choose, and the executor width is what actually caps concurrency.
-    EMBED_ORT_INTRA_OP_THREADS: int = 1
+    # ONNX Runtime intra-op threads per embedding session (T1 report C1; ruling
+    # R8(p2)). 0 = ORT's own default (one thread per core) — the value that meets
+    # the signed budgets here: a 50-intent drain ~1.1 s inside the 2.0 s RYW
+    # budget, and the recall's own query embed well inside the p95 <= 150 ms.
+    # The loop-lag guarantee comes from the OFFLOAD, not from starving intra-op:
+    # at intra_op=1 every call is ~4x slower on an M-series box (54 ms vs 13 ms
+    # for one 864-char document) and that same drain took 3.07 s — past the
+    # signed RYW budget. Set it to 1 (or fewer) only to cap oversubscription on
+    # a small machine (EMBED_EXECUTOR_WORKERS=2 concurrent embeds, each free to
+    # use every core), and re-measure RYW + recall p95 for that deploy.
+    EMBED_ORT_INTRA_OP_THREADS: int = 0
     # Build the local embedding session during the lifespan, BEFORE the boot
     # drain and before anything is served: a cold InferenceSession is 610-685 ms
     # and even inside a thread it leaves C-level parse lag.

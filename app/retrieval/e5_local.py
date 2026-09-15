@@ -104,13 +104,15 @@ def ensure_files() -> tuple[Path, Path]:
 
 
 def _session_options():
-    """ORT session options: intra-op threads bounded (P2/T1).
+    """ORT session options: the intra-op dial (P2/T1, ruling R8(p2)).
 
     ORT's default is one intra-op thread per core; with every async embedding
     call funneled through ONE bounded executor, the session's own thread count
-    is the remaining knob (``EMBED_ORT_INTRA_OP_THREADS``). Measured trade-off
-    on this machine: intra_op=1 is ~4x slower per call than ORT's default (see
-    the T1 report's C1) — the value is a setting, never a contract.
+    is the remaining knob (``EMBED_ORT_INTRA_OP_THREADS``). The default 0 keeps
+    ORT's choice — the fast per-call setting the signed RYW/recall budgets are
+    measured at; a positive value caps oversubscription on a small machine at
+    ~4x per-call latency (T1 report C1). The value is a setting, never a
+    contract.
     """
     import onnxruntime as ort
 

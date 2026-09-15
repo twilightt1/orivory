@@ -280,10 +280,13 @@ async def test_recall_ingest_and_upload_together_never_stall_the_loop(store, mon
     This is the load the signed p95 has to survive, not a synthetic one: every
     leg is a real production path over the real stores and the real model.
     """
-    # The claim is about the loop, not the barrier's own budget: give the
-    # barrier room to loop. (At EMBED_ORT_INTRA_OP_THREADS=1 the 2.0 s default
-    # cannot drain 50 intents — ~3.1 s of embeds — see the report's C1.)
-    monkeypatch.setattr(settings, "RECALL_FRESHNESS_BUDGET_SECONDS", 30.0)
+    # Test-local budget, NOT a relaxation of the signed contract: this harness
+    # runs three legs at once through the 2-worker embed executor, so the drain
+    # queues behind the other legs' embeds (measured at intra-op=0: all 50
+    # intents land at ~3.1 s — see the T1 report's fix round 1). The signed
+    # 2.0 s RYW budget is a recall-alone measurement (1.15 s here, the P3 gate's
+    # own shape) and is untouched. 10 s buys ~3x headroom on a slower box.
+    monkeypatch.setattr(settings, "RECALL_FRESHNESS_BUDGET_SECONDS", 10.0)
     _stub_out_of_process(monkeypatch)
     # Warm BEFORE the ticker starts: the session build is boot's cost, not this
     # measurement's (the lifespan does exactly this — app/main.py).
