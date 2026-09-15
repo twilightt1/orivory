@@ -18,6 +18,7 @@ and could drift out of sync.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from uuid import UUID
 
@@ -94,8 +95,8 @@ def safe_enqueue_graph_build(memory_id: UUID | str) -> None:
 async def index_new_memory(memory: Memory) -> bool:
     """Run the full post-persist indexing pipeline for one memory.
 
-    Caller must have already committed the row. Embeds synchronously (best
-    effort for transient outages) and enqueues graph extraction. Contract
+    Caller must have already committed the row. Embeds through the async
+    embedder (off the loop, P2/T1) and enqueues graph extraction. Contract
     mismatches propagate as typed integrity failures. Use this from any async
     path that creates or updates a ``Memory``.
 
@@ -104,7 +105,10 @@ async def index_new_memory(memory: Memory) -> bool:
     (``drain_pending``), which is what ``indexing="pending"`` reports.
     """
     indexed = await safe_upsert_to_index(memory)
-    safe_enqueue_graph_build(memory.id)
+    # The graph build is a SYNC function (an LLM call over a sync session) and
+    # every caller of this coroutine is on the loop: hand it to a thread, or the
+    # import's per-item indexing blocks the loop for the whole extraction (P2/T1).
+    await asyncio.to_thread(safe_enqueue_graph_build, memory.id)
     return indexed
 
 

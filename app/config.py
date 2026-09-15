@@ -144,6 +144,25 @@ class Settings(BaseSettings):
     EMBED_MODEL: str = "text-embedding-3-small"
     EMBED_DIMENSIONS: int = 1536
     EMBED_BATCH_SIZE: int = 64
+    # ── Bounded local execution (P2/T1) ──────────────────────────────────────
+    # Every ASYNC embedding call runs on ONE dedicated executor of this width
+    # (thread-name prefix `orivory-embed`): it keeps the synchronous ONNX call
+    # off the event loop — the 50-document drain batch the recall barrier runs
+    # on the request path was ~674 ms of unbroken loop stall — while a bound
+    # (not the loop's default pool) keeps ORT's own threads accountable. The
+    # `*_sync` faces stay caller-threaded: their callers are already off-loop.
+    EMBED_EXECUTOR_WORKERS: int = 2
+    # ONNX Runtime intra-op threads per embedding session. ORT defaults to one
+    # thread PER CORE; this bound makes the process's embedding thread count
+    # explicit instead of implicit. It is per-call latency, not just parallelism:
+    # intra_op=1 measured ~4x slower per call than ORT's default on an M-series
+    # box (T1 report C1: 54 ms vs 13 ms for one 864-char document) — 0 lets ORT
+    # choose, and the executor width is what actually caps concurrency.
+    EMBED_ORT_INTRA_OP_THREADS: int = 1
+    # Build the local embedding session during the lifespan, BEFORE the boot
+    # drain and before anything is served: a cold InferenceSession is 610-685 ms
+    # and even inside a thread it leaves C-level parse lag.
+    EMBED_WARMUP_ON_BOOT: bool = True
 
 
     JINA_API_KEY: str = ""

@@ -103,13 +103,33 @@ def ensure_files() -> tuple[Path, Path]:
     return model, tok
 
 
+def _session_options():
+    """ORT session options: intra-op threads bounded (P2/T1).
+
+    ORT's default is one intra-op thread per core; with every async embedding
+    call funneled through ONE bounded executor, the session's own thread count
+    is the remaining knob (``EMBED_ORT_INTRA_OP_THREADS``). Measured trade-off
+    on this machine: intra_op=1 is ~4x slower per call than ORT's default (see
+    the T1 report's C1) — the value is a setting, never a contract.
+    """
+    import onnxruntime as ort
+
+    from app.config import settings
+
+    options = ort.SessionOptions()
+    options.intra_op_num_threads = settings.EMBED_ORT_INTRA_OP_THREADS
+    return options
+
+
 def _session():
     global _sess
     if _sess is None:
         import onnxruntime as ort
 
         model, _ = ensure_files()
-        _sess = ort.InferenceSession(str(model), providers=["CPUExecutionProvider"])
+        _sess = ort.InferenceSession(
+            str(model), sess_options=_session_options(), providers=["CPUExecutionProvider"]
+        )
     return _sess
 
 
@@ -168,7 +188,9 @@ def _asession():
         import onnxruntime as ort
 
         model, _ = ensure_arctic_files()
-        _asess = ort.InferenceSession(str(model), providers=["CPUExecutionProvider"])
+        _asess = ort.InferenceSession(
+            str(model), sess_options=_session_options(), providers=["CPUExecutionProvider"]
+        )
     return _asess
 
 
