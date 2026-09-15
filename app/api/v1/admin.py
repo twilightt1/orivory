@@ -458,10 +458,10 @@ async def reindex_memories(
     admin_user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ) -> ReindexResponse:
-    """Queue a backfill that re-embeds a user's memories into ChromaDB.
+    """Queue a backfill that re-embeds a user's memories into the index.
 
     Replays the Postgres ``memories`` rows into the vector index. Use after a
-    Chroma data loss, or to index memories captured before write-through
+    vector data loss, or to index memories captured before write-through
     embedding existed. ``only_missing`` (default) skips memories already
     present in the collection; set false to rebuild every vector.
     """

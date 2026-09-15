@@ -198,7 +198,7 @@ def check_generation_contract(
 ) -> None:
     """Verify a Qdrant generation against the embedding contract (spec §4.2).
 
-    The Chroma guard below reads a collection's own metadata stamp; a Qdrant
+    The legacy (Chroma) guard below reads a collection's own metadata stamp; a Qdrant
     collection has none — its contract lives in TWO places that must agree:
 
     - the PHYSICAL collection: dim/metric, read from

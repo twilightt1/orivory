@@ -17,7 +17,7 @@ a post-hoc filter after the cap lets stale rows crowd out the current slice.
 
 This is the **only** module in the memory retrieval package that
 talks to the relational DB for read. Everything else (scoring, vector
-search, rewriting) is pure or talks to ChromaDB.
+search, rewriting) is pure or talks to the vector store.
 """
 from __future__ import annotations
 

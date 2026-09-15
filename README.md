@@ -41,7 +41,7 @@ Three ideas make it different from a chat-with-docs app:
    [CHANGELOG](CHANGELOG.md).
 
 Your data stays on your infrastructure. MIT-licensed, self-hosted, plain
-Postgres + ChromaDB under the hood.
+Postgres + Qdrant under the hood.
 
 ## Core features
 
@@ -62,7 +62,7 @@ Postgres + ChromaDB under the hood.
 
 ### Lite mode — one container, zero external services (personal/demo use)
 
-The whole memory hub — API + MCP server + SQLite + in-process Chroma — in a
+The whole memory hub — API + MCP server + SQLite + in-process Qdrant — in a
 single container. No Postgres, no Redis, no MinIO, no workers.
 
 ```bash
@@ -86,7 +86,7 @@ Lite mode is single-user by design (personal brain). Data persists in the
 It is the fastest way to try Orivory — not a production tier: anything
 multi-user, multi-instance, or load-bearing belongs on the full stack below.
 
-### Full stack — Postgres + Redis + ChromaDB + MinIO + workers + UI
+### Full stack — Postgres + Qdrant behind the app
 
 ```bash
 git clone https://github.com/twilightt1/orivory.git
@@ -101,7 +101,7 @@ docker compose up -d            # migrations run automatically (migrate gate),
 - **Frontend**: http://localhost:3000 · **Flower**: http://localhost:5555
 
 Health & self-diagnosis: `/health` (liveness) and `/ready` — deployment-aware
-per-dependency checks (postgres/sqlite, redis, minio/storage, chroma, mcp_hub).
+per-dependency checks (postgres/sqlite, redis, minio/storage, qdrant, mcp_hub).
 
 ### Connect an AI agent (both modes)
 

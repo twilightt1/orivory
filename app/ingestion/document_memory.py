@@ -64,7 +64,7 @@ class DocMemoryResult:
     doc_memory_id: str | None
     passage_memory_ids: list[str]
     # Ids of memories from a *prior* projection of this document that were
-    # deleted (re-ingest). Callers purge their stale vectors from Chroma.
+    # deleted (re-ingest). Callers purge their stale vectors from the index.
     removed_memory_ids: list[str] = field(default_factory=list)
 
     @property
@@ -231,7 +231,7 @@ def build_document_memories_sync(
 
     # Idempotency: replace this owner's prior projection. A delete intent per
     # removed row rides the caller's transaction, so the vectors cannot be
-    # stranded by a crash between the SQL commit and the Chroma purge.
+    # stranded by a crash between the SQL commit and the index purge.
     removed_ids: list[str] = []
     for mem in _projection_rows(db, document_id, user_id):
         enqueue_delete_sync(db, entity_id=str(mem.id), tenant_id=str(user_id), revision=mem.revision)

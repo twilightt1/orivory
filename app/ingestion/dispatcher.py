@@ -130,7 +130,7 @@ class SourceSyncService:
         """
         from app.retrieval.memory.write_back import (
             safe_enqueue_graph_build,
-            safe_upsert_to_chroma,
+            safe_upsert_to_index,
         )
 
         rows = (
@@ -142,7 +142,7 @@ class SourceSyncService:
             )
         ).scalars().all()
         for memory in rows:
-            if await safe_upsert_to_chroma(memory):
+            if await safe_upsert_to_index(memory):
                 # Indexed now: ack the intent this batch committed, so a boot
                 # drain does not re-embed it.
                 await mark_done(self.db, entity_id=memory.id, revision=memory.revision)

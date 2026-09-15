@@ -2,7 +2,7 @@
 
 One row per erasure call (MCP ``forget_memory`` or the REST erasure API).
 ``detail`` carries the per-target results: which rows/links/vectors were
-deleted and what the post-deletion verification pass (re-query Chroma +
+deleted and what the post-deletion verification pass (re-query Qdrant +
 residual DB row counts) found. Unlike the append-only access ledger,
 receipts carry a FK to ``users`` with CASCADE: they quote personal memory
 ids, so they must not outlive the user (open-memory-hub.md MVP item 5).

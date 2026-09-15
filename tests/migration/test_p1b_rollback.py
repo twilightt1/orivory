@@ -137,7 +137,7 @@ def env(tmp_path, monkeypatch, migrate_cli):
     monkeypatch.setattr(settings, "DATABASE_URL", f"sqlite+aiosqlite:///{db_path}")
     monkeypatch.setattr(settings, "APP_PORT", 1)
     monkeypatch.setattr(settings, "FS_STORAGE_PATH", str(uploads))
-    monkeypatch.setattr(settings, "CHROMA_LOCAL_PATH", str(tmp_path / "no-chroma"))
+    monkeypatch.setattr(settings, "LEGACY_CHROMA_PATH", str(tmp_path / "no-chroma"))
 
     engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
     event.listen(engine, "connect", database._configure_sqlite_connection)

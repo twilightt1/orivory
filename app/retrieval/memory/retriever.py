@@ -6,7 +6,7 @@ Pipeline (one call to :py:meth:`MemoryRetriever.recall`):
     1. Fetch personal context (pinned + last 7 days + last 20).
     2. LLM rewrite the query + extract entities (1 call; best-effort).
     3. Embed the rewritten query (1 call; falls back to original).
-    4. Vector search in ChromaDB (top_k * 3 for rerank headroom).
+    4. Vector search in Qdrant (top_k * 3 for rerank headroom).
     5. Hydrate the top candidates with full ``Memory`` rows from Postgres,
        including ``entity_links`` (so we can apply entity boost).
     6. Apply entity_boost + time_decay to each candidate.
@@ -297,8 +297,8 @@ class MemoryRetriever:
                 mid = cand["memory_id"]
                 memory = hydrated.get(mid)
                 if memory is None:
-                    # Memory was deleted from PG but still in Chroma.
-                    log.debug("Skipping stale Chroma candidate", extra={"memory_id": mid})
+                    # Memory was deleted from PG but still in the index.
+                    log.debug("Skipping stale vector candidate", extra={"memory_id": mid})
                     continue
 
                 mem_entity_names: set[str] = {

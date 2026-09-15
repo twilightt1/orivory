@@ -69,6 +69,19 @@ jobs:
           python -m pytest --confcutdir=tests/retrieval tests/retrieval/test_p1a_gate.py tests/retrieval/test_index_outbox.py tests/retrieval/test_visibility.py tests/retrieval/test_contract_errors.py -q
           python -m pytest --confcutdir=tests/services tests/services/test_durable_erasure.py -q
 
+      - name: Run P1b Qdrant + migration suites (temp SQLite, no services)
+        env:
+          # Lite semantics, same as the P1a gate step: every module here opens
+          # its own private SQLite file + private embedded-Qdrant folder, so no
+          # compose service is involved. tests/migration's rollback module
+          # self-skips on the missing chromadb (it runs from the isolated
+          # requirements-rollback.txt venv, not from CI's runtime env).
+          DATABASE_URL: sqlite+aiosqlite:////tmp/p1b_ci.db
+        run: |
+          python -m pytest --confcutdir=tests/retrieval tests/retrieval/test_qdrant_backend.py tests/retrieval/test_qdrant_parity.py tests/retrieval/test_chunk_index.py tests/retrieval/test_cls_cutover.py -q
+          python -m pytest --confcutdir=tests/lite tests/lite/test_readiness_lite.py -q
+          python -m pytest --confcutdir=tests/migration tests/migration -q
+
       - name: Run benchmark unit tests (DB-free)
         run: python -m pytest --confcutdir=tests/benchmarks tests/benchmarks -q
 
@@ -198,8 +211,7 @@ jobs:
       JWT_SECRET_KEY: test-secret-key-change-in-production
       STORAGE_BACKEND: fs
       FS_STORAGE_PATH: /tmp/orivory-ci-storage
-      CHROMA_HOST: localhost
-      CHROMA_PORT: "8001"
+      QDRANT_URL: http://localhost:6333
       OPENROUTER_API_KEY: test-openrouter-key
       OPENROUTER_BASE_URL: https://openrouter.ai/api/v1
       LLM_MODEL: openai/gpt-4o-mini
@@ -241,7 +253,7 @@ jobs:
         run: cp .env.test.example .env
 
       - name: Start live services
-        run: docker compose up -d postgres chromadb
+        run: docker compose up -d postgres qdrant
 
       - name: Wait for live services
         shell: bash
@@ -249,12 +261,12 @@ jobs:
           set -euo pipefail
           for i in {1..60}; do
             docker compose exec -T postgres pg_isready -U postgres -d ragdb \
-              && curl -fsS http://localhost:8001/api/v2/heartbeat >/dev/null \
+              && curl -fsS http://localhost:6333/readyz >/dev/null \
               && exit 0
             sleep 2
           done
           docker compose ps
-          docker compose logs postgres chromadb
+          docker compose logs postgres qdrant
           exit 1
 
       - name: Run migrations
@@ -282,8 +294,7 @@ jobs:
       JWT_SECRET_KEY: test-secret-key-change-in-production
       STORAGE_BACKEND: fs
       FS_STORAGE_PATH: /tmp/orivory-ci-storage
-      CHROMA_HOST: localhost
-      CHROMA_PORT: "8001"
+      QDRANT_URL: http://localhost:6333
       OPENROUTER_API_KEY: test-openrouter-key
       OPENROUTER_BASE_URL: https://openrouter.ai/api/v1
       LLM_MODEL: openai/gpt-4o-mini
@@ -325,8 +336,8 @@ jobs:
       - name: Prepare Docker Compose env
         run: cp .env.test.example .env
 
-      - name: Start all services
-        run: docker compose up -d
+      - name: Start services
+        run: docker compose up -d postgres qdrant
 
       - name: Wait for services to be healthy
         shell: bash
@@ -334,7 +345,7 @@ jobs:
           set -euo pipefail
           for i in {1..90}; do
             if docker compose exec -T postgres pg_isready -U postgres -d ragdb 2>/dev/null && \
-               curl -fsS http://localhost:8001/api/v2/heartbeat >/dev/null 2>&1; then
+               curl -fsS http://localhost:6333/readyz >/dev/null 2>&1; then
               echo "All services healthy!"
               exit 0
             fi
@@ -343,7 +354,7 @@ jobs:
           done
           echo "Service startup timeout"
           docker compose ps
-          docker compose logs postgres chromadb
+          docker compose logs postgres qdrant
           exit 1
 
       - name: Run smoke tests

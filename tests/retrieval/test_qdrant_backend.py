@@ -249,8 +249,8 @@ def test_mode_flip_in_lite(monkeypatch):
     monkeypatch.delenv("QDRANT_URL", raising=False)  # a dev shell's URL must not decide this
 
     # lite + no API key + a localhost URL -> embedded local Qdrant (the same
-    # flip rule CHROMA_MODE has had); anything that can reach a server stays
-    # "server".
+    # flip rule the retired Chroma mode had); anything that can reach a server
+    # stays "server".
     assert Settings(_env_file=None, LITE_MODE=True).QDRANT_MODE == "local"
     assert (
         Settings(_env_file=None, LITE_MODE=True, QDRANT_API_KEY="key").QDRANT_MODE

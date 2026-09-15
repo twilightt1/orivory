@@ -13,7 +13,7 @@ docker run -d --name orivory -p 8000:8000 -v orivory-data:/data \
 | What runs inside | What's replaced (vs full stack) |
 |---|---|
 | FastAPI API + MCP server (`/mcp`) | Postgres → **SQLite** (WAL, FK enforced) |
-| In-process ChromaDB (persistent, `/data/chroma`) | Redis → **in-memory** fallback (caches, rate limits) |
+| In-process Qdrant (persistent, `/data/qdrant`) | Redis → **in-memory** fallback (caches, rate limits) |
 | Background tasks run **eagerly** in-process | Celery workers/beat/flower → **not needed** |
 | Filesystem uploads (`/data/uploads`) | MinIO → **local FS** |
 
@@ -40,7 +40,7 @@ brain). Point Claude Desktop / Cursor / OpenClaw at
 
 ## Full stack still exists
 
-`docker compose up -d` (Postgres + Redis + ChromaDB + MinIO + workers + UI)
+`docker compose up -d` (Postgres + Qdrant behind the app)
 is unchanged and remains the path for teams and production. Lite and full
 share the same code paths — `LITE_MODE=1` only swaps the drivers.
 
@@ -50,7 +50,7 @@ share the same code paths — `LITE_MODE=1` only swaps the drivers.
 |---|---|---|
 | Database | Postgres (`postgresql+asyncpg://`) + Alembic | SQLite (`sqlite+aiosqlite://`) + `bootstrap_sqlite()` |
 | UUID columns | `GUID` type (coerces str→UUID, asyncpg-safe) | same |
-| Vectors | ChromaDB HTTP container | `chromadb.PersistentClient` in-process |
+| Vectors | Qdrant container (`QDRANT_URL`) | embedded Qdrant (`QDRANT_MODE=local`, `QDRANT_LOCAL_PATH`) |
 | Cache/rate-limit | Redis | `InMemoryRedis` (process-local) |
 | Tasks | Celery workers + beat | `task_always_eager=True` |
 | Uploads | MinIO | filesystem under `FS_STORAGE_PATH` |
@@ -65,4 +65,4 @@ Postgres-only. SQLite deployments bootstrap from model metadata
 
 E2E in the built container: register → verify → login → agent client
 registration → MCP `initialize` (200) → `add_memory` → `search_memory` —
-all green, `/ready` reports `sqlite/redis/storage/chroma/mcp_hub` all ok.
+all green, `/ready` reports `sqlite/redis/storage/qdrant/mcp_hub` all ok.

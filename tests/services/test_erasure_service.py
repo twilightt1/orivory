@@ -162,8 +162,8 @@ def no_chroma(monkeypatch):
     async def _no_residual(_ids):
         return set()
 
-    monkeypatch.setattr(erasure_service, "safe_delete_from_chroma", _fake_delete)
-    monkeypatch.setattr(erasure_service, "_chroma_present_ids", _no_residual)
+    monkeypatch.setattr(erasure_service, "safe_delete_from_index", _fake_delete)
+    monkeypatch.setattr(erasure_service, "_vector_present_ids", _no_residual)
     return deleted
 
 
@@ -236,7 +236,7 @@ async def test_erase_records_vector_residual(no_chroma, monkeypatch):
     async def _still_present(_ids):
         return {str(mid)}
 
-    monkeypatch.setattr(erasure_service, "_chroma_present_ids", _still_present)
+    monkeypatch.setattr(erasure_service, "_vector_present_ids", _still_present)
     receipt = await erase_memories(db, user_id, [mid], requested_by="rest_api")
 
     assert receipt.status == "completed_with_residual"
@@ -290,7 +290,7 @@ async def test_erase_survives_chroma_outage(no_chroma, monkeypatch):
     async def _chroma_down(_ids):
         raise ConnectionError("chroma down")
 
-    monkeypatch.setattr(erasure_service, "_chroma_present_ids", _chroma_down)
+    monkeypatch.setattr(erasure_service, "_vector_present_ids", _chroma_down)
     receipt = await erase_memories(db, user_id, [mid], requested_by="rest_api")
 
     # Spec §5.4 / P1 gate: an unknown residual check must not read as a plain
@@ -341,7 +341,7 @@ async def test_transitive_descendants_deleted_and_verified(no_chroma, monkeypatc
         verified_ids.append(list(_ids))
         return set()
 
-    monkeypatch.setattr(erasure_service, "_chroma_present_ids", _capture)
+    monkeypatch.setattr(erasure_service, "_vector_present_ids", _capture)
     receipt = await erase_memories(db, user_id, [mid], requested_by="rest_api")
 
     target = receipt.detail["targets"][0]

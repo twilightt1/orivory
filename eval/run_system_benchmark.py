@@ -7,7 +7,7 @@ answer comes from:
 
     baseline : model reads the ENTIRE haystack transcript
     system   : haystack is INGESTED into the Orivory memory hub (SQLite +
-               Chroma local mode), then each question is answered from what
+               Qdrant local mode), then each question is answered from what
                the stack RECALLS (MemoryRetriever: vector + salience +
                entity boosts + rerank), capped at RECALL_TOP_K memories.
 
@@ -17,7 +17,7 @@ ranking via the retriever). Nothing fabricated. This is the FIRST
 system-vs-baseline comparison — same seed, same judge, same n.
 
 Usage (from a checkout with .env, dataset under eval/benchmarks/data/):
-    LITE_MODE=1 CHROMA_MODE=local python3 eval/run_system_benchmark.py \
+    LITE_MODE=1 QDRANT_MODE=local python3 eval/run_system_benchmark.py \
         --n 20 [--seed 20260906] [--concurrency 4]
 """
 from __future__ import annotations
@@ -45,12 +45,12 @@ for line in ENV_FILE.open():
         key, _, value = line.partition("=")
         os.environ.setdefault(key.strip(), value.strip())
 
-# Lite-mode stack: SQLite + in-process Chroma (no external services).
+# Lite-mode stack: SQLite + in-process Qdrant (no external services).
 # NOTE: hard overrides, not setdefault — pydantic Settings reads .env
 # (which carries a postgres DATABASE_URL), and os.environ BEATS env_file,
 # so these must land in os.environ unconditionally.
 os.environ["LITE_MODE"] = "1"
-os.environ["CHROMA_MODE"] = "local"
+os.environ["QDRANT_MODE"] = "local"
 os.environ["JWT_SECRET_KEY"] = "benchmark-run-secret-key-not-for-prod"
 _RESULTS_DIR = ROOT / "eval/benchmarks/results"
 _RESULTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -61,9 +61,9 @@ os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{_RESULTS_DIR}/.system_run.db
 os.environ["OPENROUTER_API_KEY"] = os.environ.get("OPENROUTER_API_KEY") or os.environ.get("OPENAI_API_KEY", "")
 if os.environ.get("OPENAI_BASE_URL"):
     os.environ["OPENROUTER_BASE_URL"] = os.environ["OPENAI_BASE_URL"]
-# Chroma local path: default /data/chroma is a Docker volume; on a dev box
+# Qdrant local path: default /data/qdrant is a Docker volume; on a dev box
 # point it inside the results dir.
-os.environ["CHROMA_LOCAL_PATH"] = str(_RESULTS_DIR / "chroma")
+os.environ["QDRANT_LOCAL_PATH"] = str(_RESULTS_DIR / "qdrant")
 # Benchmark answers from top-15: the reranker's own top_n must not truncate
 # the pool below that (default JINA_RERANKER_TOP_N=5 is the API default).
 os.environ["JINA_RERANKER_TOP_N"] = "15"
@@ -143,7 +143,7 @@ def build_stack_metadata(
     }
     return {
         "database": "sqlite (lite mode)",
-        "vector_store": "chroma local (in-process)",
+        "vector_store": "qdrant local (in-process)",
         # Keep the legacy scalar key for existing result consumers.
         "embeddings": fingerprint["model_id"],
         "embeddings_actual": {
@@ -175,7 +175,7 @@ def build_stack_metadata(
             "cpu_count": os.cpu_count(),
             "packages": {
                 name: package_version(name)
-                for name in ("aiosqlite", "chromadb", "onnxruntime", "sqlalchemy", "tokenizers")
+                for name in ("aiosqlite", "qdrant_client", "onnxruntime", "sqlalchemy", "tokenizers")
             },
         },
         "rerank": {
@@ -357,7 +357,7 @@ async def ingest_instance(user_id, instance, run_dir: Path, session_level: bool 
     async with AsyncSessionLocal() as db:
         db.add_all(memories)
         await db.commit()
-    for memory in memories:  # real embed + chroma upsert (graph skipped: off)
+    for memory in memories:  # real embed + qdrant upsert (graph skipped: off)
         try:
             await index_new_memory(memory)
             created += 1
@@ -677,7 +677,7 @@ async def main_async(args) -> int:
         "chunking": "session_level" if args.session else "per_turn",
         "answer_mode": "single_pass",
         "note": (
-            "REAL dataset, REAL Orivory stack (SQLite + local Chroma + "
+            "REAL dataset, REAL Orivory stack (SQLite + local Qdrant + "
             f"{stack['embeddings']} embeddings + MemoryRetriever salience/rerank), "
             "REAL judge. Same seed and n as the committed full-context baseline. "
             "First system-vs-baseline comparison — small n, treat as directional."

@@ -9,5 +9,5 @@ services:
   postgres:
     ports: !override []
 
-  chromadb:
+  qdrant:
     ports: !override []

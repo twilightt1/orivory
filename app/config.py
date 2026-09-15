@@ -14,7 +14,7 @@ class Settings(BaseSettings):
 
     # ── Lite mode ──────────────────────────────────────────────────────────────
     # LITE_MODE=1 gives a zero-external-services deployment: SQLite storage,
-    # in-process Chroma, in-memory caches (no Redis), synchronous in-process
+    # in-process Qdrant, in-memory caches (no Redis), synchronous in-process
     # background work (no worker), filesystem uploads (no MinIO). Default
     # DATABASE_URL / REDIS_URL point at the lite defaults; full-stack compose
     # overrides them.
@@ -26,8 +26,8 @@ class Settings(BaseSettings):
 
     # The port the API listens on. `scripts/migrate_qdrant.py` probes it (plus
     # its `migrate.lock`) to refuse to run while the app is alive — the P1b
-    # migration needs a quiesced store (spec §6.2 step 2, ruling R25). Docs for
-    # the operator flow live with the T7 deployment work.
+    # migration needs a quiesced store (spec §6.2 step 2, ruling R25). The
+    # operator flow is documented in docs/OPERATIONS_RUNBOOK.md ("P1b cutover").
     APP_PORT: int = 8000
 
 
@@ -75,18 +75,12 @@ class Settings(BaseSettings):
     MINIO_SECURE: bool = False
 
 
-    CHROMA_HOST: str = "localhost"
-    CHROMA_PORT: int = 8001
-    # lite: "local" runs ChromaDB in-process (PersistentClient) against
-    # CHROMA_LOCAL_PATH — no chroma container needed.
-    CHROMA_MODE: str = "http"  # http | local
     LEDGER_RETENTION_DAYS: int = 90
     # Compression-before-storage (claude-mem adopt-learn): off by default —
     # opt-in per deployment; failures degrade to storing raw content.
     COMPRESSION_ENABLED: bool = False
     COMPRESSION_THRESHOLD_CHARS: int = 2000
     COMPRESSION_MODEL: str = "gpt-4o-mini"
-    CHROMA_LOCAL_PATH: str = "/data/chroma"
 
     # ── Qdrant vector backend ─────────────────────────────────────────────────
     # "local" runs Qdrant embedded in-process against QDRANT_LOCAL_PATH — one
@@ -96,6 +90,12 @@ class Settings(BaseSettings):
     QDRANT_API_KEY: str = ""
     QDRANT_MODE: str = "server"  # server | local
     QDRANT_LOCAL_PATH: str = "/data/qdrant"
+
+    # The RETIRED pre-P1b vector store's directory. Nothing in the app serves
+    # from it: only the P1b migration CLI (backup) and the one-release rollback
+    # tool read it. A deployment that never ran Chroma leaves it at the default
+    # and the backup simply reports it "missing".
+    LEGACY_CHROMA_PATH: str = "/data/chroma"
 
     # lite: "fs" stores uploads on the local filesystem instead of MinIO.
     STORAGE_BACKEND: str = "minio"  # minio | fs
@@ -225,9 +225,8 @@ class Settings(BaseSettings):
             if not self.JWT_SECRET_KEY:
                 import secrets
                 self.JWT_SECRET_KEY = secrets.token_urlsafe(48)
-            # In-process background work, local chroma, filesystem storage unless overridden.
-            if self.CHROMA_MODE == "http" and self.CHROMA_HOST == "localhost":
-                self.CHROMA_MODE = "local"
+            # In-process background work, embedded Qdrant, filesystem storage
+            # unless overridden.
             # Same flip for Qdrant: no API key + a localhost URL means there is
             # no server to talk to, so own a local folder instead.
             if (

@@ -21,8 +21,10 @@ binary's protocol, the third silently drops every write made after the backup.
 
 ## 1. Run the rebuild (isolated venv)
 
-`chromadb` is not a runtime dependency after P1b, so run the tool from its own
-venv — **never** install the pin into the runtime image:
+`chromadb` is not a runtime dependency after P1b (Task 7 removed it from
+`pyproject.toml` and `uv.lock`; `requirements-rollback.txt` is now its only
+pin), so run the tool from its own venv — **never** install the pin into the
+runtime image:
 
 ```bash
 python -m venv .venv-rollback
@@ -195,7 +197,10 @@ written to. Both rules are enforced before a byte is copied (default target:
 
 ## 5. Removal condition
 
-Delete this document, `scripts/rollback_to_chroma.py`,
-`requirements-rollback.txt` and `tests/migration/test_p1b_rollback.py` in the
-release after P1b (spec §12). From that point the only supported restore is
-`verify --restore-drill` plus a Qdrant snapshot restore.
+Keep this escape hatch for **exactly one release**. Delete this document,
+`scripts/rollback_to_chroma.py`, `requirements-rollback.txt` and
+`tests/migration/test_p1b_rollback.py` in the release after P1b (spec §12), and
+drop the retired store itself — the `LEGACY_CHROMA_PATH` directory
+(`Orivory_memories` + `rag_conv_*`) — once the window closes: nothing serves from
+it after `cutover`, so it is only disk at that point. From that release the only
+supported restore is `verify --restore-drill` plus a Qdrant snapshot restore.

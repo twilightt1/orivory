@@ -6,8 +6,8 @@ transitive closure collected BEFORE any delete (``parent_id`` BFS with a
 visited set and no silent depth cap, plus the derived-memory set; papers
 §3.2) → row deletes + one durable delete intent per affected id + a
 suppression row when a forgotten projection's source still exists, all in one
-commit → best-effort ``safe_delete_from_chroma`` per affected id → adversarial
-verification (papers §3.3): re-query Chroma + re-count residual DB rows.
+commit → best-effort ``safe_delete_from_index`` per affected id → adversarial
+verification (papers §3.3): re-query Qdrant + re-count residual DB rows.
 v0 verification = absence-checks of every derived artifact; KG re-inference
 probing is a tracked follow-up.
 
@@ -71,7 +71,7 @@ from app.retrieval.memory.outbox import (
     OPERATION_DELETE,
     enqueue_delete,
 )
-from app.retrieval.memory.write_back import safe_delete_from_chroma
+from app.retrieval.memory.write_back import safe_delete_from_index
 
 log = logging.getLogger(__name__)
 
@@ -111,11 +111,11 @@ class _DescendantTraversal:
     truncated: bool = False                                 # closure exceeded _MAX_CLOSURE_IDS
 
 
-async def _chroma_present_ids(memory_ids: list[str]) -> set[str]:
-    """Verification seam — re-query the Chroma collection for residual ids.
+async def _vector_present_ids(memory_ids: list[str]) -> set[str]:
+    """Verification seam — re-query the Qdrant collection for residual ids.
 
     Monkeypatched in tests; the vector-store helper is imported lazily so a
-    missing/failed Chroma import cannot break the DB erasure.
+    missing/failed vector-store import cannot break the DB erasure.
     """
     from app.retrieval.memory.vector_store import get_memory_ids_present
 
@@ -123,16 +123,16 @@ async def _chroma_present_ids(memory_ids: list[str]) -> set[str]:
 
 
 async def _verify_absent(memory_ids: list[uuid.UUID]) -> set[str] | None:
-    """Return ids still present in Chroma, or ``None`` when Chroma is down.
+    """Return ids still present in the index, or ``None`` when it is down.
 
     ``None`` = verification unknown — recorded as ``vector_state="unknown"``
     (or ``"pending"`` when a purge also failed); it is never reported as
     ``verified``. Postgres remains the source of truth.
     """
     try:
-        return await _chroma_present_ids([str(m) for m in memory_ids])
+        return await _vector_present_ids([str(m) for m in memory_ids])
     except Exception as exc:
-        log.warning("Chroma residual check failed: %s", exc, extra={"memory_ids": [str(m) for m in memory_ids]})
+        log.warning("Vector residual check failed: %s", exc, extra={"memory_ids": [str(m) for m in memory_ids]})
         return None
 
 
@@ -354,7 +354,7 @@ async def _erase_one(db: AsyncSession, user_id: uuid.UUID, memory_id: uuid.UUID)
     vectors_deleted: list[str] = []
     purge_failed = False
     for vid in affected:
-        if await safe_delete_from_chroma(vid) is not True:
+        if await safe_delete_from_index(vid) is not True:
             purge_failed = True
         vectors_deleted.append(str(vid))
 
@@ -438,7 +438,7 @@ async def erase_memories(
     elif vector_states - {VECTOR_STATE_VERIFIED}:
         # Spec §5.4 / P1 gate: `completed` is only stored after a POSITIVE
         # presence readback. A pending purge or an unknown verification
-        # (Chroma unreachable) reports `completed_unverified` instead.
+        # (vector store unreachable) reports `completed_unverified` instead.
         status = ERASURE_STATUS_UNVERIFIED
     else:
         status = ERASURE_STATUS_COMPLETED

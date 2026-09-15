@@ -111,7 +111,7 @@ async def env(tmp_path, monkeypatch, migrate_cli):
     # otherwise (a dev machine may well have something on the default 8000).
     monkeypatch.setattr(settings, "APP_PORT", 1)
     monkeypatch.setattr(settings, "FS_STORAGE_PATH", str(tmp_path / "uploads"))
-    monkeypatch.setattr(settings, "CHROMA_LOCAL_PATH", str(tmp_path / "no-chroma"))
+    monkeypatch.setattr(settings, "LEGACY_CHROMA_PATH", str(tmp_path / "no-chroma"))
 
     db_path = tmp_path / DB_NAME
     url = f"sqlite+aiosqlite:///{db_path}"
@@ -458,7 +458,7 @@ async def test_backup_treats_a_blank_source_path_as_absent(world, tmp_path, monk
     """
     cli = world.env.cli
     monkeypatch.setattr(settings, "FS_STORAGE_PATH", "   ")
-    monkeypatch.setattr(settings, "CHROMA_LOCAL_PATH", "")
+    monkeypatch.setattr(settings, "LEGACY_CHROMA_PATH", "")
 
     report = cli.backup(dest_dir=tmp_path / "backups")
 

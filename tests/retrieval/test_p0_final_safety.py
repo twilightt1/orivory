@@ -144,7 +144,7 @@ async def test_write_back_propagates_contract_failure(monkeypatch):
 
     monkeypatch.setattr("app.retrieval.memory.vector_store.upsert_memory", fail)
     with pytest.raises(EmbeddingDimensionMismatch, match="contract mismatch"):
-        await write_back.safe_upsert_to_chroma(SimpleNamespace(id=uuid4(), user_id=uuid4()))
+        await write_back.safe_upsert_to_index(SimpleNamespace(id=uuid4(), user_id=uuid4()))
 
 
 @pytest.mark.asyncio

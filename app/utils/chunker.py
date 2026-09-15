@@ -2,7 +2,7 @@
 Smart chunking — parent-child model.
 
 Parent (~1500 chars): stored in DB + Redis, returned to LLM as context.
-Child  (~300 chars) : indexed in ChromaDB for dense retrieval.
+Child  (~300 chars) : indexed in Qdrant for dense retrieval.
 Each child stores parent_id in metadata.
 
 Splitting strategy:
@@ -130,7 +130,7 @@ def build_parent_child_chunks(
     """
     Returns (parents, children).
     children[i].parent_id links back to a parent.
-    Only children are embedded in ChromaDB.
+    Only children are embedded in the vector store.
     Parents are stored in DB (document_chunks) and Redis for fast lookup.
     """
     parent_texts = _split_parents(text)

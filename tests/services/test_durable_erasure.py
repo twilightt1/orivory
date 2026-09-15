@@ -84,8 +84,8 @@ def no_chroma(monkeypatch):
     async def _absent(_memory_ids):
         return set()
 
-    monkeypatch.setattr(erasure_service, "safe_delete_from_chroma", _purge)
-    monkeypatch.setattr(erasure_service, "_chroma_present_ids", _absent)
+    monkeypatch.setattr(erasure_service, "safe_delete_from_index", _purge)
+    monkeypatch.setattr(erasure_service, "_vector_present_ids", _absent)
 
 
 @pytest.fixture()
@@ -97,8 +97,8 @@ def chroma_down(monkeypatch):
     async def _unreachable(_memory_ids):
         raise ConnectionError("chroma down")
 
-    monkeypatch.setattr(erasure_service, "safe_delete_from_chroma", _purge_fails)
-    monkeypatch.setattr(erasure_service, "_chroma_present_ids", _unreachable)
+    monkeypatch.setattr(erasure_service, "safe_delete_from_index", _purge_fails)
+    monkeypatch.setattr(erasure_service, "_vector_present_ids", _unreachable)
 
 
 # ── one closure transaction, delete intent per affected id ───────────────────
@@ -235,8 +235,8 @@ async def test_verify_unknown_is_not_reported_as_verified(db, monkeypatch):
     async def _unreachable(_memory_ids):
         raise ConnectionError("present-check down")
 
-    monkeypatch.setattr(erasure_service, "safe_delete_from_chroma", _purge_ok)
-    monkeypatch.setattr(erasure_service, "_chroma_present_ids", _unreachable)
+    monkeypatch.setattr(erasure_service, "safe_delete_from_index", _purge_ok)
+    monkeypatch.setattr(erasure_service, "_vector_present_ids", _unreachable)
 
     uid = await _owner(db)
     mem = _memory(uid)

@@ -694,7 +694,10 @@ def _backup_sources() -> dict[str, Path]:
     """
     configured = {
         "uploads": settings.FS_STORAGE_PATH,
-        "chroma": getattr(settings, "CHROMA_LOCAL_PATH", ""),
+        # The RETIRED pre-P1b store (T7 renamed the setting): the app never
+        # serves from it any more, but a cutover still backs it up and the
+        # one-release rollback tool rebuilds from this directory.
+        "chroma": settings.LEGACY_CHROMA_PATH,
     }
     sources: dict[str, Path] = {}
     for label, value in configured.items():

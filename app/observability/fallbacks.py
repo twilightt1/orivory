@@ -11,7 +11,7 @@ fallback_counts() in a shell, or grep the "Fallback activated" debug logs.
 A multi-process deployment should aggregate the debug logs centrally.
 
 Canonical path names (keep stable; dashboards alert on them):
-  retrieval.vector_unavailable   Chroma down, BM25-only answers
+  retrieval.vector_unavailable   vector store down, BM25-only answers
   retrieval.rerank_failed        Jina/reranker error, vector order kept
   retrieval.bm25_rebuild_failed  BM25 lazy rebuild failed, stale index used
   crag.grading_failed            Doc grading error, defaulted IRRELEVANT

@@ -17,7 +17,7 @@ mở rộng 4 entrypoint trên.
 This directory contains evaluation tooling for the Orivory RAG demo.
 
 - **Offline mode** is deterministic and CI-safe. It uses `sample_docs/` directly
-  and does not require the API server, database, ChromaDB, Redis, MinIO, or LLM
+  and does not require the API server, database, Qdrant, Redis, MinIO, or LLM
   keys.
 - **Live API mode** is opt-in. It exercises the running backend API, document
   upload/ingestion, SSE chat streaming, returned sources, and agent trace data.
@@ -100,7 +100,7 @@ If a threshold is not met, the command exits non-zero.
 
 Live mode requires the full application path to be running:
 
-1. Postgres, Redis, ChromaDB, and MinIO
+1. Postgres, Redis, Qdrant, and MinIO
 2. database migrations
 3. FastAPI server
 4. Celery ingestion worker

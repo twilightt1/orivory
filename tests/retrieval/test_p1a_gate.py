@@ -363,8 +363,8 @@ async def test_erasure_chroma_outage_then_retry_then_verified(db, owner, monkeyp
     async def present_check_down(_memory_ids):
         raise ConnectionError("chroma down")
 
-    monkeypatch.setattr(erasure_service, "safe_delete_from_chroma", purge_down)
-    monkeypatch.setattr(erasure_service, "_chroma_present_ids", present_check_down)
+    monkeypatch.setattr(erasure_service, "safe_delete_from_index", purge_down)
+    monkeypatch.setattr(erasure_service, "_vector_present_ids", present_check_down)
 
     memory = _memory(owner, "forget me")
     db.add(memory)
@@ -388,8 +388,8 @@ async def test_erasure_chroma_outage_then_retry_then_verified(db, owner, monkeyp
     async def present_check_up(_memory_ids):
         return set()
 
-    monkeypatch.setattr(erasure_service, "safe_delete_from_chroma", purge_up)
-    monkeypatch.setattr(erasure_service, "_chroma_present_ids", present_check_up)
+    monkeypatch.setattr(erasure_service, "safe_delete_from_index", purge_up)
+    monkeypatch.setattr(erasure_service, "_vector_present_ids", present_check_up)
 
     store.docs[str(memory.id)] = ("forget me", 1)  # the vector the outage left behind
     report = await outbox.drain_pending()
@@ -426,8 +426,8 @@ async def test_erasure_closure_depth_and_cycle_vectors_all_drained(db, owner, mo
     async def present_check_up(_memory_ids):
         return set()
 
-    monkeypatch.setattr(erasure_service, "safe_delete_from_chroma", purge_up)
-    monkeypatch.setattr(erasure_service, "_chroma_present_ids", present_check_up)
+    monkeypatch.setattr(erasure_service, "safe_delete_from_index", purge_up)
+    monkeypatch.setattr(erasure_service, "_vector_present_ids", present_check_up)
 
     root = _memory(owner, "root")
     chain = [_memory(owner, f"c{i}") for i in range(5)]
@@ -480,7 +480,7 @@ async def test_revision_monotonic_across_create_update_correct(db, owner, monkey
     async def chroma_down(_memory):
         return False  # the fast path stays out of the way: the drain does the work
 
-    monkeypatch.setattr(memories_api, "safe_upsert_to_chroma", chroma_down)
+    monkeypatch.setattr(memories_api, "safe_upsert_to_index", chroma_down)
 
     created = await resolve_correction(db, user_id=owner, title="DB", content="Postgres",
                                        slot=Slot.of("proj", "db", "prod"))

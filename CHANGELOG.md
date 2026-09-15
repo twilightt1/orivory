@@ -44,7 +44,23 @@ project adheres to [Semantic Versioning](https://semver.org/).
   (ONNX MiniLM, no key/no cost), `RETRIEVAL_SEMANTIC_RERANK=false`
   (opt-in khi eval chứng minh cần).
 
+### Changed
+- **P1b: vector store Chroma → Qdrant** — readiness key `chroma` → `qdrant`
+  (server probe `GET {QDRANT_URL}/readyz`; lite probe mở đúng owner client
+  embedded, không dựng client thứ hai), compose service `qdrant/qdrant`
+  (volume `qdrantdata`, healthcheck `/readyz`, giữ `depends_on`), lite image
+  `QDRANT_MODE=local` + `QDRANT_LOCAL_PATH=/data/qdrant`, CI chờ `/readyz`,
+  eval harness metadata `qdrant local (in-process)` + probe `qdrant_client`.
+  Runbook cutover (stop app → inventory/backup/backfill/verify/cutover → start
+  app; ngưỡng đo ≈65k row/60' @1000 ký tự) ở `docs/OPERATIONS_RUNBOOK.md`;
+  đường lùi một release ở `docs/ROLLBACK_P1B.md`.
+
 ### Removed
+- **`chromadb` khỏi runtime (P1b)** — bỏ khỏi `pyproject.toml`,
+  `requirements.txt` và `uv.lock` (uv lock gỡ 33 package transitive, trong đó
+  `kubernetes`); `Dockerfile.lite` bỏ luôn `pip uninstall kubernetes` (R36:
+  qdrant-client không kéo dep tương đương). Rollback tool một release chạy
+  venv riêng từ `requirements-rollback.txt` — giờ là chỗ pin chromadb duy nhất.
 - **`frontend/`** — Next.js app khỏi tree + compose + CI (Lite không
   ship nó; agent là UI).
 - **LangGraph agents** — 16 agent files khỏi `app/agents/` (giữ

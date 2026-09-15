@@ -100,7 +100,7 @@ saved messages.
 conversation-scoped query cache lookup
 → API-process BM25 lazy rebuild if needed
 → BM25 parent search
-→ multi-query ChromaDB child vector search
+→ multi-query Qdrant child vector search
 → Reciprocal Rank Fusion
 → parent expansion from Redis or PostgreSQL fallback
 → Jina reranking

@@ -1,11 +1,10 @@
-# Shared runtime env for backend services (postgres + chromadb behind app).
-# LITE: compose targets the slim core — postgres + chroma + app only.
+# Shared runtime env for backend services (postgres + qdrant behind app).
+# LITE: compose targets the slim core — postgres + qdrant + app only.
 # Celery/Redis/MinIO/Flower/worker/beat were dropped (slim branch): lite
 # runs tasks eagerly in-process, storage on fs, embeddings local.
 x-backend-env: &backend-env
   DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-password}@postgres:5432/${POSTGRES_DB:-orivory}
-  CHROMA_HOST: chromadb
-  CHROMA_PORT: "8000"
+  QDRANT_URL: http://qdrant:6333
 
 services:
   # One-shot schema migration — runs before app so `docker compose up`
@@ -32,7 +31,7 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      chromadb:
+      qdrant:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
@@ -66,16 +65,21 @@ services:
       start_period: 10s
     restart: unless-stopped
 
-  chromadb:
-    image: chromadb/chroma:latest
+  qdrant:
+    image: qdrant/qdrant
     volumes:
-      - chromadata:/chroma/chroma
+      - qdrantdata:/qdrant/storage
     ports:
-      - "8001:8000"
-    environment:
-      - IS_PERSISTENT=TRUE
+      - "6333:6333"
     healthcheck:
-      test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/8000'"]
+      # /readyz is Qdrant's own readiness gate (200 only when shards are up).
+      # The image ships bash but no curl/wget, hence the /dev/tcp probe; the
+      # probe is proven against qdrant/qdrant (bash 5, HTTP 200 -> exit 0,
+      # unknown path -> exit 1).
+      test:
+        - CMD-SHELL
+        - >-
+          bash -c 'exec 3<>/dev/tcp/127.0.0.1/6333; printf "GET /readyz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n" >&3; grep -q "200 OK" <&3'
       interval: 10s
       timeout: 5s
       retries: 8
@@ -84,4 +88,4 @@ services:
 
 volumes:
   pgdata:
-  chromadata:
+  qdrantdata:

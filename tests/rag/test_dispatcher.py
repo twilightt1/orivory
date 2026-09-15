@@ -148,7 +148,7 @@ async def test_index_attempt_is_scoped_to_the_source_owner(db, source, monkeypat
         upserted.append(str(memory.id))
         return True
 
-    monkeypatch.setattr(write_back, "safe_upsert_to_chroma", fake_upsert)
+    monkeypatch.setattr(write_back, "safe_upsert_to_index", fake_upsert)
     monkeypatch.setattr(write_back, "safe_enqueue_graph_build", lambda _memory_id: None)
 
     svc = SourceSyncService(db)

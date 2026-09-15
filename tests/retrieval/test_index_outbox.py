@@ -740,7 +740,7 @@ async def test_update_memory_bumps_revision_and_enqueues(db, owner, monkeypatch)
     async def upsert_ok(_memory):
         return True
 
-    monkeypatch.setattr(memories_api, "safe_upsert_to_chroma", upsert_ok)
+    monkeypatch.setattr(memories_api, "safe_upsert_to_index", upsert_ok)
 
     memory = _memory(owner, content="v1")
     db.add(memory)
@@ -766,7 +766,7 @@ async def test_noop_patch_never_claims_a_pending_intent(db, owner, monkeypatch):
     async def upsert_down(_memory):
         return False
 
-    monkeypatch.setattr(memories_api, "safe_upsert_to_chroma", upsert_down)
+    monkeypatch.setattr(memories_api, "safe_upsert_to_index", upsert_down)
 
     memory = _memory(owner, content="v1")
     db.add(memory)
@@ -785,7 +785,7 @@ async def test_noop_patch_never_claims_a_pending_intent(db, owner, monkeypatch):
     async def upsert_ok(_memory):
         return True
 
-    monkeypatch.setattr(memories_api, "safe_upsert_to_chroma", upsert_ok)
+    monkeypatch.setattr(memories_api, "safe_upsert_to_index", upsert_ok)
     again = await memories_api.update_memory(
         memory.id, MemoryUpdate(), SimpleNamespace(id=owner), db
     )

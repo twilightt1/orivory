@@ -55,7 +55,7 @@ OAuth values as needed.
 ### 2. Start infrastructure
 
 ```powershell
-docker compose up -d postgres redis chromadb minio flower migrate
+docker compose up -d postgres qdrant migrate
 ```
 
 The one-shot `migrate` service runs `alembic upgrade head` before the app
@@ -113,7 +113,7 @@ Open Swagger UI at <http://localhost:8000/docs>.
 curl http://localhost:8000/health
 ```
 
-`/ready` checks Postgres, Redis, MinIO, and ChromaDB:
+`/ready` checks Postgres, Redis, MinIO, and Qdrant:
 
 ```powershell
 curl http://localhost:8000/ready
@@ -129,7 +129,7 @@ Expected healthy response:
     "postgres": {"status": "ok", "latency_ms": 10.2},
     "redis": {"status": "ok", "latency_ms": 2.1},
     "minio": {"status": "ok", "latency_ms": 15.4},
-    "chroma": {"status": "ok", "latency_ms": 8.7}
+    "qdrant": {"status": "ok", "latency_ms": 8.7}
   }
 }
 ```
@@ -181,16 +181,16 @@ Run the deterministic RAG evaluation report:
 Reports are written to [latest_report.md](../eval/results/latest_report.md) and [latest_report.json](../eval/results/latest_report.json).
 
 These tests use mocks/monkeypatching and do not need Postgres, Redis, MinIO,
-ChromaDB, or external LLM/API credentials.
+Qdrant, or external LLM/API credentials.
 
 ### Live integration tests
 
-Live tests exercise real Postgres, Redis, ChromaDB, and MinIO services. They are
+Live tests exercise real Postgres, Redis, Qdrant, and MinIO services. They are
 marked `requires_infra` and skipped unless `RUN_LIVE_INTEGRATION=1` is set.
 
 ```powershell
 copy .env.test.example .env.test
-docker compose up -d postgres redis chromadb minio
+docker compose up -d postgres qdrant
 $env:RUN_LIVE_INTEGRATION="1"
 .\.venv\Scripts\python.exe -m pytest --confcutdir=tests/integration tests/integration -q
 ```
@@ -282,20 +282,20 @@ make security-check
 
 ## 🛠️ Troubleshooting
 
-### ChromaDB connection refused
+### Qdrant connection refused
 
 Symptom:
 
 ```text
-Could not connect to a Chroma server. Are you sure it is running?
+qdrant_client.http.exceptions.ResponseHandlingException: Connection refused
 ```
 
 Fix:
 
 ```powershell
-docker compose up -d chromadb
-docker compose logs chromadb --tail=100
-curl http://localhost:8001/api/v2/heartbeat
+docker compose up -d qdrant
+docker compose logs qdrant --tail=100
+curl http://localhost:6333/readyz
 curl http://localhost:8000/ready
 ```
 
@@ -304,10 +304,11 @@ curl http://localhost:8000/ready
 > collisions with a developer's local Postgres on `5432`. Container-to-container
 > traffic still uses `postgres:5432`.
 
-If you run Chroma manually instead of Docker:
+If you run Qdrant manually instead of Docker (lite mode runs it embedded —
+no server at all):
 
 ```powershell
-chroma run --host 127.0.0.1 --port 8001 --path ./chromadata
+docker run -p 6333:6333 -v ${PWD}/qdrantdata:/qdrant/storage qdrant/qdrant
 ```
 
 ### Redis is unavailable
@@ -366,4 +367,4 @@ curl http://localhost:8000/ready
 3. Retry ingestion through the admin retry endpoint or re-upload the document.
 
 The ingestion task now records a clearer `Document.error_msg`, including the
-failing stage such as `chroma_upsert`, `minio_read`, or `redis_parent_cache`.
+failing stage such as `minio_read`, `redis_parent_cache`, or the vector upsert.
