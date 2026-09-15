@@ -20,8 +20,10 @@ log = logging.getLogger(__name__)
 
 IS_SQLITE = settings.DATABASE_URL.startswith("sqlite")
 # v1 = the pre-versioning schema, v2 = revisions + outbox/generation tables,
-# v3 = the P1b generation rows (a DATA step: no DDL, no new tables/columns).
-SQLITE_SCHEMA_VERSION = 3
+# v3 = the P1b generation rows (a DATA step: no DDL, no new tables/columns),
+# v4 = the P2 FTS5 memory index + its triggers (DDL: a virtual table, which can
+# never come from model metadata — the ladder creates it with exec_driver_sql).
+SQLITE_SCHEMA_VERSION = 4
 
 # Objects added by the v1 -> v2 ladder; excluded from the v1 shape check.
 V2_TABLES = ("index_outbox", "index_generations", "memory_suppressions")
@@ -265,6 +267,27 @@ def _upgrade_v2_to_v3(sync_conn, *, activate: bool) -> None:
     activate_generations(sync_conn, activate=activate)
 
 
+def _upgrade_v3_to_v4(sync_conn) -> None:
+    """v3 -> v4: the FTS5 memory index and its triggers (ruling R18(p2)).
+
+    Runs ONCE, on the version transition, and on a fresh install too (which has
+    nothing to back up). FTS DDL cannot come from model metadata — there is no
+    ORM model for a virtual table and no Alembic step for it: SQLite-only DDL
+    belongs in the ladder. The step creates the index and BACKFILLS it from
+    ``memories`` in the same transaction as the stamp, so the index is complete
+    the moment a v4 install can serve; a crash mid-step leaves v3 stamped and
+    the step re-runs (its DDL is IF NOT EXISTS, its backfill is coverage-driven).
+
+    A later boot never re-runs it: a restart must not silently rebuild an index
+    an operator repaired (or mask the drift ``rebuild`` reports).
+    """
+    from app.retrieval.memory import lexical_index
+
+    lexical_index.create_index(sync_conn)
+    report = lexical_index.rebuild(sync_conn)
+    log.info("SQLite schema v4: FTS5 memory index ready", extra=report)
+
+
 def _conn_sqlite_path(conn) -> str:
     """File path of the SQLite database behind an engine/connection."""
     path = conn.engine.url.database
@@ -281,13 +304,17 @@ def upgrade_sqlite_schema(conn) -> None:
     (``scripts/migrate_qdrant.py``) both call it, so the CLI can never upgrade a
     database differently from the app it will serve.
 
-    Full-stack (Postgres) deployments use Alembic migrations instead. SQLite
-    deployments are created fresh from the model metadata; an existing install
-    goes through ``user_version``: an unversioned v1-shape schema is adopted and
-    upgraded v1 -> v2 (backup before DDL, foreign-key + integrity checks after),
-    then v2 -> v3 (the P1b generation-rows data step, which runs ONCE — the CLI's
-    ``cutover`` owns every later pointer move). Divergence fails closed —
-    ``create_all`` is never used as an existing-schema migration mechanism.
+    Full-stack (Postgres) deployments use Alembic migrations instead — and get
+    no FTS: the lexical leg is SQLite-only and reports itself unavailable there
+    (ruling R3(p2), no Alembic step). SQLite deployments are created fresh from
+    the model metadata; an existing install goes through ``user_version``: an
+    unversioned v1-shape schema is adopted and upgraded v1 -> v2 (backup before
+    DDL, foreign-key + integrity checks after), then v2 -> v3 (the P1b
+    generation-rows data step, which runs ONCE — the CLI's ``cutover`` owns
+    every later pointer move), then v3 -> v4 (the P2 FTS5 memory index + its
+    triggers, also ONCE — a restart never rebuilds an index an operator
+    repaired). Divergence fails closed — ``create_all`` is never used as an
+    existing-schema migration mechanism.
     """
     from app import models  # noqa: F401 — register every model on Base
 
@@ -295,7 +322,7 @@ def upgrade_sqlite_schema(conn) -> None:
     version = int(conn.execute(text("PRAGMA user_version")).scalar_one())
     tables = set(sa_inspect(conn).get_table_names())
     fresh_install = version == 0 and not tables
-    if version not in (0, 1, 2, SQLITE_SCHEMA_VERSION):
+    if version not in (0, 1, 2, 3, SQLITE_SCHEMA_VERSION):
         raise RuntimeError(
             f"unsupported SQLite schema version {version}; expected {SQLITE_SCHEMA_VERSION}"
         )
@@ -330,6 +357,15 @@ def upgrade_sqlite_schema(conn) -> None:
         # A later boot (already v3) never re-asserts the pointer (that would
         # undo a rollback) and never re-mutates the manifest.
         _upgrade_v2_to_v3(conn, activate=fresh_install)
+    if version in (0, 1, 2, 3):
+        # P2 milestone backup (R18): its OWN name, taken where the ladder stands
+        # now (v3, pre-FTS) — nothing to inherit from the P1b file, so no
+        # rename. A fresh install has nothing to back up.
+        if tables:
+            _backup_before_ddl(path, suffix="pre-p2")
+        # The v3 -> v4 DDL step, ONCE, on the transition; a fresh install runs
+        # it too, so every v4 install serves a lexical leg.
+        _upgrade_v3_to_v4(conn)
     conn.execute(text(f"PRAGMA user_version = {SQLITE_SCHEMA_VERSION}"))
     integrity = conn.exec_driver_sql("PRAGMA integrity_check").fetchone()
     if integrity is None or integrity[0] != "ok":

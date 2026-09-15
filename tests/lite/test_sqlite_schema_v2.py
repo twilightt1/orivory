@@ -130,7 +130,7 @@ async def test_v1_install_is_upgraded_to_v2_and_backed_up(v1_db):
         fk_violations = (await conn.execute(text("PRAGMA foreign_key_check"))).all()
         integrity = (await conn.execute(text("PRAGMA integrity_check"))).scalar_one()
 
-    assert version == 3
+    assert version == 4
     assert V2_TABLES <= tables
     assert [tuple(row) for row in memories] == [("v1 memory text", 1)]  # existing rows: revision 1
     assert [tuple(row) for row in chunks] == [("v1 chunk text", 1)]
@@ -182,7 +182,7 @@ async def test_unversioned_v1_shape_is_adopted_then_upgraded(tmp_path, monkeypat
         async with eng.connect() as conn:
             version, tables = await _schema(conn)
             memories = (await conn.execute(text("SELECT content, revision FROM memories"))).all()
-        assert version == 3
+        assert version == 4
         assert V2_TABLES <= tables
         assert [tuple(row) for row in memories] == [("v1 memory text", 1)]
         assert list(Path(tmp_path).glob("*.pre-p1b.bak"))
@@ -241,7 +241,7 @@ async def test_bootstrap_is_idempotent_and_writes_the_two_real_generation_rows(t
             version, tables = await _schema(conn)
             generations = (await conn.execute(text(
                 "SELECT kind, generation, fingerprint, is_active FROM index_generations"))).all()
-        assert version == database.SQLITE_SCHEMA_VERSION == 3
+        assert version == database.SQLITE_SCHEMA_VERSION == 4
         assert V2_TABLES <= tables
         assert {(r[0], r[1]) for r in generations} == {
             ("memory", generation_name("memory")), ("chunk", generation_name("chunk"))}
@@ -308,7 +308,7 @@ async def test_interrupted_upgrade_resumes_and_keeps_the_existing_backup(v1_db):
     async with eng.connect() as conn:
         version, tables = await _schema(conn)
     milestone = tmp_path / "v1.sqlite.pre-p1b.bak"
-    assert version == 3
+    assert version == 4
     assert V2_TABLES <= tables
     assert list(Path(tmp_path).glob("*.pre-p1b.bak")) == [milestone], (
         "the interrupted run's backup must be reused, not replaced"

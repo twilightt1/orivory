@@ -8,5 +8,6 @@ Public surface:
     - ``vector_store`` : Qdrant ops (the active memory generation)
     - ``query_rewriter``: LLM-based query rewrite + entity extraction
     - ``context``      : personal context (recent + pinned memories)
+    - ``lexical_index``: the SQLite FTS5 lexical leg (SQLite only — ruling R3)
     - ``retriever``    : orchestrator that combines all the above
 """
