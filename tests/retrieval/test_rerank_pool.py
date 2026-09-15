@@ -1,0 +1,491 @@
+"""Rerank contract (P2/T2): explicit pool, merge (never shrink), bounded refill, typed failures.
+
+Pins the four rulings:
+
+- R4(p2): the dense fetch is ``max(top_k, ceil(top_k * RETRIEVAL_RERANK_POOL_MULTIPLIER))``
+  (default 2.0) and the per-call ``top_n`` is the REQUEST's own top_k;
+  ``JINA_RERANKER_TOP_N`` is only the transport CAP over it.
+- R10(p2): rerank SUCCESS merges (``ranked + remainder``, deduped by memory id) —
+  ``len(results) == min(top_k, eligible)`` and the count never depends on the
+  reranker. RED before this task: success REPLACED the pool with Jina's rows,
+  so ``top_k=10`` under the default cap returned 5.
+- R11(p2): ``RerankUnavailable`` (transport/status/timeout) and
+  ``RerankInvalidResponse`` (unusable body) both degrade to dense order with
+  ``retrieval.rerank_failed`` counted and ``stage_ms["rerank"]`` written; a
+  malformed ROW is skipped, never fatal.
+- R12(p2): at most ONE refill search (hard cap ``top_k * 4``), only when
+  filtering left fewer than top_k AND the first fetch filled its whole pool;
+  the trace records it.
+
+Zero is data: a ``0.0`` relevance_score stays a score (read by key presence,
+never truthiness) — the already-correct behaviour stays pinned.
+"""
+from __future__ import annotations
+
+import math
+import uuid
+from datetime import UTC, datetime, timedelta
+from unittest.mock import AsyncMock
+
+import httpx
+import pytest
+
+from app.config import settings
+from app.observability.fallbacks import fallback_counts, reset_fallback_counts
+from app.retrieval import reranker as reranker_module
+from app.retrieval.memory import retriever as rmod
+from app.retrieval.memory.retriever import MemoryRetriever
+from app.retrieval.reranker import RerankInvalidResponse, RerankUnavailable
+
+# ── fakes ───────────────────────────────────────────────────────────────────
+
+
+def _mem(uid, *, content="c", days_old=1, dirty=False, superseded=False):
+    from app.models.memory import Memory
+
+    meta: dict = {}
+    if superseded:
+        meta["cm_superseded_by"] = str(uuid.uuid4())
+    if dirty:
+        meta["cm_derived_from"] = [str(uuid.uuid4())]
+        meta["cm_derived_dirty"] = True
+    return Memory(
+        id=uuid.uuid4(),
+        user_id=uid,
+        title=content[:40],
+        content=content,
+        tags=[],
+        salience=0.5,
+        pinned=False,
+        source_type="manual_note",
+        recall_count=0,
+        captured_at=datetime.now(UTC) - timedelta(days=days_old),
+        indexed_at=datetime.now(UTC),
+        updated_at=datetime.now(UTC),
+        extra_metadata=meta,
+    )
+
+
+class _FakeResult:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def scalars(self):
+        return self
+
+    def all(self):
+        return self._rows
+
+
+class _FakeDB:
+    """The REAL ``_hydrate`` runs against this: the statement is ignored and every
+    row is returned, so a candidate id that is NOT among ``rows`` is exactly the
+    "still in the index, gone from SQL" case the eligibility filter drops."""
+
+    def __init__(self, rows):
+        self.rows = list(rows)
+
+    async def execute(self, _statement):
+        return _FakeResult(self.rows)
+
+
+class _Store:
+    """A dense store: real slicing, real order, every limit recorded."""
+
+    def __init__(self, rows):  # [(memory_id, score)], best first
+        self.rows = list(rows)
+        self.calls: list[int] = []
+
+    async def __call__(self, _embedding, *, user_id, top_k=10, where=None):
+        self.calls.append(top_k)
+        return [
+            {"memory_id": str(memory_id), "content": "vector copy", "score": score}
+            for memory_id, score in self.rows[:top_k]
+        ]
+
+
+def _cap_rerank(seen_top_n=None, seen_chunks=None):
+    """The transport's own shape: at most ``min(top_n, JINA_RERANKER_TOP_N)``
+    rows come back, best first — never the whole pool."""
+
+    async def _rerank(_query, chunks, *, top_n=None):
+        if seen_top_n is not None:
+            seen_top_n.append(top_n)
+        if seen_chunks is not None:
+            seen_chunks.extend(chunks)
+        cap = settings.JINA_RERANKER_TOP_N if top_n is None else int(top_n)
+        cap = min(cap, settings.JINA_RERANKER_TOP_N)
+        return [
+            dict(chunk, rerank_score=1.0 - index / 100.0)
+            for index, chunk in enumerate(chunks[:cap])
+        ]
+
+    return _rerank
+
+
+@pytest.fixture()
+def recall_env(monkeypatch, barrier_outbox):
+    """The recall path with every out-of-process seam faked except the reranker
+    (each test wires its own; ``barrier_outbox`` gives the freshness barrier its
+    real outbox — see tests/retrieval/conftest.py)."""
+    uid = uuid.uuid4()
+
+    async def _rewrite(query, context=None):
+        return {
+            "rewritten_query": query,
+            "entities": [],
+            "reasoning": None,
+            "_fallback_used": False,
+        }
+
+    async def _embed(_query):
+        return [0.1, 0.2]
+
+    monkeypatch.setattr(rmod, "rewrite_query", _rewrite)
+    monkeypatch.setattr(rmod, "embed_query", _embed)
+    monkeypatch.setattr(rmod, "fetch_personal_context", AsyncMock(return_value=[]))
+    return uid
+
+
+# ── R10/R4: count invariant over top_k x pool shape ─────────────────────────
+
+
+@pytest.mark.parametrize("top_k", [1, 5, 10, 15])
+@pytest.mark.parametrize("shape", ["sufficient", "stale_heavy", "empty"])
+async def test_returned_count_is_min_top_k_eligible_never_the_rerankers(
+    recall_env, monkeypatch, top_k, shape
+):
+    """R10/R4. Sufficient pool: the reranker returns at most the CAP (5 by
+    default) yet the caller asked for top_k — the merge is what makes the count
+    independent of it."""
+    uid = recall_env
+    monkeypatch.setattr(settings, "JINA_RERANKER_TOP_N", 5)  # the shipped cap
+
+    clean = [_mem(uid, content=f"clean{i}") for i in range(40)]
+    stale = [_mem(uid, content=f"dirty{i}", dirty=True) for i in range(16)]
+    superseded = [_mem(uid, content=f"old{i}", superseded=True) for i in range(8)]
+    gone = [uuid.uuid4() for _ in range(8)]  # in the index, no SQL row
+
+    if shape == "sufficient":
+        page = clean
+    elif shape == "stale_heavy":
+        page = [*stale, *clean]  # the first fetch page is mostly stale
+    else:
+        page = []
+    rows = [(m.id, 0.90 - i / 1000) for i, m in enumerate(page)]
+    memory_rows = [*clean, *stale, *superseded]
+    acceptable = {str(m.id) for m in clean} if shape != "empty" else set()
+
+    store = _Store(rows)
+    monkeypatch.setattr(rmod, "search_memories", store)
+    monkeypatch.setattr(reranker_module, "rerank", _cap_rerank())
+
+    retriever = MemoryRetriever(_FakeDB(memory_rows), uid, semantic_rerank=True)
+    response = await retriever.recall("backpack", top_k=top_k, include_personal_context=False)
+
+    fetched = rows[: store.calls[-1]]
+    eligible = sum(1 for memory_id, _score in fetched if str(memory_id) in acceptable)
+    assert len(response.results) == min(top_k, eligible)
+    assert response.trace.num_results == len(response.results)
+    assert {str(result.id) for result in response.results} <= acceptable
+    assert not (set(str(g) for g in gone) & {str(result.id) for result in response.results})
+
+
+async def test_pool_comes_from_the_settings_multiplier_and_top_n_from_the_request(
+    recall_env, monkeypatch
+):
+    """R4: ``ceil(top_k * RETRIEVAL_RERANK_POOL_MULTIPLIER)`` (signed default
+    2.0) replaces the old hardcoded factor 3; the reranker is asked for the
+    REQUEST's top_k, capped by the deployment setting."""
+    uid = recall_env
+    memories = [_mem(uid, content=f"m{i}") for i in range(50)]
+    store = _Store([(m.id, 0.9 - i / 1000) for i, m in enumerate(memories)])
+    seen_top_n: list = []
+    monkeypatch.setattr(rmod, "search_memories", store)
+    monkeypatch.setattr(reranker_module, "rerank", _cap_rerank(seen_top_n))
+
+    retriever = MemoryRetriever(_FakeDB(memories), uid, semantic_rerank=True)
+    await retriever.recall("backpack", top_k=10, include_personal_context=False)
+    assert settings.RETRIEVAL_RERANK_POOL_MULTIPLIER == 2.0  # signed default
+    assert store.calls == [math.ceil(10 * 2.0)]  # 20 — not top_k * 3
+    assert seen_top_n == [10]  # the request's top_k, not the global cap
+
+    # The setting is read at construction (the `semantic_rerank` seam): a new
+    # retriever picks the new value up, an existing one keeps its own.
+    monkeypatch.setattr(settings, "RETRIEVAL_RERANK_POOL_MULTIPLIER", 3.0)
+    store.calls.clear()
+    retriever = MemoryRetriever(_FakeDB(memories), uid, semantic_rerank=True)
+    await retriever.recall("backpack", top_k=4, include_personal_context=False)
+    assert store.calls == [math.ceil(4 * 3.0)]  # the setting drives the pool
+
+    store.calls.clear()
+    retriever = MemoryRetriever(_FakeDB(memories), uid, semantic_rerank=True,
+                                pool_multiplier=1.5)
+    await retriever.recall("backpack", top_k=4, include_personal_context=False)
+    assert store.calls == [6]  # the ctor seam wins over the setting
+
+    monkeypatch.setattr(settings, "RETRIEVAL_RERANK_POOL_MULTIPLIER", 0.1)
+    store.calls.clear()
+    retriever = MemoryRetriever(_FakeDB(memories), uid, semantic_rerank=True)
+    await retriever.recall("backpack", top_k=10, include_personal_context=False)
+    assert store.calls == [10]  # a multiplier below 1 must not under-fetch top_k
+
+
+async def test_empty_pool_is_an_empty_result_and_no_rerank_call(recall_env, monkeypatch):
+    uid = recall_env
+    store = _Store([])
+    seen_top_n: list = []
+    monkeypatch.setattr(rmod, "search_memories", store)
+    monkeypatch.setattr(reranker_module, "rerank", _cap_rerank(seen_top_n))
+
+    retriever = MemoryRetriever(_FakeDB([]), uid, semantic_rerank=True)
+    response = await retriever.recall("backpack", top_k=10, include_personal_context=False)
+    assert response.results == [] and response.trace.num_results == 0
+    assert seen_top_n == []  # nothing to rerank — no transport call
+
+
+# ── R10: merge keeps dense rows in dense order ──────────────────────────────
+
+
+async def test_rerank_success_keeps_the_unranked_remainder_in_dense_order(
+    recall_env, monkeypatch
+):
+    """The reranked head decides the top of the answer; the rows the reranker
+    did not return keep their dense order behind it (they are still scored)."""
+    uid = recall_env
+    monkeypatch.setattr(settings, "JINA_RERANKER_TOP_N", 2)
+    memories = [_mem(uid, content=f"m{i}") for i in range(6)]
+    store = _Store([(m.id, 0.9 - i / 100) for i, m in enumerate(memories)])
+    monkeypatch.setattr(rmod, "search_memories", store)
+
+    async def _rerank(_query, chunks, *, top_n=None):
+        # The cross-encoder promotes the LAST dense row, and answers with one
+        # row only — the classic "fewer rows than it was handed" success.
+        promoted = dict(chunks[-1], rerank_score=0.99)
+        return [promoted]
+
+    monkeypatch.setattr(reranker_module, "rerank", _rerank)
+    retriever = MemoryRetriever(_FakeDB(memories), uid, semantic_rerank=True)
+    response = await retriever.recall("backpack", top_k=6, include_personal_context=False)
+
+    ids = [str(result.id) for result in response.results]
+    assert len(ids) == 6  # every eligible row survives the merge
+    assert ids[0] == str(memories[-1].id)  # rerank's order wins at the top
+    # No row is duplicated by the merge (ranked + remainder, deduped by id).
+    assert len(set(ids)) == 6
+
+
+async def test_zero_rerank_score_is_data_not_absence(recall_env, monkeypatch):
+    """A ``0.0`` relevance is a real score: read by key presence, never
+    truthiness — otherwise the dense score would silently replace it."""
+    uid = recall_env
+    zero = _mem(uid, content="zero relevance")
+    other = _mem(uid, content="positive relevance")
+    store = _Store([(zero.id, 0.99), (other.id, 0.10)])
+    monkeypatch.setattr(rmod, "search_memories", store)
+
+    async def _rerank(_query, chunks, *, top_n=None):
+        graded = []
+        for chunk in chunks:
+            stamped = dict(chunk)
+            stamped["rerank_score"] = 0.0 if chunk["memory_id"] == str(zero.id) else 0.7
+            graded.append(stamped)
+        return graded
+
+    monkeypatch.setattr(reranker_module, "rerank", _rerank)
+    retriever = MemoryRetriever(_FakeDB([zero, other]), uid, semantic_rerank=True)
+    response = await retriever.recall("backpack", top_k=2, include_personal_context=False)
+
+    by_id = {str(result.id): result for result in response.results}
+    assert by_id[str(zero.id)].match_reasons[0] == "rerank:0.00"
+    assert by_id[str(other.id)].match_reasons[0] == "rerank:0.70"
+
+
+# ── R12: bounded refill ─────────────────────────────────────────────────────
+
+
+async def test_one_bounded_refill_when_filtering_empties_a_full_pool(recall_env, monkeypatch):
+    """First fetch fills the pool (20 of 20) and filtering leaves 4 < top_k:
+    exactly ONE extra search at the ``top_k * 4`` cap, and the trace says so."""
+    uid = recall_env
+    good = [_mem(uid, content=f"good{i}") for i in range(4)]
+    stale = [_mem(uid, content=f"dirty{i}", dirty=True) for i in range(16)]
+    later_good = [_mem(uid, content=f"later{i}") for i in range(20)]
+    later_stale = [_mem(uid, content=f"later-dirty{i}", dirty=True) for i in range(6)]
+    page = [*good, *stale, *later_good, *later_stale]
+    rows = [(m.id, 0.9 - i / 1000) for i, m in enumerate(page)]
+
+    store = _Store(rows)
+    monkeypatch.setattr(rmod, "search_memories", store)
+    monkeypatch.setattr(reranker_module, "rerank", _cap_rerank())
+
+    retriever = MemoryRetriever(_FakeDB(page), uid, semantic_rerank=True)
+    response = await retriever.recall("backpack", top_k=10, include_personal_context=False)
+
+    assert store.calls == [20, 40], "one refill, at the top_k * 4 hard cap"
+    assert "refill" in response.trace.stage_ms
+    assert response.trace.stage_ms["refill"] > 0.0
+    ids = {str(result.id) for result in response.results}
+    assert len(ids) == 10
+    # The refill page is filtered and SQL-authorized exactly like the first:
+    # its stale rows are dropped, its good rows are served.
+    assert ids <= {str(m.id) for m in [*good, *later_good]}
+    assert ids & {str(m.id) for m in later_good}
+
+
+async def test_no_refill_when_the_store_was_already_exhausted(recall_env, monkeypatch):
+    """The first fetch returned FEWER rows than the pool: the store has nothing
+    more, so a larger limit would only repeat the same page."""
+    uid = recall_env
+    memories = [_mem(uid, content=f"m{i}") for i in range(6)]
+    store = _Store([(m.id, 0.9 - i / 100) for i, m in enumerate(memories)])
+    monkeypatch.setattr(rmod, "search_memories", store)
+    monkeypatch.setattr(reranker_module, "rerank", _cap_rerank())
+
+    retriever = MemoryRetriever(_FakeDB(memories), uid, semantic_rerank=True)
+    response = await retriever.recall("backpack", top_k=10, include_personal_context=False)
+
+    assert store.calls == [20], "no second search — the page was short"
+    assert "refill" not in response.trace.stage_ms
+    assert len(response.results) == 6 == min(10, 6)
+
+
+# ── R11: typed failures, dense fallback, counted ────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        RerankUnavailable("connect timeout"),
+        RerankInvalidResponse("results is not a list"),
+        RuntimeError("something nobody typed"),
+    ],
+)
+async def test_rerank_failure_degrades_to_dense_order_and_is_counted(
+    recall_env, monkeypatch, failure
+):
+    """Every failure shape — typed or not — leaves dense order in place, with
+    the already-registered fallback counted and the duration recorded."""
+    uid = recall_env
+    memories = [_mem(uid, content=f"m{i}") for i in range(12)]
+    store = _Store([(m.id, 0.9 - i / 100) for i, m in enumerate(memories)])
+    monkeypatch.setattr(rmod, "search_memories", store)
+
+    async def _boom(_query, chunks, *, top_n=None):
+        raise failure
+
+    monkeypatch.setattr(reranker_module, "rerank", _boom)
+    reset_fallback_counts()
+
+    retriever = MemoryRetriever(_FakeDB(memories), uid, semantic_rerank=True)
+    response = await retriever.recall("backpack", top_k=10, include_personal_context=False)
+
+    assert [str(result.id) for result in response.results] == [
+        str(m.id) for m in memories[:10]
+    ], "vector order continues on a reranker failure"
+    assert fallback_counts()["retrieval.rerank_failed"] == 1
+    assert response.trace.stage_ms["rerank"] > 0.0  # recorded in `finally`
+
+
+# ── R11: the transport's own classification ─────────────────────────────────
+
+
+def _client(handler: httpx.MockTransport) -> httpx.AsyncClient:
+    return httpx.AsyncClient(transport=handler)
+
+
+_DOCS = [
+    {"memory_id": "a", "content": "doc a"},
+    {"memory_id": "b", "content": "doc b"},
+    {"memory_id": "c", "content": "doc c"},
+]
+
+
+async def test_transport_errors_are_rerank_unavailable(monkeypatch):
+    def handler(_request):
+        raise httpx.ConnectTimeout("took too long")
+
+    monkeypatch.setattr(
+        reranker_module, "get_jina_client", lambda: _client(httpx.MockTransport(handler))
+    )
+    with pytest.raises(RerankUnavailable):
+        await reranker_module.rerank("q", _DOCS, top_n=3)
+
+
+async def test_non_2xx_status_is_rerank_unavailable_not_a_partial_pool(monkeypatch):
+    def handler(_request):
+        return httpx.Response(503, json={"detail": "service unavailable"})
+
+    monkeypatch.setattr(
+        reranker_module, "get_jina_client", lambda: _client(httpx.MockTransport(handler))
+    )
+    with pytest.raises(RerankUnavailable):
+        await reranker_module.rerank("q", _DOCS, top_n=3)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"content": b"<html>gateway error</html>", "headers": {"content-type": "text/html"}},
+        {"json": {"results": "not-a-list"}},
+        {"json": {}},
+    ],
+)
+async def test_unusable_bodies_are_rerank_invalid_response(monkeypatch, body):
+    def handler(_request):
+        return httpx.Response(200, **body)
+
+    monkeypatch.setattr(
+        reranker_module, "get_jina_client", lambda: _client(httpx.MockTransport(handler))
+    )
+    with pytest.raises(RerankInvalidResponse):
+        await reranker_module.rerank("q", _DOCS, top_n=3)
+
+
+async def test_malformed_rows_are_skipped_never_fatal(monkeypatch):
+    """One bad row must not throw the whole pool away — including the index
+    that is out of range, which used to raise IndexError inside the loop."""
+    def handler(_request):
+        return httpx.Response(
+            200,
+            json={
+                "results": [
+                    {"index": 0, "relevance_score": 0.4},
+                    {"index": 99, "relevance_score": 0.9},  # out of range
+                    {"index": 1},  # no relevance_score
+                    "not-a-row",  # not a dict
+                    {"index": True, "relevance_score": 1.0},  # bool is not an index
+                    {"index": 2, "relevance_score": 0.0},  # a REAL zero
+                ]
+            },
+        )
+
+    monkeypatch.setattr(
+        reranker_module, "get_jina_client", lambda: _client(httpx.MockTransport(handler))
+    )
+    ranked = await reranker_module.rerank("q", _DOCS, top_n=3)
+    assert [(row["memory_id"], row["rerank_score"]) for row in ranked] == [
+        ("a", 0.4),
+        ("c", 0.0),
+    ]
+
+
+async def test_top_n_is_per_call_and_the_setting_only_caps_it(monkeypatch):
+    sent: list[int] = []
+
+    def handler(request):
+        import json
+
+        sent.append(json.loads(request.content)["top_n"])
+        return httpx.Response(200, json={"results": []})
+
+    monkeypatch.setattr(
+        reranker_module, "get_jina_client", lambda: _client(httpx.MockTransport(handler))
+    )
+    monkeypatch.setattr(settings, "JINA_RERANKER_TOP_N", 7)
+    documents = [{"memory_id": str(i), "content": f"c{i}"} for i in range(12)]
+
+    await reranker_module.rerank("q", documents, top_n=10)  # capped by the setting
+    await reranker_module.rerank("q", documents, top_n=3)  # the request may be smaller
+    await reranker_module.rerank("q", documents)  # no per-call value → the cap
+    assert sent == [7, 3, 7]

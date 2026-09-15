@@ -177,7 +177,22 @@ class Settings(BaseSettings):
     # before salience/decay modifiers. Off by default — per-deployment.
     RETRIEVAL_SEMANTIC_RERANK: bool = False
     JINA_RERANKER_MODEL: str = "jina-reranker-v2-base-multilingual"
+    # Per-call CAPS on the reranker's own answer, never the rerank window: the
+    # per-call `top_n` is the request's own top_k clamped to this value
+    # (ruling R4(p2)). The returned result count does NOT depend on it — a
+    # rerank that answers with fewer rows than it was handed is merged back
+    # into dense order (`retriever.recall`), so raising it only widens the
+    # reranked HEAD of a large top_k.
     JINA_RERANKER_TOP_N: int = 5
+    # Rerank pool: dense candidates fetched per requested result (ruling
+    # R4(p2), signed default 2.0). One pool feeds the eligibility filter, the
+    # reranker and scoring; a pool smaller than top_k cannot satisfy the count
+    # invariant, so the effective fetch is `max(top_k, ceil(top_k * this))`.
+    RETRIEVAL_RERANK_POOL_MULTIPLIER: float = 2.0
+    # Bound on ONE rerank HTTP call (ruling R11(p2)): a hung transport must not
+    # hold the recall path for the client's own 30 s default. Overrunning it is
+    # a `RerankUnavailable` — dense order continues, counted.
+    JINA_RERANKER_TIMEOUT_SECONDS: float = 10.0
     # ── Embedding backend support matrix (frozen v1.1.0) ──
     #   jina  (USE_JINA_EMBEDDINGS=true + JINA_API_KEY): SUPPORTED default
     #           for full-stack. Matches the frozen benchmark baseline.

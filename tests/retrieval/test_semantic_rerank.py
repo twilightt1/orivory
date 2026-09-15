@@ -106,7 +106,7 @@ async def test_rerank_reorders_before_top_k(recall_env, monkeypatch):
         ),
     )
 
-    async def _rerank(query, chunks):
+    async def _rerank(query, chunks, *, top_n=None):
         # cross-encoder judgment: the backpack chunk is the relevant one —
         # and it stamps rerank_score, which the scorer uses as semantic base
         for c in chunks:
@@ -152,7 +152,7 @@ async def test_rerank_failure_falls_back(recall_env, monkeypatch):
         _fake_vector_search([_candidate(m1.id, 0.7), _candidate(m2.id, 0.6)]),
     )
 
-    async def _boom(query, chunks):
+    async def _boom(query, chunks, *, top_n=None):
         raise RuntimeError("jina down")
 
     retr = MemoryRetriever(_FakeDB([m1, m2]), uid, semantic_rerank=True)

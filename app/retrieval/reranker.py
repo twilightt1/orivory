@@ -8,6 +8,20 @@ log = logging.getLogger(__name__)
 JINA_URL = "https://api.jina.ai/v1/rerank"
 
 
+class RerankUnavailable(RuntimeError):
+    """Transport failure: connect/read error, timeout, or a non-2xx status.
+
+    Retryable and never fatal — the caller falls back to dense order and
+    counts ``retrieval.rerank_failed`` (ruling R11(p2)).
+    """
+
+
+class RerankInvalidResponse(RuntimeError):
+    """A 2xx whose body is not a usable rerank response (no ``results`` list,
+    or no usable row in it). Per-ROW damage is skipped, never typed: one bad
+    ``index``/``relevance_score`` must not throw the whole pool away."""
+
+
 _client: httpx.AsyncClient | None = None
 
 def get_jina_client() -> httpx.AsyncClient:
@@ -16,34 +30,84 @@ def get_jina_client() -> httpx.AsyncClient:
         _client = httpx.AsyncClient(timeout=30.0)
     return _client
 
-async def rerank(query: str, chunks: list[dict]) -> list[dict]:
+async def rerank(query: str, chunks: list[dict], *, top_n: int | None = None) -> list[dict]:
+    """Score ``chunks`` against ``query`` and return the best rows, best first.
+
+    ``top_n`` is PER CALL — the request's own top_k — and the deployment's
+    ``JINA_RERANKER_TOP_N`` only CAPS it (ruling R4(p2); the global is no
+    longer the value). Fewer rows may come back than were handed in: the
+    caller merges the rest back in dense order, so the served result count
+    never depends on this transport.
+
+    Raises :class:`RerankUnavailable` (transport/status/timeout — bounded by
+    ``JINA_RERANKER_TIMEOUT_SECONDS``) or :class:`RerankInvalidResponse`
+    (unusable body). A malformed ROW is skipped instead of killing the pool
+    (ruling R11(p2) — one bad ``index`` used to raise and drop every row).
+    """
     if not chunks:
         return []
 
+    limit = settings.JINA_RERANKER_TOP_N
+    if top_n is not None:
+        limit = min(int(top_n), limit)
+
     client = get_jina_client()
-    resp = await client.post(
-        JINA_URL,
-        json={
-            "model":     settings.JINA_RERANKER_MODEL,
-            "query":     query,
-            "documents": [c["content"] for c in chunks],
-            "top_n":     settings.JINA_RERANKER_TOP_N,
-        },
-        headers={
-            "Authorization": f"Bearer {settings.JINA_API_KEY}",
-            "Content-Type":  "application/json",
-        },
-    )
-    resp.raise_for_status()
-    data = resp.json()
+    try:
+        resp = await client.post(
+            JINA_URL,
+            json={
+                "model":     settings.JINA_RERANKER_MODEL,
+                "query":     query,
+                "documents": [c["content"] for c in chunks],
+                "top_n":     limit,
+            },
+            headers={
+                "Authorization": f"Bearer {settings.JINA_API_KEY}",
+                "Content-Type":  "application/json",
+            },
+            timeout=settings.JINA_RERANKER_TIMEOUT_SECONDS,
+        )
+        resp.raise_for_status()
+    except httpx.HTTPError as e:
+        # HTTPStatusError is a sibling of TransportError under HTTPError, and
+        # TimeoutException is under TransportError: one clause types them all.
+        raise RerankUnavailable(
+            f"Jina rerank transport error: {type(e).__name__}: {e}"
+        ) from e
+
+    try:
+        data = resp.json()
+    except ValueError as e:
+        raise RerankInvalidResponse(f"Jina rerank returned non-JSON: {e}") from e
+    rows = data.get("results") if isinstance(data, dict) else None
+    if not isinstance(rows, list):
+        raise RerankInvalidResponse("Jina rerank response has no usable 'results' list")
 
     reranked = []
-    for item in data.get("results", []):
-        original = chunks[item["index"]].copy()
-        original["rerank_score"] = item["relevance_score"]
+    for item in rows:
+        if not isinstance(item, dict):
+            continue
+        index, score = item.get("index"), item.get("relevance_score")
+        if not isinstance(index, int) or isinstance(index, bool) or not 0 <= index < len(chunks):
+            log.warning("Skipping rerank row with an unusable index", extra={"index": index})
+            continue
+        try:
+            score = float(score)
+        except (TypeError, ValueError):
+            log.warning("Skipping rerank row without a numeric score", extra={"index": index})
+            continue
+        original = chunks[index].copy()
+        # A 0.0 relevance IS a score: consumers read it by key presence
+        # (retriever.py), never by truthiness.
+        original["rerank_score"] = score
         reranked.append(original)
 
-    reranked.sort(key=lambda x: x["rerank_score"], reverse=True)
-    log.info("Reranked", extra={"in": len(chunks), "out": len(reranked)})
-    return reranked
+    if rows and not reranked:
+        # Not one usable row out of a non-empty answer: the transport answered,
+        # but with nothing the caller can rank on — that is an invalid response,
+        # not an empty rerank (which would silently keep dense order uncounted).
+        raise RerankInvalidResponse(f"Jina rerank: all {len(rows)} rows were unusable")
 
+    reranked.sort(key=lambda x: x["rerank_score"], reverse=True)
+    log.info("Reranked", extra={"in": len(chunks), "out": len(reranked), "top_n": limit})
+    return reranked

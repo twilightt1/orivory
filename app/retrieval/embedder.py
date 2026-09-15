@@ -22,6 +22,11 @@ log = logging.getLogger(__name__)
 # the loop's default pool, so the parallel embeds stay accountable against
 # ORT's own thread count. The `*_sync` faces do NOT come through here: their
 # callers are already off-loop (celery/CLI/ingestion threads).
+#
+# Cancellation cannot reach inside a worker: cancelling a task parked on
+# `run_in_executor` (the barrier's timeout) frees the caller immediately, but
+# the ONNX call keeps its slot until it returns (~0.6 s for a 50-doc batch) —
+# so after a barrier timeout one of the two workers stays busy a little longer.
 _EMBED_EXECUTOR = ThreadPoolExecutor(
     max_workers=max(1, settings.EMBED_EXECUTOR_WORKERS),
     thread_name_prefix="orivory-embed",

@@ -292,7 +292,7 @@ async def test_remote_rerank_sees_only_current_sql_owned_content(monkeypatch, ba
             },
         ]
 
-    async def rerank(_query, chunks):
+    async def rerank(_query, chunks, *, top_n=None):
         seen_chunks.extend(chunks)
         return chunks
 
