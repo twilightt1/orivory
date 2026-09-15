@@ -76,8 +76,8 @@ from app.main import app
 from app.models.erasure_receipt import ErasureReceipt
 from app.models.index_outbox import IndexOutbox
 from app.models.memory import Memory
+from app.retrieval import e5_local, vector_backend
 from app.retrieval import reranker as reranker_module
-from app.retrieval import vector_backend
 from app.retrieval.embedder import embed_query as real_embed_query
 from app.retrieval.embedder import warmup_embedder
 from app.retrieval.embedding_fingerprint import generation_name
@@ -85,7 +85,7 @@ from app.retrieval.memory import drain_loop, freshness, outbox, vector_store
 from app.retrieval.memory import retriever as retriever_module
 from app.retrieval.memory.outbox import IndexFreshnessTimeout
 from app.retrieval.memory.retriever import MemoryRetriever
-from app.schemas.Orivory import MemoryUpdate
+from app.schemas.Orivory import RECALL_TRACE_STAGE_KEYS, MemoryUpdate
 from app.services.erasure_service import erase_memories, reconcile_erasure_receipts
 from app.utils.dependencies import enforce_llm_quota, get_current_verified_user
 from tests.retrieval.test_drain_loop import _until
@@ -847,6 +847,13 @@ def test_the_runbook_states_the_multi_process_limit_truthfully():
 # §12.2 (user-signed 2026-09-15): "recall p95 ≤ 150 ms at fixture scale".
 # The p50 budget is the guard band: a fixture or a path that drifted shows
 # here long before it breaks the signed p95.
+#
+# Read the band honestly (F3): 60 ms sits just ABOVE the known
+# `EMBED_ORT_INTRA_OP_THREADS=1` regression (reviewer-measured ~53 ms p50
+# here vs 12.6 ms at the default), so it does NOT cover that knob — a pinned
+# intra-op=1 lands ~7 ms under the guard. What bites there is the C1 pin
+# (`tests/retrieval/test_event_loop_responsiveness.py` §3): the recall-alone
+# 50-intent drain blows the signed 2.0 s budget by mechanism (3.07 s).
 LATENCY_P50_MS = 60.0
 LATENCY_P95_MS = 150.0
 LATENCY_ITERATIONS = 30
@@ -860,6 +867,10 @@ async def _stub_rewrite(query, context=None, **_kwargs):
             "_fallback_used": False}
 
 
+@pytest.mark.skipif(
+    not e5_local.arctic_files_cached(),
+    reason="arctic onnx cache missing — run local, do not download in CI",
+)
 async def test_the_signed_recall_latency_budget_holds_on_the_frozen_fixture(live, monkeypatch):
     """The signed budget, asserted on the REAL recall path — warm, ≥30 runs.
 
@@ -876,6 +887,10 @@ async def test_the_signed_recall_latency_budget_holds_on_the_frozen_fixture(live
     Three rows are seeded before measuring: the cutover fixture leaves alice
     exactly ONE eligible memory point, and the rerank leg (it needs >1
     candidate) is part of the path the budget covers.
+
+    It needs the cached arctic artifacts, so it carries the house guard
+    (R15): with a warm cache the signed assertion runs; on a cold cache it
+    skips cleanly instead of making CI download ~90 MB of ONNX.
     """
     for index in range(3):
         created = await _create_memory(live.alice.id, f"latency fixture row {index}")
@@ -925,6 +940,11 @@ async def test_the_signed_recall_latency_budget_holds_on_the_frozen_fixture(live
     assert response.trace.counts == {
         "dense": 4, "eligible": 4, "reranked": 4, "hydrated": 4, "returned": 4,
     }
+    # F5: the declaration is a contract in BOTH directions — this run may only
+    # write `stage_ms` keys `RECALL_TRACE_STAGE_KEYS` declares (the C2 test in
+    # test_rerank_pool.py pins the set a fresh trace is BUILT with; this pins
+    # what the real path actually WRITES, so an undeclared extra cannot leak).
+    assert set(response.trace.stage_ms) <= set(RECALL_TRACE_STAGE_KEYS)
     assert len(response.results) == 4
 
 

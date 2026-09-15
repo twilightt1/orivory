@@ -50,8 +50,17 @@ from app.retrieval import e5_local, vector_backend
 from app.retrieval.embedder import warmup_embedder
 from app.retrieval.embedding_fingerprint import generation_name
 from app.retrieval.memory import freshness, outbox
+
+# Hoisted on purpose (R6/F6 determinism): the legs used to import these INSIDE
+# the measured window, where a first-touch import chain reads as a loop stall
+# (measured on a loaded host: one 85.73 ms max tick, p50 0.52/p99 1.39 ms — a
+# spike, not an embed). Importing at collection pre-pays that cost, so the
+# ticker's MAX reflects loop stalls only.
+from app.retrieval.memory import retriever as retriever_module
 from app.retrieval.memory.outbox import IndexFreshnessTimeout
+from app.retrieval.memory.retriever import MemoryRetriever
 from app.retrieval.memory.write_back import index_new_memory
+from app.services.document_service import upload_document
 from tests.retrieval.test_p1b_gate import _bind_engines, _memory, _user
 
 # Ruling R6(p2): the contract, not a suggestion. A flake is fixed by making the
@@ -230,8 +239,6 @@ def _stub_out_of_process(monkeypatch) -> None:
 
 async def _upload(store) -> Document:
     """The REAL upload endpoint's service call: ingest a document, in-band."""
-    from app.services.document_service import upload_document
-
     async with store.sessions() as db:
         conversation = Conversation(id=uuid.uuid4(), user_id=store.owner, document_count=0)
         db.add(conversation)
@@ -244,9 +251,6 @@ async def _recall(store):
 
     Only the LLM query rewrite (an out-of-process call) is stubbed.
     """
-    from app.retrieval.memory import retriever as retriever_module
-    from app.retrieval.memory.retriever import MemoryRetriever
-
     async def _rewrite(query, context=None, **_kwargs):
         return {"rewritten_query": query, "entities": [], "reasoning": None,
                 "_fallback_used": False}
@@ -371,6 +375,10 @@ async def test_the_barrier_wait_for_bounds_an_offloaded_drain(store, monkeypatch
 # ── 3. the signed RYW budget at the recall-ALONE shape (T1 review F1 → C1) ──
 
 
+@pytest.mark.skipif(
+    not e5_local.arctic_files_cached(),
+    reason="arctic onnx cache missing — run local, do not download in CI",
+)
 async def test_a_50_intent_backlog_drains_inside_the_signed_read_your_writes_budget(store):
     """C1/F1: recall ALONE drains the default 50-intent backlog inside 2.0 s.
 
@@ -380,6 +388,9 @@ async def test_a_50_intent_backlog_drains_inside_the_signed_read_your_writes_bud
     because the drain embeds all 50 documents on the request path (that is
     what makes this number a real one). The concurrent three-leg shape above
     keeps its own, test-local budget; this is the release contract.
+
+    Guarded like the gate's latency test (R15): the drain needs the cached
+    arctic artifacts, so a cold cache SKIPS instead of downloading in CI.
     """
     assert settings.RECALL_FRESHNESS_BUDGET_SECONDS == 2.0  # the signed budget
     await warmup_embedder()
