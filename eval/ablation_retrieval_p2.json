@@ -67,11 +67,98 @@
       "vi_diacritics": 1.0,
       "vi_no_diacritics": 1.0
     },
-    "query_token_coverage_note": "fraction of a query's literal tokens that MATCH its gold row in the REAL FTS5 index (MATCH, one token at a time). FTS5 joins adjacent phrases with implicit AND, so a coverage below 1.0 means the lexical leg returns nothing for that query at all."
+    "query_token_coverage_note": "fraction of a query's literal tokens that MATCH its gold row in the REAL FTS5 index (MATCH, one token at a time). FTS5 joins adjacent phrases with implicit AND, so a coverage below 1.0 means the lexical leg returns nothing for that query at all.",
+    "lexical_match_counts_per_slice": {
+      "en": {
+        "queries": 8,
+        "returning_exactly_one_row": 8,
+        "rows_returned": [
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1
+        ]
+      },
+      "exact_id": {
+        "queries": 8,
+        "returning_exactly_one_row": 4,
+        "rows_returned": [
+          2,
+          2,
+          1,
+          1,
+          2,
+          1,
+          1,
+          2
+        ]
+      },
+      "long_query": {
+        "queries": 8,
+        "returning_exactly_one_row": 6,
+        "rows_returned": [
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          0,
+          0
+        ]
+      },
+      "short_query": {
+        "queries": 8,
+        "returning_exactly_one_row": 8,
+        "rows_returned": [
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1
+        ]
+      },
+      "vi_diacritics": {
+        "queries": 8,
+        "returning_exactly_one_row": 8,
+        "rows_returned": [
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1
+        ]
+      },
+      "vi_no_diacritics": {
+        "queries": 8,
+        "returning_exactly_one_row": 8,
+        "rows_returned": [
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1
+        ]
+      }
+    },
+    "lexical_match_counts_note": "rows the REAL FTS5 lexical leg returns per query (limit = corpus size, tenant + visibility filtered), in fixture query order. A query answered with exactly one row — its own gold — leaves the lexical leg no room to rank a WRONG row above a dense gold: that is the structural ceiling this artifact's PASS rests on. The multi-row cases are the distractors that deliberately carry a gold's identifier; the zero-row cases are the long-query prose rows (implicit-AND coverage < 1)."
   },
   "substitutions": {
     "embedding": "REAL local arctic-embed-xs ONNX (384-dim, cached); no paid API",
-    "dense_store": "exact cosine top-k in numpy over those vectors (Qdrant HNSW approximates it)",
+    "dense_store": "exact cosine top-k in numpy over those vectors (Qdrant HNSW approximates it) — an OPTIMISTIC dense baseline: exact top-k recall >= the ANN top-k it stands in for, so dense_only's numbers are a BEST CASE and the measured +0.1042 overall gain is conservative. The substitution is one of convenience at this scale, not an offline casualty — Qdrant runs embedded in this repo (lite mode); the only offline-unreachable seam here is Jina.",
     "lexical": "REAL SQLite FTS5 (T4 DDL + triggers, real MATCH grammar)",
     "rerank": "Jina cross-encoder is a paid remote API and unreachable offline: the stage runs a deterministic local IDF-weighted token-coverage scorer. Measures the STAGE (SQL-authorized content, merge, ordering effect), never Jina's semantic quality.",
     "rewrite": "identity (no LLM offline)",
@@ -136,9 +223,9 @@
         "n": 48
       },
       "latency_ms": {
-        "p50": 8.712,
-        "p95": 9.511,
-        "max": 13.879
+        "p50": 8.818,
+        "p95": 9.87,
+        "max": 13.699
       },
       "trace": {
         "counts_keys_seen": [
@@ -155,23 +242,23 @@
         },
         "stage_ms_mean": {
           "context": 0.0,
-          "eligibility": 0.02,
-          "embed_compute": 2.708,
-          "embed_ms": 2.708,
-          "hydrate_ms": 3.076,
+          "eligibility": 0.021,
+          "embed_compute": 2.719,
+          "embed_ms": 2.719,
+          "hydrate_ms": 3.15,
           "lexical": 0.0,
-          "queue_wait": 2.471,
+          "queue_wait": 2.489,
           "rerank": 0.0,
           "rewrite_ms": 0.006,
-          "score": 0.052,
-          "search_ms": 0.272,
-          "serialization": 0.146,
-          "total": 8.759
+          "score": 0.054,
+          "search_ms": 0.308,
+          "serialization": 0.142,
+          "total": 8.897
         },
         "hydrate_ms_over_total": {
-          "mean": 0.351189,
-          "p95": 0.385112,
-          "max": 0.406307,
+          "mean": 0.354632,
+          "p95": 0.392955,
+          "max": 0.425608,
           "n": 48
         }
       },
@@ -285,9 +372,9 @@
         "n": 48
       },
       "latency_ms": {
-        "p50": 8.802,
-        "p95": 9.597,
-        "max": 9.849
+        "p50": 8.69,
+        "p95": 9.681,
+        "max": 9.744
       },
       "trace": {
         "counts_keys_seen": [
@@ -305,22 +392,22 @@
         "stage_ms_mean": {
           "context": 0.0,
           "eligibility": 0.004,
-          "embed_compute": 2.696,
-          "embed_ms": 2.696,
-          "hydrate_ms": 0.937,
-          "lexical": 2.597,
-          "queue_wait": 2.393,
+          "embed_compute": 2.682,
+          "embed_ms": 2.682,
+          "hydrate_ms": 0.917,
+          "lexical": 2.59,
+          "queue_wait": 2.383,
           "rerank": 0.0,
           "rewrite_ms": 0.005,
           "score": 0.016,
-          "search_ms": 2.67,
-          "serialization": 0.052,
-          "total": 8.78
+          "search_ms": 2.663,
+          "serialization": 0.049,
+          "total": 8.728
         },
         "hydrate_ms_over_total": {
-          "mean": 0.106486,
-          "p95": 0.132562,
-          "max": 0.198641,
+          "mean": 0.10502,
+          "p95": 0.121638,
+          "max": 0.152944,
           "n": 48
         }
       },
@@ -434,9 +521,9 @@
         "n": 48
       },
       "latency_ms": {
-        "p50": 9.392,
-        "p95": 10.308,
-        "max": 10.539
+        "p50": 9.412,
+        "p95": 10.794,
+        "max": 14.112
       },
       "trace": {
         "counts_keys_seen": [
@@ -458,22 +545,22 @@
         "stage_ms_mean": {
           "context": 0.0,
           "eligibility": 0.02,
-          "embed_compute": 2.708,
-          "embed_ms": 2.708,
-          "hydrate_ms": 1.327,
-          "lexical": 2.558,
-          "queue_wait": 2.349,
+          "embed_compute": 2.69,
+          "embed_ms": 2.69,
+          "hydrate_ms": 1.36,
+          "lexical": 2.644,
+          "queue_wait": 2.377,
           "rerank": 0.0,
           "rewrite_ms": 0.005,
-          "score": 0.052,
-          "search_ms": 0.268,
-          "serialization": 0.148,
-          "total": 9.47
+          "score": 0.053,
+          "search_ms": 0.315,
+          "serialization": 0.144,
+          "total": 9.643
         },
         "hydrate_ms_over_total": {
-          "mean": 0.140301,
-          "p95": 0.166969,
-          "max": 0.169635,
+          "mean": 0.141178,
+          "p95": 0.165779,
+          "max": 0.182937,
           "n": 48
         }
       },
@@ -587,9 +674,9 @@
         "n": 48
       },
       "latency_ms": {
-        "p50": 10.957,
-        "p95": 11.931,
-        "max": 12.277
+        "p50": 10.962,
+        "p95": 18.665,
+        "max": 23.676
       },
       "trace": {
         "counts_keys_seen": [
@@ -612,23 +699,23 @@
         },
         "stage_ms_mean": {
           "context": 0.0,
-          "eligibility": 0.041,
-          "embed_compute": 2.711,
-          "embed_ms": 2.711,
-          "hydrate_ms": 2.481,
-          "lexical": 2.622,
-          "queue_wait": 2.324,
-          "rerank": 1.464,
-          "rewrite_ms": 0.005,
-          "score": 0.052,
-          "search_ms": 0.273,
-          "serialization": 0.149,
-          "total": 10.97
+          "eligibility": 0.042,
+          "embed_compute": 2.777,
+          "embed_ms": 2.777,
+          "hydrate_ms": 2.555,
+          "lexical": 2.853,
+          "queue_wait": 2.512,
+          "rerank": 1.508,
+          "rewrite_ms": 0.006,
+          "score": 0.053,
+          "search_ms": 0.323,
+          "serialization": 0.144,
+          "total": 11.58
         },
         "hydrate_ms_over_total": {
-          "mean": 0.226799,
-          "p95": 0.259145,
-          "max": 0.265823,
+          "mean": 0.224055,
+          "p95": 0.250211,
+          "max": 0.267994,
           "n": 48
         }
       },
@@ -892,37 +979,37 @@
     "signed_threshold": 0.25,
     "deciding_arm": "hybrid_rrf",
     "deciding_measurement": {
-      "mean": 0.140301,
-      "p95": 0.166969,
-      "max": 0.169635,
+      "mean": 0.141178,
+      "p95": 0.165779,
+      "max": 0.182937,
       "n": 48
     },
     "measured": {
       "hydrate_ms_over_total": {
-        "mean_over_arms": 0.206194,
+        "mean_over_arms": 0.206221,
         "per_arm": {
           "dense_only": {
-            "mean": 0.351189,
-            "p95": 0.385112,
-            "max": 0.406307,
+            "mean": 0.354632,
+            "p95": 0.392955,
+            "max": 0.425608,
             "n": 48
           },
           "lexical_only": {
-            "mean": 0.106486,
-            "p95": 0.132562,
-            "max": 0.198641,
+            "mean": 0.10502,
+            "p95": 0.121638,
+            "max": 0.152944,
             "n": 48
           },
           "hybrid_rrf": {
-            "mean": 0.140301,
-            "p95": 0.166969,
-            "max": 0.169635,
+            "mean": 0.141178,
+            "p95": 0.165779,
+            "max": 0.182937,
             "n": 48
           },
           "hybrid_rerank": {
-            "mean": 0.226799,
-            "p95": 0.259145,
-            "max": 0.265823,
+            "mean": 0.224055,
+            "p95": 0.250211,
+            "max": 0.267994,
             "n": 48
           }
         },
@@ -931,82 +1018,82 @@
       "per_arm_stage_ms_mean": {
         "dense_only": {
           "context": 0.0,
-          "eligibility": 0.02,
-          "embed_compute": 2.708,
-          "embed_ms": 2.708,
-          "hydrate_ms": 3.076,
+          "eligibility": 0.021,
+          "embed_compute": 2.719,
+          "embed_ms": 2.719,
+          "hydrate_ms": 3.15,
           "lexical": 0.0,
-          "queue_wait": 2.471,
+          "queue_wait": 2.489,
           "rerank": 0.0,
           "rewrite_ms": 0.006,
-          "score": 0.052,
-          "search_ms": 0.272,
-          "serialization": 0.146,
-          "total": 8.759
+          "score": 0.054,
+          "search_ms": 0.308,
+          "serialization": 0.142,
+          "total": 8.897
         },
         "lexical_only": {
           "context": 0.0,
           "eligibility": 0.004,
-          "embed_compute": 2.696,
-          "embed_ms": 2.696,
-          "hydrate_ms": 0.937,
-          "lexical": 2.597,
-          "queue_wait": 2.393,
+          "embed_compute": 2.682,
+          "embed_ms": 2.682,
+          "hydrate_ms": 0.917,
+          "lexical": 2.59,
+          "queue_wait": 2.383,
           "rerank": 0.0,
           "rewrite_ms": 0.005,
           "score": 0.016,
-          "search_ms": 2.67,
-          "serialization": 0.052,
-          "total": 8.78
+          "search_ms": 2.663,
+          "serialization": 0.049,
+          "total": 8.728
         },
         "hybrid_rrf": {
           "context": 0.0,
           "eligibility": 0.02,
-          "embed_compute": 2.708,
-          "embed_ms": 2.708,
-          "hydrate_ms": 1.327,
-          "lexical": 2.558,
-          "queue_wait": 2.349,
+          "embed_compute": 2.69,
+          "embed_ms": 2.69,
+          "hydrate_ms": 1.36,
+          "lexical": 2.644,
+          "queue_wait": 2.377,
           "rerank": 0.0,
           "rewrite_ms": 0.005,
-          "score": 0.052,
-          "search_ms": 0.268,
-          "serialization": 0.148,
-          "total": 9.47
+          "score": 0.053,
+          "search_ms": 0.315,
+          "serialization": 0.144,
+          "total": 9.643
         },
         "hybrid_rerank": {
           "context": 0.0,
-          "eligibility": 0.041,
-          "embed_compute": 2.711,
-          "embed_ms": 2.711,
-          "hydrate_ms": 2.481,
-          "lexical": 2.622,
-          "queue_wait": 2.324,
-          "rerank": 1.464,
-          "rewrite_ms": 0.005,
-          "score": 0.052,
-          "search_ms": 0.273,
-          "serialization": 0.149,
-          "total": 10.97
+          "eligibility": 0.042,
+          "embed_compute": 2.777,
+          "embed_ms": 2.777,
+          "hydrate_ms": 2.555,
+          "lexical": 2.853,
+          "queue_wait": 2.512,
+          "rerank": 1.508,
+          "rewrite_ms": 0.006,
+          "score": 0.053,
+          "search_ms": 0.323,
+          "serialization": 0.144,
+          "total": 11.58
         }
       },
       "hydrate_ms_absolute": {
-        "dense_only": 3.076,
-        "lexical_only": 0.937,
-        "hybrid_rrf": 1.327,
-        "hybrid_rerank": 2.481
+        "dense_only": 3.15,
+        "lexical_only": 0.917,
+        "hybrid_rrf": 1.36,
+        "hybrid_rerank": 2.555
       }
     },
     "crossing_arms": {
       "dense_only": {
-        "mean": 0.351189,
-        "p95": 0.385112,
-        "max": 0.406307
+        "mean": 0.354632,
+        "p95": 0.392955,
+        "max": 0.425608
       },
       "hybrid_rerank": {
-        "mean": 0.226799,
-        "p95": 0.259145,
-        "max": 0.265823
+        "mean": 0.224055,
+        "p95": 0.250211,
+        "max": 0.267994
       }
     },
     "verdict": "not implemented: no measured benefit",
@@ -1015,7 +1102,7 @@
       "status": "not run",
       "reason": "arm (e) is gated on the verdict above (§7.5 / R5(p2)): with the deciding arm under the trigger there is no two-step variant to compare against"
     },
-    "rationale": "On the arm the flag's decision carries (hybrid_rrf) the SQL/entity load is 0.1403 of total (mean; p95 0.1670, max 0.1696) — under the 0.25 trigger, so full hydration stays and arm (e) parity is not run. The arms that DO cross it are recorded above rather than averaged away: dense_only crosses because its total is the smallest at fixture scale, and hybrid_rerank's p95 crosses because that arm pays the POST-NETWORK re-validation hydrate — which §7.5 forbids deferring to save SQL. The absolute SQL cost is ~1-3 ms per recall against a signed p95 budget of 150 ms at this scale, and §7.5 requires a PROVEN benefit plus parity before the two-step variant is adopted."
+    "rationale": "On the arm the flag's decision carries (hybrid_rrf) the SQL/entity load is 0.1412 of total (mean; p95 0.1658, max 0.1829) — under the 0.25 trigger, so full hydration stays and arm (e) parity is not run. The arms that DO cross it are recorded above rather than averaged away: dense_only crosses because its total is the smallest at fixture scale, and hybrid_rerank's p95 crosses because that arm pays the POST-NETWORK re-validation hydrate — which §7.5 forbids deferring to save SQL. The absolute SQL cost is ~1-3 ms per recall against a signed p95 budget of 150 ms at this scale, and §7.5 requires a PROVEN benefit plus parity before the two-step variant is adopted."
   },
   "bm25_skew": {
     "spec": "§7.4 line 260 — FTS global corpus statistics may shift ordering between tenants; record the limitation and measure the skew",
@@ -1023,7 +1110,7 @@
     "authorization_impact": "none — the tenant + visibility clauses are applied BEFORE the LIMIT: no foreign row was returned at any foreign size (asserted)",
     "measurement": {
       "probe_queries": 12,
-      "probe_selection": "two-token AND queries over the corpus's own vocabulary, adjacent in the document-frequency order, keeping only those whose tenant answer is multi-row",
+      "probe_selection": "two-token AND queries over the corpus's own vocabulary, adjacent in the document-frequency order, keeping only those whose tenant answer is multi-row. DELIBERATELY stopword-heavy — the corpus's most common tokens are function words ('the and', 'a so', ...), because an intra-tenant ORDER only exists where several rows answer: the selection trades natural-language realism for a measurable order, and is recorded here rather than hidden",
       "probes": [
         {
           "query": "the and",
@@ -1152,9 +1239,10 @@
   "limitations": [
     "fixture scale (hundreds of memories) — the §12.2 budgets are signed at this scale",
     "generated corpus: the text is template-built and deterministic, not user traffic",
-    "exact-cosine dense leg, not Qdrant ANN; the rerank stage uses a local stand-in scorer",
+    "exact-cosine dense leg, not Qdrant ANN: an OPTIMISTIC dense baseline (exact top-k recall >= the ANN top-k it stands in for), so dense_only is a BEST CASE and every measured gain is conservative; the rerank stage uses a local stand-in scorer",
+    "the PASS rests on a near-deterministic lexical leg: 42/48 queries return exactly ONE row (their own gold) from the real FTS index, so the semantic slices sit at a STRUCTURAL CEILING — the whole +0.1042 overall gain comes from exact_id, the 'every slice >= -0.02' condition can only discriminate on exact_id / long_query, and the direction in which the lexical leg could HURT (a wrong row displacing a dense gold on a semantic query) is not exercised by this fixture (see fixture.lexical_match_counts_per_slice)",
     "BM25 statistics are index-global: the bm25_skew measurement shows the ceiling",
     "no LLM query rewrite (identity), so keyword-ish queries stand in for rewritten ones"
   ],
-  "generated_at": "2026-09-15T21:54:57+00:00"
+  "generated_at": "2026-09-15T22:19:27+00:00"
 }

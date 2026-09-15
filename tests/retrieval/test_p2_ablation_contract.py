@@ -14,7 +14,7 @@ walked backwards. What must not move silently is the SHAPE:
 - the C2 skew number (a measured intra-tenant order flip count with a foreign size);
 - the C3 hydration verdict with its measured share and the arm-(e) disposition;
 - the enable rule's signed thresholds, its verdict, and that the verdict agrees with
-  the deltas it was computed from.
+  the arms and the deltas it was computed from — per slice, not just in aggregate.
 
 The artifact and the script are read from the repository root, so this suite runs
 from anywhere in the tree.
@@ -79,7 +79,10 @@ def test_every_arm_carries_every_slice_and_every_metric(artifact):
         for slice_name in SLICES:
             slice_metrics = payload["per_slice"][slice_name]
             assert set(METRICS) <= set(slice_metrics), f"{arm}/{slice_name}: metric missing"
-            assert slice_metrics["n"] > 0
+            # n is the fixture's own query count for the slice, not a second opinion.
+            assert slice_metrics["n"] == artifact["fixture"]["queries_per_slice"][slice_name], (
+                f"{arm}/{slice_name}: slice n is not the fixture's query count"
+            )
             for metric in METRICS:
                 assert 0.0 <= slice_metrics[metric] <= 1.0
         for metric in METRICS:
@@ -166,8 +169,13 @@ def test_c3_the_hydration_verdict_carries_its_measured_share(artifact):
     # Every arm's share is on the record — a verdict may not average away a crossing arm.
     per_arm = hydration["measured"]["hydrate_ms_over_total"]["per_arm"]
     assert set(per_arm) == set(ARMS)
-    under = deciding["mean"] < hydration["signed_threshold"]
-    assert (hydration["verdict"] == HYDRATION_VERDICTS[0]) is under
+    under = all(
+        deciding[measure] < hydration["signed_threshold"] for measure in ("mean", "p95", "max")
+    )
+    assert (hydration["verdict"] == HYDRATION_VERDICTS[0]) is under, (
+        "the verdict must be decided the way the script decides it: mean AND p95 AND max "
+        "under the trigger (a mean-only reading would flip it on one crossing percentile)"
+    )
     assert hydration["parity_arm"]["status"] == ("not run" if under else "required")
     assert hydration["rationale"]
 
@@ -179,6 +187,7 @@ def test_the_enable_rule_is_signed_and_its_verdict_matches_the_deltas(artifact):
     assert thresholds == {"max_slice_loss_recall@5": 0.02, "min_overall_gain_recall@5": 0.02}
     assert rule["verdicts"]["hybrid_rrf"]["decides_enable"] is True
 
+    dense_slices = artifact["arms"]["dense_only"]["per_slice"]
     for arm, verdict in rule["verdicts"].items():
         assert verdict["verdict"] in ("PASS", "FAIL"), arm
         losses = verdict["per_slice_loss_recall@5"]
@@ -196,6 +205,26 @@ def test_the_enable_rule_is_signed_and_its_verdict_matches_the_deltas(artifact):
             - artifact["arms"]["dense_only"]["overall"]["recall@5"]
         )
         assert verdict["overall_gain_recall@5"] == pytest.approx(gain, abs=1e-6)
+        # ... and the same arithmetic at SLICE scale: every per-slice loss the verdict
+        # reads IS dense's recall@5 minus the arm's, and the delta block repeats that
+        # number. One computation, three blocks (arms, deltas, verdict), tied here —
+        # a fabricated per-slice recall@5 with the deltas and the verdict left intact
+        # is exactly what this catches.
+        arm_slices = artifact["arms"][arm]["per_slice"]
+        for slice_name in SLICES:
+            loss = round(
+                dense_slices[slice_name]["recall@5"] - arm_slices[slice_name]["recall@5"], 6
+            )
+            assert losses[slice_name] == loss, (
+                f"{arm}/{slice_name}: the enable rule is not reading the arms' own numbers"
+            )
+            delta = artifact["deltas_vs_dense_only"][arm]["per_slice"][slice_name]
+            assert delta["recall@5_loss"] == loss, (
+                f"{arm}/{slice_name}: the delta block and the enable rule disagree with the arms"
+            )
+            assert delta["recall@5"] == round(
+                arm_slices[slice_name]["recall@5"] - dense_slices[slice_name]["recall@5"], 6
+            ), f"{arm}/{slice_name}: the delta's recall@5 is not the arm difference"
 
 
 def test_the_artifact_records_its_substitutions_and_stays_portable(artifact):

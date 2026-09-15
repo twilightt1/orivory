@@ -219,9 +219,13 @@ _LONG_TOPICS = (
     (None, "I told the team that the retention window for the outbox should stay short while the drain loop is still being measured under load.", "when should the retention window for the outbox change while the drain loop is still being measured under load"),
 )
 
-# Distractor vocabulary: template + anchor pairs, all OUTSIDE the golds' rare
-# phrases (a distractor that carried a gold's phrase would be a second relevant
-# row, not a hard negative).
+# Distractor vocabulary: template + anchor pairs. Most rows sit OUTSIDE the
+# golds' phrases — but not all, deliberately: the ORIVORY anchor numbers
+# (4400 + 3i) collide with the golds' own identifiers (ORIVORY-4424,
+# ORIVORY-4445) and the app/retrieval//hybrid_retriever.py anchor carries a
+# gold's module token, so those rows share the query's rare phrase and are HARD
+# negatives — not accidental second golds. Measured in
+# fixture.lexical_match_counts_per_slice.
 _DISTRACTOR_TEMPLATES = {
     SLICE_EXACT_ID: (
         "Closed {anchor}: the ladder ran once on the transition and the backup file stays next to the database.",
@@ -903,7 +907,11 @@ async def measure_bm25_skew(fixture: dict, workdir: Path) -> dict:
             "probe_queries": len(probes),
             "probe_selection": (
                 "two-token AND queries over the corpus's own vocabulary, adjacent in the "
-                "document-frequency order, keeping only those whose tenant answer is multi-row"
+                "document-frequency order, keeping only those whose tenant answer is multi-row. "
+                "DELIBERATELY stopword-heavy — the corpus's most common tokens are function words "
+                "('the and', 'a so', ...), because an intra-tenant ORDER only exists where several "
+                "rows answer: the selection trades natural-language realism for a measurable "
+                "order, and is recorded here rather than hidden"
             ),
             "probes": [
                 {"query": query, "baseline_rows": len(baseline[query])} for query in probes
@@ -1141,12 +1149,47 @@ async def _token_coverage(session, fixture: dict) -> dict:
     return await session.run_sync(_run)
 
 
+async def _lexical_match_counts(session, fixture: dict) -> dict[str, list[int]]:
+    """Rows the REAL lexical leg answers each query with — the fixture's ceiling.
+
+    A query whose FTS5 answer is exactly one row (its own gold) leaves the fusion
+    nothing to fix and the lexical leg nothing to break: the semantic slices sit at
+    a STRUCTURAL recall ceiling, and the enable rule's "no slice loses > 0.02"
+    condition can only discriminate where the answer is multi-row or empty. Recorded
+    per slice in the artifact, never hidden. The single-row answer must be the gold —
+    a wrong row ranking alone would change what the ceiling means, so it fails loudly.
+    """
+    corpus_size = len(fixture["rows"])
+    gold_ids = {
+        query["key"]: {str(_memory_id(key)) for key in query["golds"]}
+        for query in fixture["queries"]
+    }
+
+    def _run(session):
+        conn = session.connection()
+        out: dict[str, list[int]] = {}
+        for query in fixture["queries"]:
+            rows = lexical_index.search(
+                conn, query["text"], user_id=TENANT_A, limit=corpus_size
+            )
+            if len(rows) == 1 and rows[0]["memory_id"] not in gold_ids[query["key"]]:
+                raise RuntimeError(
+                    f"fixture: {query['key']} has a single lexical answer that is NOT its gold — "
+                    f"the structural-ceiling claim in limitations would be false"
+                )
+            out.setdefault(query["slice"], []).append(len(rows))
+        return out
+
+    return await session.run_sync(_run)
+
+
 async def run_ablation(workdir: Path) -> dict:
     fixture = build_fixture()
     engine, factory = await _prepare_db(workdir / "ablation.db", fixture["rows"])
     try:
         async with factory() as session:
             coverage = await _token_coverage(session, fixture)
+            match_counts = await _lexical_match_counts(session, fixture)
 
             def _fts_coverage(session):
                 return lexical_index.coverage(session.connection())
@@ -1189,6 +1232,10 @@ async def run_ablation(workdir: Path) -> dict:
                     if memory_id in run["records"][0]["served"]
                 )
         deltas = _deltas(arms)
+        # I2: how the PASS was won — the queries whose lexical answer is a single row.
+        one_row_queries = sum(
+            1 for counts in match_counts.values() for count in counts if count == 1
+        )
     finally:
         await engine.dispose()
 
@@ -1253,10 +1300,34 @@ async def run_ablation(workdir: Path) -> dict:
                 "AND, so a coverage below 1.0 means the lexical leg returns nothing for that "
                 "query at all."
             ),
+            "lexical_match_counts_per_slice": {
+                slice_name: {
+                    "queries": len(counts),
+                    "returning_exactly_one_row": sum(1 for count in counts if count == 1),
+                    "rows_returned": counts,
+                }
+                for slice_name, counts in sorted(match_counts.items())
+            },
+            "lexical_match_counts_note": (
+                "rows the REAL FTS5 lexical leg returns per query (limit = corpus size, tenant + "
+                "visibility filtered), in fixture query order. A query answered with exactly one "
+                "row — its own gold — leaves the lexical leg no room to rank a WRONG row above a "
+                "dense gold: that is the structural ceiling this artifact's PASS rests on. The "
+                "multi-row cases are the distractors that deliberately carry a gold's identifier; "
+                "the zero-row cases are the long-query prose rows (implicit-AND coverage < 1)."
+            ),
         },
         "substitutions": {
             "embedding": "REAL local arctic-embed-xs ONNX (384-dim, cached); no paid API",
-            "dense_store": "exact cosine top-k in numpy over those vectors (Qdrant HNSW approximates it)",
+            "dense_store": (
+                "exact cosine top-k in numpy over those vectors (Qdrant HNSW approximates it) — an "
+                "OPTIMISTIC dense baseline: exact top-k recall >= the ANN top-k it stands in for, so "
+                "dense_only's numbers are a BEST CASE and the measured "
+                f"{deltas['hybrid_rrf']['overall']['recall@5_gain']:+.4f} overall gain is conservative. "
+                "The substitution is one of convenience at this scale, not an offline casualty — "
+                "Qdrant runs embedded in this repo (lite mode); the only offline-unreachable seam "
+                "here is Jina."
+            ),
             "lexical": "REAL SQLite FTS5 (T4 DDL + triggers, real MATCH grammar)",
             "rerank": (
                 "Jina cross-encoder is a paid remote API and unreachable offline: the stage runs "
@@ -1303,7 +1374,21 @@ async def run_ablation(workdir: Path) -> dict:
         "limitations": [
             "fixture scale (hundreds of memories) — the §12.2 budgets are signed at this scale",
             "generated corpus: the text is template-built and deterministic, not user traffic",
-            "exact-cosine dense leg, not Qdrant ANN; the rerank stage uses a local stand-in scorer",
+            (
+                "exact-cosine dense leg, not Qdrant ANN: an OPTIMISTIC dense baseline (exact top-k "
+                "recall >= the ANN top-k it stands in for), so dense_only is a BEST CASE and every "
+                "measured gain is conservative; the rerank stage uses a local stand-in scorer"
+            ),
+            (
+                f"the PASS rests on a near-deterministic lexical leg: {one_row_queries}/"
+                f"{len(fixture['queries'])} queries return exactly ONE row (their own gold) from the "
+                "real FTS index, so the semantic slices sit at a STRUCTURAL CEILING — the whole "
+                f"{deltas['hybrid_rrf']['overall']['recall@5_gain']:+.4f} overall gain comes from "
+                "exact_id, the 'every slice >= -0.02' condition can only discriminate on exact_id / "
+                "long_query, and the direction in which the lexical leg could HURT (a wrong row "
+                "displacing a dense gold on a semantic query) is not exercised by this fixture "
+                "(see fixture.lexical_match_counts_per_slice)"
+            ),
             "BM25 statistics are index-global: the bm25_skew measurement shows the ceiling",
             "no LLM query rewrite (identity), so keyword-ish queries stand in for rewritten ones",
         ],
