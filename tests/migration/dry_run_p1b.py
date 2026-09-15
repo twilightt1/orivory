@@ -132,11 +132,26 @@ def main(argv: list[str] | None = None) -> int:
     # per-row cost is what the extrapolation must rest on, and the benchmark
     # copy is far too small to time a rate from directly.
     with sqlite3.connect(f"file:{db_copy}?mode=ro", uri=True) as conn:
-        texts = [row[0] for row in conn.execute(
-            "SELECT coalesce(title || '\n', '') || content FROM memories"
-        ).fetchall()]
-    if not texts:
-        texts = ["calibration text"]
+        texts_by_id = {
+            row[0]: row[1] for row in conn.execute(
+                "SELECT id, coalesce(title || '\n', '') || content FROM memories"
+            ).fetchall()
+        }
+    if not texts_by_id:
+        texts_by_id = {"calibration": "calibration text"}
+    # Eligibility comes from the CLI's own definition — the read path's serve
+    # set — never a second spelling of it: `chars_in_eligible_memories` must not
+    # quietly count the rows the migration excludes. SQLite stores the ids as
+    # 32-char hex, the CLI keys them as dashed UUIDs: compare dashless.
+    def _key(value: str) -> str:
+        return str(value).replace("-", "").lower()
+
+    with cli._session(readonly=True) as session:
+        eligible_ids = {
+            _key(memory_id) for memory_id, record in cli.memory_rows(session).items()
+            if record["reason"] is None
+        }
+    texts = list(texts_by_id.values())
     corpus = [texts[index % len(texts)] for index in range(args.calibration_rows)]
     calibration_started = time.perf_counter()
     embed_texts_sync(corpus)
@@ -186,7 +201,13 @@ def main(argv: list[str] | None = None) -> int:
             "eligible_chunk_rows": inventory["kinds"]["chunk"]["sql"]["eligible"],
             "superseded": inventory["kinds"]["memory"]["sql"]["superseded"],
             "dirty": inventory["kinds"]["memory"]["sql"]["dirty"],
-            "chars_in_eligible_memories": sum(len(text) for text in texts),
+            # Eligible-only, computed with the CLI's own eligibility rule; the
+            # all-rows figure is labelled as such (it is the calibration corpus).
+            "chars_in_eligible_memories": sum(
+                len(text) for memory_id, text in texts_by_id.items()
+                if _key(memory_id) in eligible_ids
+            ),
+            "chars_in_all_memories": sum(len(text) for text in texts_by_id.values()),
         },
         "phases": phases,
         "phase_totals": {

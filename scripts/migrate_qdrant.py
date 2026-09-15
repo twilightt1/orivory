@@ -14,21 +14,32 @@ the controller rulings R24-R29:
   empty or unmanifested file instead of silently reusing one.
 - ``backfill`` builds the contract generation (``generation_name(kind)``) with a
   keyset scan over the primary key — never OFFSET — embedding only the ELIGIBLE
-  SQL rows. A checkpoint keyed ``(generation, kind, tenant, last_id)`` is written
-  after every acked batch, so a crash re-embeds at most one batch. It finishes
-  with a GC pass that DELETES points whose SQL row is not eligible (R29b).
+  SQL rows. It writes into the generation by NAME (the one ``cutover`` will
+  later activate), never "whatever is active". A checkpoint keyed
+  ``(generation, kind, tenant, last_id)`` is written after every acked batch, so
+  a crash re-embeds at most one batch. It finishes with a GC pass that DELETES
+  points whose SQL row is not eligible (R29b).
 - ``verify`` is a real read-side audit of the live collection: full scan, count
-  vs eligible SQL rows, ID-set equality, per-point revision + fingerprint, and
-  the ABSENCE of points for deleted/superseded/dirty/suppressed/unowned rows.
-  An empty dataset is accepted only when the manifest row names the generation.
-- ``cutover`` requires ``--yes`` and a green verify for BOTH kinds, then flips
-  the pointer for both kinds in ONE transaction, blocks the intents that still
-  target a retired generation (R27), and writes a rollback marker.
+  vs eligible SQL rows, ID-set equality, per-point revision + fingerprint +
+  tenant, and the ABSENCE of points for deleted/superseded/dirty/suppressed/
+  unowned rows. An empty dataset is accepted only when the manifest row names
+  the generation.
+- ``cutover`` requires ``--yes`` and a green verify for BOTH kinds, then FLIPS
+  the pointer for both kinds in ONE transaction (the expand only WRITES the new
+  rows: until this flip the install keeps serving its old generation, so an
+  un-migrated one fails loud instead of returning zero hits) — it also blocks
+  the intents that still target a retired generation (R27) — and writes a
+  rollback marker.
 
 Quiesce (R25): every command except ``inventory`` refuses to run while the app
 answers on ``settings.APP_PORT`` or another migration holds ``migrate.lock``
 (stale locks are detected by pid liveness). No middleware, no zero-downtime
 promise — stop the app, migrate, start the app.
+
+Exit codes: 0 the command did what it says; 1 the command ran but a gate failed
+(verify findings, a cutover the findings blocked, a backfill that stopped before
+every batch was acked); 2 refused before doing anything (quiesce, lock, --yes,
+bad input).
 
     python scripts/migrate_qdrant.py inventory --out report.json
     python scripts/migrate_qdrant.py backup --dir /backups
@@ -105,7 +116,15 @@ _CONTRACT_KEY = {KIND_MEMORY: "orivory_embed_generation", KIND_CHUNK: "fingerpri
 
 
 class MigrationRefused(RuntimeError):
-    """The CLI refused to run — quiesce, a lock, or a failed gate. Exit code 2."""
+    """The CLI refused to run — quiesce, a lock, or a bad invocation. Exit code 2."""
+
+
+class VerifyFailed(MigrationRefused):
+    """A read-side gate found findings, so the command did not run. Exit code 1.
+
+    Distinct from a refusal on purpose: "the store is not ready" is a finding
+    the operator reads out of the report, not a misuse of the command.
+    """
 
 
 # ── where things live (settings are the one source of truth) ────────────────
@@ -452,6 +471,7 @@ def audit_collection(kind: str, generation: str, rows: dict[str, dict]) -> tuple
         "excluded_reasons": {},
         "unknown_fingerprint": [],
         "malformed_id": [],
+        "tenant_mismatch": [],
     }
     seen: set[str] = set()
     tenants: dict[str, str] = {}
@@ -474,8 +494,15 @@ def audit_collection(kind: str, generation: str, rows: dict[str, dict]) -> tuple
         elif record["reason"] is not None:
             audit["excluded_present"].append(point_id)
             audit["excluded_reasons"][point_id] = record["reason"]
-        elif int(payload.get(_REVISION_KEY[kind]) or -1) != int(record["revision"]):
-            audit["stale"].append(point_id)
+        else:
+            if int(payload.get(_REVISION_KEY[kind]) or -1) != int(record["revision"]):
+                audit["stale"].append(point_id)
+            if str(payload.get("user_id") or "") != str(record.get("tenant") or ""):
+                # The payload tenant IS the read path's filter (the security
+                # boundary): a drifted point is invisible to its owner and
+                # visible to someone else. Reported independently of the
+                # revision check — it is the more dangerous finding.
+                audit["tenant_mismatch"].append(point_id)
     audit["points"] = len(seen)
     # Missing = an ELIGIBLE SQL row with no point. The ineligible rows are the
     # absence check instead: a point of ours that they must not have.
@@ -516,10 +543,13 @@ def _tenant_report(rows: dict[str, dict], audit: dict, tenants: dict[str, str]) 
 def _record_pre_expand_pointer() -> None:
     """Record ONCE which generation the install served before the expand.
 
-    R24 makes the expand itself the pointer move (the ladder activates the two
-    real rows), so by cutover time the live pointer no longer says where the
-    migration came from. The rollback marker is only useful with that origin,
-    and the first expand is the only moment it can be read.
+    The rollback marker is only useful with the origin of the migration, and the
+    first expand is the only moment it can be read: a rolled-back install (T6)
+    reads the marker, and the pointer it restores is the one recorded here. On
+    the current SQLite ladder the expand no longer moves the pointer (F1), so
+    this value normally equals the live pointer at cutover time — recording it
+    keeps the marker meaningful for installs expanded by an earlier build and
+    for the Postgres path, where the expand is the only pointer write.
     """
     path = expand_record_path()
     if path.exists():
@@ -539,11 +569,14 @@ def _record_pre_expand_pointer() -> None:
 
 
 def _expand() -> None:
-    """Bring the database to the expand state: ladder v3, two active rows.
+    """Bring the database to the expand state: ladder v3, the two new rows.
 
-    The SQLite ladder is shared with the app (``database.upgrade_sqlite_schema``)
-    so the CLI can never upgrade differently; Postgres has no ladder, so the
-    generation rows are written directly (ruling R10).
+    The expand NEVER moves the pointer (F1): the rows are written inactive, the
+    install keeps serving its old generation, and ``cutover`` is what flips
+    them. The SQLite ladder is shared with the app
+    (``database.upgrade_sqlite_schema``) so the CLI can never upgrade
+    differently; Postgres has no ladder, so the rows are written directly
+    (ruling R10).
     """
     _record_pre_expand_pointer()
     if is_sqlite():
@@ -553,7 +586,7 @@ def _expand() -> None:
         return
     with _session() as session:
         with session.begin():
-            database.activate_generations(session)
+            database.activate_generations(session, activate=False)
 
 
 # ── inventory ───────────────────────────────────────────────────────────────
@@ -591,7 +624,8 @@ def inventory(*, out: Path | None = None) -> dict:
                             if record["reason"] is None
                         ),
                         "stale": [], "orphan": [], "excluded_present": [],
-                        "excluded_reasons": {}, "unknown_fingerprint": [], "malformed_id": [],
+                        "excluded_reasons": {}, "unknown_fingerprint": [],
+                        "malformed_id": [], "tenant_mismatch": [],
                     }
                     audits[name] = (collections[name], {})
                     continue
@@ -649,14 +683,42 @@ def _copy_tree(source: Path, dest: Path) -> list[dict]:
     return files
 
 
+def _backup_sources() -> dict[str, Path]:
+    """The real directories ``backup`` copies, keyed by the manifest label.
+
+    A blank/unset setting is NOT ``Path(".")``: ``Path("")`` passes ``is_dir()``,
+    so ``_copy_tree`` would copy the WHOLE working directory into the backup
+    (sha256-ing every file of it — and recursing into its own destination when
+    ``--dir`` sits inside the CWD).
+    """
+    configured = {
+        "uploads": settings.FS_STORAGE_PATH,
+        "chroma": getattr(settings, "CHROMA_LOCAL_PATH", ""),
+    }
+    sources: dict[str, Path] = {}
+    for label, value in configured.items():
+        text = str(value or "").strip()
+        if text and Path(text).is_dir():
+            sources[label] = Path(text).resolve()
+    return sources
+
+
 def backup(*, dest_dir: Path) -> dict:
     """VACUUM INTO snapshot + checksum manifest; resumable, never overwriting."""
     if not is_sqlite():
         raise MigrationRefused("backup --dir snapshots a SQLite install; server mode uses Qdrant snapshots")
     db_path = db_file()
     assert db_path is not None
-    dest_dir = Path(dest_dir)
+    dest_dir = Path(dest_dir).resolve()
     with _offline():
+        sources = _backup_sources()
+        for label, source in sources.items():
+            if dest_dir == source or dest_dir.is_relative_to(source):
+                raise MigrationRefused(
+                    f"--dir {dest_dir} is inside the {label} source tree {source} — "
+                    "the copy would recurse into its own destination; choose a "
+                    "destination outside every source tree"
+                )
         dest_dir.mkdir(parents=True, exist_ok=True)
         snapshot = dest_dir / f"{db_path.name}.{BACKUP_SUFFIX}"
         manifest_path = Path(f"{snapshot}.manifest.json")
@@ -695,17 +757,11 @@ def backup(*, dest_dir: Path) -> dict:
             conn.close()
 
         files: list[dict] = []
-        missing: list[str] = []
-        uploads = Path(settings.FS_STORAGE_PATH)
-        if uploads.is_dir():
-            files.extend(_copy_tree(uploads, dest_dir / "uploads"))
-        else:
-            missing.append("uploads")
-        chroma = Path(getattr(settings, "CHROMA_LOCAL_PATH", ""))
-        if chroma.is_dir():
-            files.extend(_copy_tree(chroma, dest_dir / "chroma"))
-        else:
-            missing.append("chroma")
+        for label, source in sources.items():
+            files.extend(_copy_tree(source, dest_dir / label))
+        missing: list[str] = [
+            label for label in ("uploads", "chroma") if label not in sources
+        ]
 
         snapshot_conn = sqlite3.connect(f"file:{snapshot}?mode=ro", uri=True)
         try:
@@ -888,7 +944,7 @@ def _verify(kind: str) -> dict:
         "kind": kind, "generation": generation, "ok": False, "no_manifest_row": False,
         "sql_eligible": 0, "points": 0,
         "findings": {"missing": [], "stale_revision": [], "fingerprint": [], "absence": [],
-                     "malformed_id": []},
+                     "tenant_mismatch": [], "malformed_id": []},
     }
     with _session(readonly=True) as session:
         rows = sql_rows(session, kind)
@@ -916,6 +972,7 @@ def _verify(kind: str) -> dict:
     report["findings"]["absence"] = sorted(
         set(audit["orphan"]) | set(audit["excluded_present"])
     )
+    report["findings"]["tenant_mismatch"] = audit["tenant_mismatch"]
     report["findings"]["malformed_id"] = audit["malformed_id"]
     report["ok"] = not any(report["findings"].values())
     return report
@@ -933,7 +990,7 @@ def verify(*, kind: str) -> dict:
 
 
 def cutover(*, yes: bool = False) -> dict:
-    """Flip the pointer for BOTH kinds in one transaction, gated on verify."""
+    """FLIP the pointer for BOTH kinds in one transaction, gated on verify."""
     if not yes:
         raise MigrationRefused(
             "cutover flips the active generation for memory AND chunks; re-run with --yes"
@@ -947,10 +1004,17 @@ def cutover(*, yes: bool = False) -> dict:
                 f"{kind}: verify failed ({_finding_summary(report)})"
                 for kind, report in failed.items()
             )
-            raise MigrationRefused(f"refusing the cutover — {summary}")
+            raise VerifyFailed(f"refusing the cutover — {summary}")
         targets = {kind: data_generation(kind) for kind in KINDS}
         with _session(readonly=True) as session:
-            previous = {kind: active_generation_name(session, kind) for kind in KINDS}
+            # What was serving before the flip: the active row, or the
+            # transitional spelling the runtime falls back to when the manifest
+            # has no active row — which is exactly the un-migrated state the
+            # expand leaves behind (F1). The rollback marker must name it.
+            previous = {
+                kind: active_generation_name(session, kind) or _fallback_generation(kind)
+                for kind in KINDS
+            }
         with _session() as session:
             # ONE transaction for both kinds: a crash leaves the old pointer or
             # the new one, never a half-flipped pair.
@@ -1067,6 +1131,9 @@ def main(argv: list[str] | None = None) -> int:
             report = verify(kind=args.kind)
         else:
             report = cutover(yes=args.yes)
+    except VerifyFailed as exc:
+        print(f"verify failed: {exc}", file=sys.stderr)
+        return 1
     except MigrationRefused as exc:
         print(f"refused: {exc}", file=sys.stderr)
         return 2
@@ -1074,6 +1141,14 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "verify" and not report["ok"]:
         print(
             "verify failed: " + _finding_summary(report),
+            file=sys.stderr,
+        )
+        return 1
+    if args.command == "backfill" and not report["complete"]:
+        # The store did not ack a batch: the run stopped early and the operator
+        # must not read "exit 0" as "the generation is built".
+        print(
+            "backfill incomplete: " + ("; ".join(report["errors"]) or "stopped early"),
             file=sys.stderr,
         )
         return 1

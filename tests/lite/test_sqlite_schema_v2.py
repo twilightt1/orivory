@@ -2,10 +2,11 @@
 
 Real SQLite files, no mocks: a synthetic v1 install (full v1 schema,
 ``user_version`` 0 or 1) is migrated by ``bootstrap_sqlite`` and the result is
-re-read from the file — schema, backfilled data, pre-DDL backup, seeded
-generation rows. The ladder's terminal stamp is v3 (the P1b data step, which
-replaces the P1a transitional row with the two real generation rows and renames
-the milestone backup — see ``test_sqlite_schema_v3.py`` for that step).
+re-read from the file — schema, backfilled data, pre-DDL backup, generation
+rows. The ladder's terminal stamp is v3 (the P1b data step, which writes the two
+real generation rows INACTIVE on an upgrade — the old pointer keeps serving until
+``migrate_qdrant.py cutover`` flips it — and renames the milestone backup; see
+``test_sqlite_schema_v3.py`` for that step).
 """
 from __future__ import annotations
 
@@ -135,8 +136,11 @@ async def test_v1_install_is_upgraded_to_v2_and_backed_up(v1_db):
     assert [tuple(row) for row in chunks] == [("v1 chunk text", 1)]
     assert fk_violations == []
     assert integrity == "ok"
-    active = {(r[0], r[1]) for r in generations if r[3]}
-    assert active == {("memory", generation_name("memory")), ("chunk", generation_name("chunk"))}
+    # An UPGRADE writes the two real rows INACTIVE: the install keeps serving its
+    # OLD pointer and fails loud until `migrate_qdrant.py cutover` flips it.
+    assert {(r[0], r[1]) for r in generations} == {
+        ("memory", generation_name("memory")), ("chunk", generation_name("chunk"))}
+    assert not any(r[3] for r in generations), "the ladder never moves the pointer"
     # Same 64-char generation token the vector payload stamps as orivory_embed_generation.
     assert {r[2] for r in generations} == {fingerprint_generation(current_fingerprint())}
     _assert_fingerprint_fits_column(generations[0][2])

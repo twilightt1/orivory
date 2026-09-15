@@ -161,8 +161,8 @@ def _check_sqlite_foreign_keys(sync_conn) -> None:
         )
 
 
-def activate_generations(conn) -> dict[str, tuple[str, str]]:
-    """Insert-or-activate the real generation row for BOTH kinds (spec §4.2, R24).
+def activate_generations(conn, *, activate: bool = True) -> dict[str, tuple[str, str]]:
+    """Insert the real generation row for BOTH kinds (spec §4.2, R24).
 
     The ONE definition of "the active generation is memory + chunk at the
     current embedding contract": the SQLite ladder (v2 -> v3) and
@@ -170,9 +170,15 @@ def activate_generations(conn) -> dict[str, tuple[str, str]]:
     the contract and the two paths can never disagree. Dialect-neutral Core SQL
     (ruling R10: the CLI must also serve Postgres, where no ladder runs).
 
-    Every other row for the kind is retired FIRST: with two active rows the
-    runtime's ``is_active`` lookup would be a coin toss — the P1a transitional
-    ``Orivory_memories`` row was exactly that case. Returns
+    ``activate=False`` is the EXPAND half of an upgrade: the rows are written
+    (or refreshed) and stay INACTIVE, so the install keeps serving its OLD
+    pointer and an un-migrated one fails LOUD — the read path's contract guard
+    raises instead of answering zero hits from a generation nobody built yet.
+    ``activate=True`` is the FLIP (``cutover``, and a fresh install with nothing
+    to serve yet): every other row for the kind is retired FIRST — with two
+    active rows the runtime's ``is_active`` lookup would be a coin toss, the
+    P1a transitional ``Orivory_memories`` row was exactly that case — then the
+    target row is inserted-or-activated. Returns
     ``{kind: (generation, fingerprint_token)}``.
     """
     from app.models.index_outbox import IndexGeneration
@@ -187,11 +193,12 @@ def activate_generations(conn) -> dict[str, tuple[str, str]]:
     activated: dict[str, tuple[str, str]] = {}
     for kind in ("memory", "chunk"):
         generation = generation_name(kind)
-        conn.execute(
-            update(table)
-            .where(table.c.kind == kind, table.c.generation != generation)
-            .values(is_active=False)
-        )
+        if activate:
+            conn.execute(
+                update(table)
+                .where(table.c.kind == kind, table.c.generation != generation)
+                .values(is_active=False)
+            )
         exists = conn.execute(
             select(table.c.id).where(table.c.kind == kind, table.c.generation == generation)
         ).first()
@@ -199,14 +206,17 @@ def activate_generations(conn) -> dict[str, tuple[str, str]]:
             conn.execute(
                 insert(table).values(
                     id=uuid.uuid4().hex, kind=kind, generation=generation,
-                    fingerprint=token, is_active=True, created_at=datetime.now(UTC),
+                    fingerprint=token, is_active=activate, created_at=datetime.now(UTC),
                 )
             )
         else:
+            values: dict = {"fingerprint": token}
+            if activate:
+                values["is_active"] = True
             conn.execute(
                 update(table)
                 .where(table.c.kind == kind, table.c.generation == generation)
-                .values(fingerprint=token, is_active=True)
+                .values(**values)
             )
         activated[kind] = (generation, token)
     return activated
@@ -227,17 +237,25 @@ def _p1b_backup(db_path: str) -> str:
     return _backup_before_ddl(db_path, suffix="pre-p1b")
 
 
-def _upgrade_v2_to_v3(sync_conn) -> None:
+def _upgrade_v2_to_v3(sync_conn, *, activate: bool) -> None:
     """v2 -> v3: the REAL generation rows — a data step, no DDL (ruling R24).
 
+    Runs ONCE, on the version transition (a later boot never touches the
+    manifest again: a restart must not re-assert a pointer that ``cutover``
+    moved — or that a rollback moved back).
+
+    ``activate`` is True only for a FRESH install, which has nothing to serve
+    yet. An UPGRADE writes the rows INACTIVE: the OLD pointer keeps serving, so
+    an install that has not been through ``migrate_qdrant.py cutover`` fails
+    LOUD (the read path's contract guard) instead of answering every recall
+    with an empty result from a generation nobody built.
+
     P1a seeded ONE transitional row and re-created it on every boot
-    (``Orivory_memories`` + the then-current fingerprint). The ladder now writes
-    the two rows the runtime actually serves — named by ``generation_name(kind)``
-    and stamped with ``fingerprint_generation(current_fingerprint())`` — and
-    retires every other row per kind. Idempotent, so a later boot is a no-op and
-    nothing resurrects the old spelling.
+    (``Orivory_memories`` + the then-current fingerprint); the two rows written
+    here are the ones ``generation_name(kind)`` names and the runtime will
+    serve.
     """
-    activate_generations(sync_conn)
+    activate_generations(sync_conn, activate=activate)
 
 
 def _conn_sqlite_path(conn) -> str:
@@ -260,7 +278,8 @@ def upgrade_sqlite_schema(conn) -> None:
     deployments are created fresh from the model metadata; an existing install
     goes through ``user_version``: an unversioned v1-shape schema is adopted and
     upgraded v1 -> v2 (backup before DDL, foreign-key + integrity checks after),
-    then v2 -> v3 (the P1b generation-rows data step). Divergence fails closed —
+    then v2 -> v3 (the P1b generation-rows data step, which runs ONCE — the CLI's
+    ``cutover`` owns every later pointer move). Divergence fails closed —
     ``create_all`` is never used as an existing-schema migration mechanism.
     """
     from app import models  # noqa: F401 — register every model on Base
@@ -268,6 +287,7 @@ def upgrade_sqlite_schema(conn) -> None:
     path = _conn_sqlite_path(conn)
     version = int(conn.execute(text("PRAGMA user_version")).scalar_one())
     tables = set(sa_inspect(conn).get_table_names())
+    fresh_install = version == 0 and not tables
     if version not in (0, 1, 2, SQLITE_SCHEMA_VERSION):
         raise RuntimeError(
             f"unsupported SQLite schema version {version}; expected {SQLITE_SCHEMA_VERSION}"
@@ -293,10 +313,14 @@ def upgrade_sqlite_schema(conn) -> None:
         # v1 -> v2 step just produced the pre-ladder file, else a fresh
         # consistent snapshot. Never overwritten.
         _p1b_backup(path)
-    # Idempotent data step, also for a fresh install (ruling R24): the two real
-    # rows are the runtime's only pointer, and nothing re-seeds the P1a
-    # transitional spelling on a later boot.
-    _upgrade_v2_to_v3(conn)
+    if version in (0, 1, 2):
+        # The v2 -> v3 DATA step, ONCE, on the transition: the two real rows.
+        # A fresh install (no tables before this call) may have them active —
+        # nothing to serve yet. An UPGRADE must not: the old pointer keeps
+        # serving, so an un-migrated install fails loud; `cutover` flips it.
+        # A later boot (already v3) never re-asserts the pointer (that would
+        # undo a rollback) and never re-mutates the manifest.
+        _upgrade_v2_to_v3(conn, activate=fresh_install)
     conn.execute(text(f"PRAGMA user_version = {SQLITE_SCHEMA_VERSION}"))
     integrity = conn.exec_driver_sql("PRAGMA integrity_check").fetchone()
     if integrity is None or integrity[0] != "ok":

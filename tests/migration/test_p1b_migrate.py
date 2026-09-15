@@ -12,8 +12,12 @@ Contract under test (brief + rulings R24-R29):
 - ``backfill --kind --batch [--resume]``: keyset by primary key (never
   OFFSET), checkpoint per acked batch, GC of points whose SQL row is not
   eligible, no re-embed of acked rows after a crash.
+- the expand (the ladder v3 step and ``backfill``'s ``_expand``) only WRITES the
+  two generation rows; the pointer stays where it was until ``cutover`` flips
+  it, so an un-migrated install fails loud instead of serving an empty
+  generation (F1).
 - ``verify --kind``: full read-side audit — count, ID set, revision,
-  fingerprint, absence of excluded rows; empty is valid only with the
+  fingerprint, tenant, absence of excluded rows; empty is valid only with the
   manifest row present.
 - ``cutover --yes``: refuses without ``--yes`` and unless BOTH kinds verify
   green; one transaction flips the pointer for both kinds and blocks stale
@@ -154,7 +158,7 @@ async def env(tmp_path, monkeypatch, migrate_cli):
 
 
 async def _ladder(env) -> None:
-    """The SQLite expand step (ladder v3): two real generation rows."""
+    """The SQLite expand step (ladder v3): two real generation rows, INACTIVE."""
     await database.bootstrap_sqlite()
 
 
@@ -294,14 +298,19 @@ async def world(env) -> SimpleNamespace:
                     for i in range(2)]
     bob_chunks = [await _add_chunk(env.sessions, own.bob_doc, "bob chunk 0", 0)]
 
-    # Index the eligible rows through the real stores, so the payload contract
-    # under audit is the production one.
-    vector_store.upsert_memories_sync([alice_current, bob_current, bob_extra])
-    from app.retrieval.vector_retriever import upsert_chunks_sync
-
-    upsert_chunks_sync(alice_chunks, user_id=str(own.alice.id))
-    upsert_chunks_sync(bob_chunks, user_id=str(own.bob.id))
-    vector_store.upsert_memories_sync([alice_superseded])
+    # Build the target the way the operator does: the CLI's own keyset
+    # backfill, which writes into ``generation_name(kind)`` by NAME (F1: the
+    # expand never moves the pointer, so the runtime would still index into the
+    # transitional generation). Then inject the points the audit must own — the
+    # superseded row's (the runtime writes once and never rewrites on
+    # correction), an orphan and a malformed id.
+    env.cli.backfill(kind="memory", batch=2)
+    env.cli.backfill(kind="chunk", batch=2)
+    document = vector_store._memory_to_document(alice_superseded)
+    _client().upsert(
+        collection_name=memory_generation,
+        points=[vector_store._point(alice_superseded, _vector_for(document), document)],
+    )
 
     orphan_id = str(uuid.uuid4())
     malformed_id = str(uuid.uuid4())
@@ -368,8 +377,15 @@ async def test_inventory_reports_counts_per_tenant_and_quarantine_lists(world, t
     # The report is the artifact the operator reads.
     assert json.loads(out.read_text())["kinds"]["memory"]["sql"]["eligible"] == 3
 
-    # Strictly read-only (R28): no SQL write, no collection write.
-    assert _file_state(world.env.db_path) == before_db
+    # Strictly read-only (R28): the database file is byte-identical and every
+    # point is untouched. SQLite re-creates the empty -wal/-shm sidecars for ANY
+    # WAL-mode connection (read-only included), so the WAL is compared by
+    # content: absent and empty are the same "no committed frame" state.
+    after_db = _file_state(world.env.db_path)
+    assert after_db[""] == before_db[""], "inventory must not write the database file"
+    empty = hashlib.sha256(b"").hexdigest()
+    assert (after_db["-wal"] in (None, empty)) == (before_db["-wal"] in (None, empty)), (
+        "inventory must not add a committed frame to the WAL")
     assert _scroll_ids(world.memory_generation) == before_points
 
 
@@ -432,6 +448,37 @@ async def test_backup_refuses_an_empty_existing_snapshot(world, tmp_path):
     (dest / f"{DB_NAME}.pre-p1b.bak").write_bytes(b"")
     with pytest.raises(world.env.cli.MigrationRefused, match="empty or unreadable"):
         world.env.cli.backup(dest_dir=dest)
+
+
+async def test_backup_treats_a_blank_source_path_as_absent(world, tmp_path, monkeypatch):
+    """F3: a blank setting must never mean ``Path(".")``.
+
+    ``Path("")`` passes ``is_dir()``, so the old code copied the whole working
+    directory (sha256-ing every file) into the backup when a path was unset.
+    """
+    cli = world.env.cli
+    monkeypatch.setattr(settings, "FS_STORAGE_PATH", "   ")
+    monkeypatch.setattr(settings, "CHROMA_LOCAL_PATH", "")
+
+    report = cli.backup(dest_dir=tmp_path / "backups")
+
+    assert report["missing"] == ["uploads", "chroma"]
+    manifest = json.loads(Path(report["manifest"]).read_text())
+    assert manifest["files"] == [], "a blank path copies nothing"
+    assert not (Path(report["dir"]) / "uploads").exists()
+
+
+async def test_backup_refuses_a_destination_inside_a_source_tree(world, tmp_path):
+    """F3: ``--dir`` inside a copied tree would recurse into its own output."""
+    cli = world.env.cli
+    uploads = world.env.tmp_path / "uploads"
+    uploads.mkdir(exist_ok=True)
+    (uploads / "note.txt").write_text("kept")
+    inside = uploads / "backups"
+
+    with pytest.raises(cli.MigrationRefused, match="inside the uploads source tree"):
+        cli.backup(dest_dir=inside)
+    assert not inside.exists(), "the refusal happens before anything is written"
 
 
 # ── backfill ────────────────────────────────────────────────────────────────
@@ -580,7 +627,7 @@ async def test_verify_accepts_a_fully_backfilled_generation(built):
     assert report["generation"] == built.memory_generation
     assert report["sql_eligible"] == 3 and report["points"] == 3
     assert report["findings"] == {"missing": [], "stale_revision": [], "fingerprint": [],
-                                  "absence": [], "malformed_id": []}
+                                  "absence": [], "tenant_mismatch": [], "malformed_id": []}
     assert built.env.cli.verify(kind="chunk")["ok"] is True
 
 
@@ -676,6 +723,30 @@ async def test_verify_flags_a_suppressed_projection(built):
     assert cli.backfill(kind="memory", batch=10)["gc_deleted"] == 1
 
 
+async def test_verify_flags_a_point_whose_payload_tenant_drifted(built):
+    """F5: the payload ``user_id`` is the read path's filter (the security
+    boundary) — a drifted point is invisible to its owner and visible to
+    somebody else, so the audit must name it."""
+    cli = built.env.cli
+    generation = built.memory_generation
+    _raw_upsert(generation, str(built.bob_current.id), {
+        "kind": "memory", "memory_id": str(built.bob_current.id),
+        "user_id": str(built.alice.id), "orivory_memory_revision": 1,
+        "orivory_embed_fingerprint": canonical_fingerprint(FINGERPRINT),
+        "orivory_embed_generation": _token()})
+
+    report = cli.verify(kind="memory")
+
+    assert report["ok"] is False
+    assert report["findings"]["tenant_mismatch"] == [str(built.bob_current.id)]
+    # The inventory report carries the same finding for the operator...
+    audit = cli.inventory()["kinds"]["memory"]["collections"][generation]
+    assert audit["tenant_mismatch"] == [str(built.bob_current.id)]
+    # ...and the flip is gated on the audit, so this point blocks the cutover.
+    with pytest.raises(cli.VerifyFailed, match="tenant_mismatch"):
+        cli.cutover(yes=True)
+
+
 # ── cutover ─────────────────────────────────────────────────────────────────
 
 
@@ -697,6 +768,36 @@ async def _drift_pointer_back(env) -> None:
             db.add(IndexGeneration(id=uuid.uuid4().hex, kind=kind, generation=name,
                                    fingerprint=env.cli.fingerprint_token(), is_active=True))
         await db.commit()
+
+
+async def test_the_expand_writes_the_new_rows_inactive_until_cutover_flips_them(env):
+    """F1: the expand only writes; ``cutover`` is the flip.
+
+    Nothing here is active after the expand, so the runtime keeps its old
+    pointer (the transitional fallback) while the migration window is open.
+    """
+    cli = env.cli
+    await _ladder(env)
+
+    rows = await _manifest_rows(env)
+    assert {row.generation for row in rows} == {
+        generation_name("memory"), generation_name("chunk")}
+    assert not any(row.is_active for row in rows), "the expand never moves the pointer"
+    assert outbox.active_generation_sync()[0] == vector_store.COLLECTION_NAME, (
+        "the runtime still serves the old generation")
+
+    report = cli.backfill(kind="memory", batch=10)
+    assert report["generation"] == generation_name("memory"), "written by NAME, not by the pointer"
+    assert cli.verify(kind="memory")["ok"] is True
+
+    cli.cutover(yes=True)
+
+    rows = await _manifest_rows(env)
+    active = {row.kind: row.generation for row in rows if row.is_active}
+    assert active == {"memory": generation_name("memory"), "chunk": generation_name("chunk")}
+    assert sum(row.is_active for row in rows) == 2, "exactly one active row per kind"
+    cli.cutover(yes=True)  # idempotent: the flip never doubles a pointer
+    assert sum(row.is_active for row in (await _manifest_rows(env))) == 2
 
 
 async def test_cutover_refuses_without_yes_and_when_verify_fails(built):
@@ -800,7 +901,11 @@ async def test_a_stale_lock_is_replaced_and_the_run_completes(world):
 
 
 async def test_cli_exit_codes_follow_the_reports(world, tmp_path):
-    """The argv surface the operator types (and the runbook prints)."""
+    """The argv surface the operator types (and the runbook prints).
+
+    0 = the command did what it says; 1 = it ran and a gate failed (findings);
+    2 = it refused before doing anything.
+    """
     cli = world.env.cli
     out = tmp_path / "inv.json"
     assert cli.main(["inventory", "--out", str(out)]) == 0
@@ -811,3 +916,29 @@ async def test_cli_exit_codes_follow_the_reports(world, tmp_path):
     assert cli.main(["verify", "--kind", "chunk"]) == 0
     assert cli.main(["cutover"]) == 2, "cutover without --yes is refused, not run"
     assert cli.main(["cutover", "--yes"]) == 0
+
+    # A finding is exit 1, not a refusal: verify, and a cutover its own audit
+    # would refuse, must be distinguishable in a shell from a misuse (2).
+    _client().delete(collection_name=world.memory_generation,
+                     points_selector=qm.PointIdsList(points=[str(world.bob_current.id)]))
+    assert cli.main(["verify", "--kind", "memory"]) == 1
+    assert cli.main(["cutover", "--yes"]) == 1
+
+
+async def test_an_aborted_backfill_exits_non_zero(world, monkeypatch):
+    """A batch the store did not ack is not success (``complete: false``)."""
+    cli = world.env.cli
+    real_client = _client()
+
+    class Unacked:
+        def __getattr__(self, name):
+            return getattr(real_client, name)
+
+        def upsert(self, **kwargs):
+            return SimpleNamespace(status="failed")
+
+    monkeypatch.setattr(cli, "_client", lambda: Unacked())
+
+    report = cli.backfill(kind="memory", batch=1)
+    assert report["complete"] is False and report["errors"]
+    assert cli.main(["backfill", "--kind", "memory", "--batch", "1"]) == 1

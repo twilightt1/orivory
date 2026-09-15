@@ -1,18 +1,18 @@
 {
-  "generated_at": "2026-09-15T05:08:53.827630+00:00",
-  "started_at": "2026-09-15T05:08:53.069374+00:00",
+  "generated_at": "2026-09-15T05:33:34.333210+00:00",
+  "started_at": "2026-09-15T05:33:33.776061+00:00",
   "purpose": "R26 dry run: prove the P1b maintenance window from measured throughput",
   "source": {
     "path": "/Users/twilight/Coding/WorkSpace/orivory/.worktrees/p1b-qdrant-cutover/eval/benchmarks/results/.system_run.db",
     "opened": false,
     "note": "the original database was copied (db + -wal + -shm) and never opened",
-    "copy": "/tmp/p1b_dryrun/work/copy/.system_run.db",
-    "workdir": "/tmp/p1b_dryrun/work"
+    "copy": "/tmp/p1b_dryrun/copy/.system_run.db",
+    "workdir": "/tmp/p1b_dryrun"
   },
   "runtime": {
-    "database_url": "sqlite+aiosqlite:////tmp/p1b_dryrun/work/copy/.system_run.db",
+    "database_url": "sqlite+aiosqlite:////tmp/p1b_dryrun/copy/.system_run.db",
     "qdrant_mode": "local",
-    "qdrant_local_path": "/tmp/p1b_dryrun/work/qdrant",
+    "qdrant_local_path": "/tmp/p1b_dryrun/qdrant",
     "embeddings": {
       "model": "arctic",
       "backend": "onnxruntime-cpu",
@@ -32,24 +32,25 @@
     "eligible_chunk_rows": 0,
     "superseded": 3,
     "dirty": 0,
-    "chars_in_eligible_memories": 139
+    "chars_in_eligible_memories": 106,
+    "chars_in_all_memories": 139
   },
   "phases": [
     {
       "name": "inventory",
-      "seconds": 0.037
+      "seconds": 0.035
     },
     {
       "name": "backup",
-      "seconds": 0.009
+      "seconds": 0.007
     },
     {
       "name": "backfill_memory",
-      "seconds": 0.394
+      "seconds": 0.367
     },
     {
       "name": "backfill_chunk",
-      "seconds": 0.01
+      "seconds": 0.008
     },
     {
       "name": "verify_memory",
@@ -61,11 +62,11 @@
     },
     {
       "name": "cutover",
-      "seconds": 0.019
+      "seconds": 0.016
     }
   ],
   "phase_totals": {
-    "migration_seconds": 0.478,
+    "migration_seconds": 0.442,
     "budget_minutes": 60
   },
   "backfill": {
@@ -82,8 +83,8 @@
       "last_id": "f85a8769-ba73-4f80-bbaf-3676d06b0caa",
       "errors": [],
       "complete": true,
-      "elapsed_s": 0.394,
-      "rows_per_sec": 27.92
+      "elapsed_s": 0.367,
+      "rows_per_sec": 29.97
     },
     "chunk": {
       "kind": "chunk",
@@ -98,7 +99,7 @@
       "last_id": null,
       "errors": [],
       "complete": true,
-      "elapsed_s": 0.01,
+      "elapsed_s": 0.007,
       "rows_per_sec": 0.0
     }
   },
@@ -115,9 +116,10 @@
         "stale_revision": [],
         "fingerprint": [],
         "absence": [],
+        "tenant_mismatch": [],
         "malformed_id": []
       },
-      "active_generation": "orivory_memories__af5e01c0",
+      "active_generation": null,
       "manifest_fingerprint": "af5e01c0cb5435f289ecec91443caec0c7b246de007d141fc75c96adbcab2945"
     },
     "chunk": {
@@ -132,16 +134,17 @@
         "stale_revision": [],
         "fingerprint": [],
         "absence": [],
+        "tenant_mismatch": [],
         "malformed_id": []
       },
-      "active_generation": "orivory_chunks__af5e01c0",
+      "active_generation": null,
       "manifest_fingerprint": "af5e01c0cb5435f289ecec91443caec0c7b246de007d141fc75c96adbcab2945"
     }
   },
   "backup": {
-    "dir": "/tmp/p1b_dryrun/work/backup",
-    "db_backup": "/tmp/p1b_dryrun/work/backup/.system_run.db.pre-p1b.bak",
-    "manifest": "/tmp/p1b_dryrun/work/backup/.system_run.db.pre-p1b.bak.manifest.json",
+    "dir": "/private/tmp/p1b_dryrun/backup",
+    "db_backup": "/private/tmp/p1b_dryrun/backup/.system_run.db.pre-p1b.bak",
+    "manifest": "/private/tmp/p1b_dryrun/backup/.system_run.db.pre-p1b.bak.manifest.json",
     "missing": [
       "uploads",
       "chroma"
@@ -150,8 +153,8 @@
   },
   "cutover": {
     "previous": {
-      "memory": "orivory_memories__af5e01c0",
-      "chunk": "orivory_chunks__af5e01c0"
+      "memory": "Orivory_memories",
+      "chunk": "Orivory_memories__chunks"
     },
     "active": {
       "memory": "orivory_memories__af5e01c0",
@@ -162,23 +165,23 @@
       "chunk": 0
     },
     "blocked_intents": 13,
-    "marker": "/tmp/p1b_dryrun/work/copy/.system_run.db.p1b-rollback-marker.json",
-    "elapsed_s": 0.018
+    "marker": "/tmp/p1b_dryrun/copy/.system_run.db.p1b-rollback-marker.json",
+    "elapsed_s": 0.016
   },
   "calibration": {
-    "rows": 500,
-    "seconds": 0.276,
-    "rows_per_sec": 1811.26,
-    "chars_per_sec": 17967.7,
+    "rows": 200,
+    "seconds": 0.11,
+    "rows_per_sec": 1819.3,
+    "chars_per_sec": 18047.5,
     "avg_chars_per_row": 9.9
   },
   "extrapolation": {
     "basis": "measured CLS embedding throughput on this machine, single process",
     "seconds_per_row": 0.00055,
-    "seconds_per_1000_chars": 0.05566,
+    "seconds_per_1000_chars": 0.05541,
     "budget_minutes": 60,
-    "max_eligible_rows_within_budget": 6520542,
-    "max_eligible_rows_within_budget_at_1000_chars": 64683,
+    "max_eligible_rows_within_budget": 6549480,
+    "max_eligible_rows_within_budget_at_1000_chars": 64970,
     "tiers": [
       {
         "eligible_rows": 100,
@@ -197,29 +200,29 @@
       },
       {
         "eligible_rows": 100000,
-        "projected_minutes": 0.92,
+        "projected_minutes": 0.916,
         "within_budget": true
       }
     ],
     "tiers_at_1000_chars": [
       {
         "eligible_rows": 100,
-        "projected_minutes": 0.093,
+        "projected_minutes": 0.092,
         "within_budget": true
       },
       {
         "eligible_rows": 1000,
-        "projected_minutes": 0.928,
+        "projected_minutes": 0.923,
         "within_budget": true
       },
       {
         "eligible_rows": 10000,
-        "projected_minutes": 9.276,
+        "projected_minutes": 9.235,
         "within_budget": true
       },
       {
         "eligible_rows": 100000,
-        "projected_minutes": 92.759,
+        "projected_minutes": 92.349,
         "within_budget": false
       }
     ]
