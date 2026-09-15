@@ -24,6 +24,12 @@ class Settings(BaseSettings):
     DATABASE_POOL_SIZE: int = 10
     DATABASE_MAX_OVERFLOW: int = 20
 
+    # The port the API listens on. `scripts/migrate_qdrant.py` probes it (plus
+    # its `migrate.lock`) to refuse to run while the app is alive — the P1b
+    # migration needs a quiesced store (spec §6.2 step 2, ruling R25). Docs for
+    # the operator flow live with the T7 deployment work.
+    APP_PORT: int = 8000
+
 
     REDIS_URL: str = ""
     REDIS_POOL_MAX: int = 20

@@ -13,8 +13,12 @@ P1b keeps the memory store and the document-chunk index on Qdrant
 (:mod:`app.retrieval.memory.vector_store`, :mod:`app.retrieval.vector_retriever`)
 and resolves each kind's physical generation through :func:`active_generation`.
 A drain applies one intent at a time: a dead row collapses to a delete, a
-stale revision is skipped (a newer intent owns the entity), a contract
-mismatch blocks terminally, a transient failure retries with backoff.
+stale revision is skipped (a newer intent owns the entity), an intent whose
+``target_generation`` is no longer the kind's active one blocks terminally
+(the cutover moved the pointer; the migration's backfill covers that write),
+a contract mismatch blocks terminally, a transient failure retries with
+backoff. ``mark_done`` carries the same generation predicate — a write into
+the new generation never acks an old generation's obligation.
 """
 from __future__ import annotations
 
@@ -395,21 +399,27 @@ def _enqueue_chunk_deletes_sync(db: Session, *, chunk_ids: Iterable[Any], tenant
 # ── ack: the immediate write-through already indexed this revision ──────────
 
 
-def _mark_done_stmt(*, entity_id, revision: int, kind: str = KIND_MEMORY):
+def _mark_done_stmt(*, entity_id, revision: int, kind: str = KIND_MEMORY,
+                    target_generation: str | None = None):
     """UPDATE flipping ONLY the pending upsert intent for that entity+revision.
 
-    Delete intents, other revisions and other kinds are different obligations
-    and are matched out by the WHERE clause.
+    Delete intents, other revisions, other kinds — and (ruling R27) other
+    GENERATIONS — are different obligations and are matched out by the WHERE
+    clause: a write-through into the active generation must never ack an intent
+    that promised a different one.
     """
+    conditions = [
+        IndexOutbox.kind == kind,
+        IndexOutbox.entity_id == _entity_id(entity_id),
+        IndexOutbox.revision == int(revision),
+        IndexOutbox.operation == OPERATION_UPSERT,
+        IndexOutbox.status == "pending",
+    ]
+    if target_generation is not None:
+        conditions.append(IndexOutbox.target_generation == target_generation)
     return (
         update(IndexOutbox)
-        .where(
-            IndexOutbox.kind == kind,
-            IndexOutbox.entity_id == _entity_id(entity_id),
-            IndexOutbox.revision == int(revision),
-            IndexOutbox.operation == OPERATION_UPSERT,
-            IndexOutbox.status == "pending",
-        )
+        .where(*conditions)
         .values(status="done", updated_at=datetime.now(UTC))
     )
 
@@ -422,6 +432,9 @@ async def mark_done(db: AsyncSession, *, entity_id, revision: int,
     the row would stay ``pending`` and every boot would re-embed it. Only ever
     called when the vector write landed — a failure must leave the intent
     pending, since that pending row is the proof the vector still owes it.
+    Generation-aware (R27): the ack only ever lands on an intent whose target
+    generation IS the kind's active one, so a write into the new generation can
+    never close an old generation's obligation.
 
     Never raises: an ack failure is logged and the intent stays ``pending``,
     which is safe (the drain replays it) and must not fail the caller's write.
@@ -430,7 +443,8 @@ async def mark_done(db: AsyncSession, *, entity_id, revision: int,
     """
     try:
         result = await db.execute(
-            _mark_done_stmt(entity_id=entity_id, revision=revision, kind=kind))
+            _mark_done_stmt(entity_id=entity_id, revision=revision, kind=kind,
+                            target_generation=await _target_generation(db, kind)))
         await db.commit()
         return getattr(result, "rowcount", 0) or 0
     except Exception as exc:
@@ -441,7 +455,9 @@ async def mark_done(db: AsyncSession, *, entity_id, revision: int,
 def mark_done_sync(db: Session, *, entity_id, revision: int, kind: str = KIND_MEMORY) -> int:
     """Synchronous variant of :func:`mark_done` (Celery / CLI / ingestion)."""
     try:
-        result = db.execute(_mark_done_stmt(entity_id=entity_id, revision=revision, kind=kind))
+        result = db.execute(_mark_done_stmt(
+            entity_id=entity_id, revision=revision, kind=kind,
+            target_generation=_target_generation_sync(db, kind)))
         db.commit()
         return getattr(result, "rowcount", 0) or 0
     except Exception as exc:
@@ -496,31 +512,47 @@ async def drain_pending(*, batch_size: int = 50) -> dict:
 
 
 async def _apply(db: AsyncSession, row: IndexOutbox) -> str:
-    """Apply one intent, ack it in its own commit, and return its report bucket."""
+    """Apply one intent, ack it in its own commit, and return its report bucket.
+
+    Generation-aware (ruling R27): an intent whose ``target_generation`` is not
+    the kind's ACTIVE generation is never applied. The P1b cutover moves the
+    pointer, and the migration's backfill already covers those writes — applying
+    one would index into a generation the app does not serve. Terminal, exactly
+    like a contract mismatch: never retried, never silently dropped.
+    """
     if row.kind not in (KIND_MEMORY, KIND_CHUNK):
         # Whatever owns the kind must apply it; never guess and delete another
         # kind's target.
         row.status, row.last_error = "blocked", f"unsupported outbox kind {row.kind!r}"
         outcome = "blocked"
     else:
-        try:
-            if row.kind == KIND_MEMORY:
-                outcome = await _apply_memory_intent(db, row)
-            else:
-                outcome = await _apply_chunk_intent(db, row)
-            row.status = "done"
-        except EmbeddingDimensionMismatch as exc:
-            row.status, row.last_error = "blocked", _error_text(exc)
+        active = await _target_generation(db, row.kind)
+        if row.target_generation != active:
+            row.status = "blocked"
+            row.last_error = (
+                f"generation {row.target_generation!r} superseded by {active!r}"
+            )[:_ERROR_TEXT_LIMIT]
             outcome = "blocked"
-        except Exception as exc:
-            row.attempts = int(row.attempts or 0) + 1
-            row.next_attempt_at = datetime.now(UTC) + timedelta(seconds=_backoff_seconds(row.attempts))
-            row.last_error = _error_text(exc)
-            outcome = "failed"  # status stays 'pending'
-            log.warning(
-                "Outbox drain retry for %s#%s (attempt %d): %s",
-                row.kind, row.entity_id, row.attempts, exc,
-            )
+        else:
+            try:
+                if row.kind == KIND_MEMORY:
+                    outcome = await _apply_memory_intent(db, row)
+                else:
+                    outcome = await _apply_chunk_intent(db, row)
+                row.status = "done"
+            except EmbeddingDimensionMismatch as exc:
+                row.status, row.last_error = "blocked", _error_text(exc)
+                outcome = "blocked"
+            except Exception as exc:
+                row.attempts = int(row.attempts or 0) + 1
+                row.next_attempt_at = datetime.now(UTC) + timedelta(
+                    seconds=_backoff_seconds(row.attempts))
+                row.last_error = _error_text(exc)
+                outcome = "failed"  # status stays 'pending'
+                log.warning(
+                    "Outbox drain retry for %s#%s (attempt %d): %s",
+                    row.kind, row.entity_id, row.attempts, exc,
+                )
     row.updated_at = datetime.now(UTC)
     await db.commit()
     return outcome

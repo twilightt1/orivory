@@ -3,7 +3,9 @@
 Real SQLite files, no mocks: a synthetic v1 install (full v1 schema,
 ``user_version`` 0 or 1) is migrated by ``bootstrap_sqlite`` and the result is
 re-read from the file — schema, backfilled data, pre-DDL backup, seeded
-transitional generation row.
+generation rows. The ladder's terminal stamp is v3 (the P1b data step, which
+replaces the P1a transitional row with the two real generation rows and renames
+the milestone backup — see ``test_sqlite_schema_v3.py`` for that step).
 """
 from __future__ import annotations
 
@@ -23,7 +25,7 @@ from app import database, models  # noqa: F401 — register every model on Base
 from app.config import settings
 from app.database import Base
 from app.models.index_outbox import IndexGeneration
-from app.retrieval.embedding_fingerprint import current_fingerprint, fingerprint_generation
+from app.retrieval.embedding_fingerprint import current_fingerprint, fingerprint_generation, generation_name
 from app.retrieval.memory.vector_store import COLLECTION_NAME
 
 V2_TABLES = {"index_outbox", "index_generations", "memory_suppressions"}
@@ -127,20 +129,21 @@ async def test_v1_install_is_upgraded_to_v2_and_backed_up(v1_db):
         fk_violations = (await conn.execute(text("PRAGMA foreign_key_check"))).all()
         integrity = (await conn.execute(text("PRAGMA integrity_check"))).scalar_one()
 
-    assert version == 2
+    assert version == 3
     assert V2_TABLES <= tables
     assert [tuple(row) for row in memories] == [("v1 memory text", 1)]  # existing rows: revision 1
     assert [tuple(row) for row in chunks] == [("v1 chunk text", 1)]
     assert fk_violations == []
     assert integrity == "ok"
-    assert [(r[0], r[1], r[3]) for r in generations] == [("memory", COLLECTION_NAME, 1)]
+    active = {(r[0], r[1]) for r in generations if r[3]}
+    assert active == {("memory", generation_name("memory")), ("chunk", generation_name("chunk"))}
     # Same 64-char generation token the vector payload stamps as orivory_embed_generation.
-    assert generations[0][2] == fingerprint_generation(current_fingerprint())
+    assert {r[2] for r in generations} == {fingerprint_generation(current_fingerprint())}
     _assert_fingerprint_fits_column(generations[0][2])
 
-    # Backup must exist and predate the v2 DDL.
-    backups = list(Path(tmp_path).glob("*.pre-v2.bak"))
-    assert len(backups) == 1, "exactly one pre-DDL backup is required"
+    # The milestone backup exists and predates the ladder's DDL.
+    backups = list(Path(tmp_path).glob("*.pre-p1b.bak"))
+    assert len(backups) == 1, "exactly one pre-ladder backup is required"
     backup = sqlite3.connect(backups[0])
     try:
         backup_tables = {r[0] for r in backup.execute(
@@ -174,10 +177,10 @@ async def test_unversioned_v1_shape_is_adopted_then_upgraded(tmp_path, monkeypat
         async with eng.connect() as conn:
             version, tables = await _schema(conn)
             memories = (await conn.execute(text("SELECT content, revision FROM memories"))).all()
-        assert version == 2
+        assert version == 3
         assert V2_TABLES <= tables
         assert [tuple(row) for row in memories] == [("v1 memory text", 1)]
-        assert list(Path(tmp_path).glob("*.pre-v2.bak"))
+        assert list(Path(tmp_path).glob("*.pre-p1b.bak"))
     finally:
         await eng.dispose()
 
@@ -221,27 +224,28 @@ async def test_divergent_schema_still_fails_closed(tmp_path, monkeypatch):
         await eng.dispose()
 
 
-async def test_bootstrap_is_idempotent_and_seeds_one_generation_row(tmp_path, monkeypatch):
+async def test_bootstrap_is_idempotent_and_writes_the_two_real_generation_rows(tmp_path, monkeypatch):
     eng = await _engine(tmp_path, "fresh.sqlite")
     monkeypatch.setattr(database, "engine", eng)
     monkeypatch.setattr(database, "IS_SQLITE", True)
     try:
         await database.bootstrap_sqlite()
-        await database.bootstrap_sqlite()  # rerun on a v2 install: no-op
+        await database.bootstrap_sqlite()  # rerun on a v3 install: no-op
 
         async with eng.connect() as conn:
             version, tables = await _schema(conn)
             generations = (await conn.execute(text(
                 "SELECT kind, generation, fingerprint, is_active FROM index_generations"))).all()
-        assert version == database.SQLITE_SCHEMA_VERSION == 2
+        assert version == database.SQLITE_SCHEMA_VERSION == 3
         assert V2_TABLES <= tables
-        assert len(generations) == 1, "seed must be INSERT-IF-ABSENT"
-        assert generations[0][0] == "memory"
-        assert generations[0][1] == COLLECTION_NAME
-        assert generations[0][2] == fingerprint_generation(current_fingerprint())
+        assert {(r[0], r[1]) for r in generations} == {
+            ("memory", generation_name("memory")), ("chunk", generation_name("chunk"))}
+        assert all(r[2] == fingerprint_generation(current_fingerprint()) for r in generations)
         _assert_fingerprint_fits_column(generations[0][2])
-        assert generations[0][3] == 1
-        assert not list(Path(tmp_path).glob("*.pre-v2.bak")), "no DDL on fresh install, no backup"
+        assert all(r[3] == 1 for r in generations), "one active row per kind"
+        assert COLLECTION_NAME not in {r[1] for r in generations}, (
+            "the P1a transitional spelling is never seeded again")
+        assert not list(Path(tmp_path).glob("*.pre-p1b.bak")), "no data step, no backup"
     finally:
         await eng.dispose()
 
@@ -282,27 +286,30 @@ async def test_interrupted_upgrade_resumes_and_keeps_the_existing_backup(v1_db):
 
     Reproduces the review repro: v2 DDL applied (it autocommits), ``user_version``
     still 1, a pre-existing non-empty ``.pre-v2.bak``. Re-entry must complete the
-    upgrade and leave that backup's bytes untouched.
+    upgrade and leave that backup's bytes untouched (the P1b step takes the
+    milestone name, so the file is renamed, never rewritten).
     """
     eng, tmp_path = v1_db
-    backup = tmp_path / "v1.sqlite.pre-v2.bak"
-    backup.write_bytes(b"pre-v2 backup from the interrupted run")
+    legacy = tmp_path / "v1.sqlite.pre-v2.bak"
+    legacy.write_bytes(b"pre-v2 backup from the interrupted run")
     async with eng.begin() as conn:
         await conn.run_sync(database._upgrade_v1_to_v2)  # the DDL of the partial run
         version, _ = await _schema(conn)
     assert version == 1, "fixture must model an interruption, not a finished upgrade"
 
-    before = backup.read_bytes()
+    before = legacy.read_bytes()
     await database.bootstrap_sqlite()
 
     async with eng.connect() as conn:
         version, tables = await _schema(conn)
-    assert version == 2
+    milestone = tmp_path / "v1.sqlite.pre-p1b.bak"
+    assert version == 3
     assert V2_TABLES <= tables
-    assert list(Path(tmp_path).glob("*.pre-v2.bak")) == [backup], (
+    assert list(Path(tmp_path).glob("*.pre-p1b.bak")) == [milestone], (
         "the interrupted run's backup must be reused, not replaced"
     )
-    assert backup.read_bytes() == before, "an existing backup is never overwritten"
+    assert not legacy.exists(), "the milestone name is what the P1b step leaves behind"
+    assert milestone.read_bytes() == before, "an existing backup is never overwritten"
 
 
 async def test_empty_existing_backup_still_refuses(v1_db):

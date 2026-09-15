@@ -136,8 +136,15 @@ async def _verify_absent(memory_ids: list[uuid.UUID]) -> set[str] | None:
         return None
 
 
-async def _db_residual_counts(db: AsyncSession, memory_ids: list[uuid.UUID]) -> dict[str, int]:
-    """Re-count cascade targets after deletion; anything > 0 is a residual."""
+async def _db_residual_counts(
+    db: AsyncSession, memory_ids: list[uuid.UUID], *, cross_user_children: int = 0
+) -> dict[str, int]:
+    """Re-count cascade targets after deletion; anything > 0 is a residual.
+
+    ``cross_user_children`` is passed in because it can only be counted BEFORE
+    the delete (the cascade has already removed those rows by now) — see
+    :func:`_cross_user_cascade_count`.
+    """
     children = (await db.execute(
         select(func.count(Memory.id)).where(Memory.parent_id.in_(memory_ids))
     )).scalar_one()
@@ -147,7 +154,30 @@ async def _db_residual_counts(db: AsyncSession, memory_ids: list[uuid.UUID]) -> 
     source_links = (await db.execute(
         select(func.count()).select_from(MemorySource).where(MemorySource.memory_id.in_(memory_ids))
     )).scalar_one()
-    return {"children": int(children), "entity_links": int(entity_links), "source_links": int(source_links)}
+    return {
+        "children": int(children),
+        "entity_links": int(entity_links),
+        "source_links": int(source_links),
+        "cross_user_children": int(cross_user_children),
+    }
+
+
+async def _cross_user_cascade_count(
+    db: AsyncSession, memory_ids: list[uuid.UUID], *, user_id: uuid.UUID
+) -> int:
+    """Rows another user parents onto the erased ids (R29c).
+
+    The DB-level ON DELETE CASCADE removes them, but the erasing user's scope
+    cannot enumerate them — so their vectors are never deleted and never
+    verified. Counting them BEFORE the delete is the only way the receipt can
+    report that residual class instead of claiming a clean erasure.
+    """
+    return int((await db.execute(
+        select(func.count(Memory.id)).where(
+            Memory.parent_id.in_(memory_ids),
+            Memory.user_id != user_id,
+        )
+    )).scalar_one())
 
 
 async def _pending_delete_intents(db: AsyncSession, memory_ids: list[uuid.UUID]) -> int:
@@ -308,6 +338,10 @@ async def _erase_one(db: AsyncSession, user_id: uuid.UUID, memory_id: uuid.UUID)
                              revision=revisions.get(affected_id, 1))
 
     suppressed_source = await _suppress_forgotten_projection(db, user_id, row)
+    # Count the rows the DB cascade is about to remove for OTHER users (R29c):
+    # after the delete they are gone and their vectors were never enumerable
+    # from this scope — the receipt must still carry them as a residual.
+    cross_user_children = await _cross_user_cascade_count(db, affected, user_id=user_id)
 
     # One DELETE for the whole closure: children and links go with it through
     # the DB-level ON DELETE CASCADE. The DB is also the only deleter that can
@@ -325,7 +359,7 @@ async def _erase_one(db: AsyncSession, user_id: uuid.UUID, memory_id: uuid.UUID)
         vectors_deleted.append(str(vid))
 
     present = await _verify_absent(affected)
-    db_residual = await _db_residual_counts(db, affected)
+    db_residual = await _db_residual_counts(db, affected, cross_user_children=cross_user_children)
     if present:
         vector_state = VECTOR_STATE_RESIDUAL
     elif purge_failed:

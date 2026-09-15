@@ -871,3 +871,120 @@ async def test_correction_enqueues_the_new_fact(db, owner):
         (first["memory"].id.hex, 1),
         (second["memory"].id.hex, 1),
     ]
+
+
+# ── R27: drain and mark_done are generation-aware ───────────────────────────
+
+
+async def _activate_generation(kind: str, generation: str) -> None:
+    async with database.AsyncSessionLocal() as session:
+        session.add(IndexGeneration(id=uuid.uuid4().hex, kind=kind, generation=generation,
+                                    fingerprint="f" * 64, is_active=True))
+        await session.commit()
+
+
+async def _queue_intent(db, *, memory, target_generation: str, revision: int = 1) -> None:
+    """A pending intent naming ``target_generation`` (bypassing the manifest)."""
+    db.add(IndexOutbox(kind="memory", entity_id=memory.id.hex, tenant_id=str(memory.user_id).replace("-", ""),
+                       revision=revision, operation="upsert",
+                       target_generation=target_generation, status="pending"))
+    await db.commit()
+
+
+async def test_drain_blocks_an_intent_for_a_superseded_generation(db, owner, monkeypatch):
+    """R27: an intent the active pointer no longer names is terminal, never applied.
+
+    Its write is already covered by the migration's backfill; applying it would
+    write into a generation the app does not serve."""
+    applied: list[str] = []
+
+    async def record(memory):
+        applied.append(str(memory.id))
+
+    monkeypatch.setattr(outbox, "upsert_memory", record)
+
+    memory = _memory(owner)
+    db.add(memory)
+    outbox.bump_revision(memory)
+    await db.commit()
+    await _activate_generation("memory", "orivory_memories__new")
+    await _queue_intent(db, memory=memory, target_generation=outbox.TARGET_GENERATION)
+
+    report = await outbox.drain_pending()
+
+    assert report == {"claimed": 1, "applied": 0, "skipped": 0, "blocked": 1, "failed": 0}
+    assert applied == []
+    row = (await _outbox_rows())[0]
+    assert row.status == "blocked", "terminal: a stale-target intent is not retried"
+    assert row.attempts == 0
+    assert "generation" in (row.last_error or "")
+
+
+async def test_drain_applies_an_intent_for_the_active_generation(db, owner, monkeypatch):
+    """The control: the predicate must not block the generation in force."""
+    applied: list[str] = []
+
+    async def record(memory):
+        applied.append(str(memory.id))
+
+    monkeypatch.setattr(outbox, "upsert_memory", record)
+
+    memory = _memory(owner)
+    db.add(memory)
+    outbox.bump_revision(memory)
+    await outbox.enqueue_upsert(db, memory)  # stamped with the transitional fallback
+    await db.commit()
+    # Activate exactly the generation the intent carries: nothing to block.
+    await _activate_generation("memory", outbox.TARGET_GENERATION)
+
+    acked = await outbox.drain_pending()
+
+    assert acked["applied"] == 1 and applied == [str(memory.id)]
+    assert (await _outbox_rows())[0].status == "done"
+
+
+async def test_mark_done_never_acks_an_intent_for_another_generation(db, owner):
+    """The ack carries the same predicate: a write into the new generation must
+    not close an intent that promised the old one."""
+    memory = _memory(owner)
+    db.add(memory)
+    outbox.bump_revision(memory)
+    await db.commit()
+    await _activate_generation("memory", "orivory_memories__new")
+    await _queue_intent(db, memory=memory, target_generation=outbox.TARGET_GENERATION)
+
+    assert await outbox.mark_done(db, entity_id=memory.id, revision=memory.revision) == 0
+    assert (await _outbox_rows())[0].status == "pending"
+
+    # The same intent under the ACTIVE generation is ackable.
+    rows = await _outbox_rows()
+    async with database.AsyncSessionLocal() as session:
+        row = await session.get(IndexOutbox, rows[0].seq)
+        row.target_generation = "orivory_memories__new"
+        await session.commit()
+    assert await outbox.mark_done(db, entity_id=memory.id, revision=memory.revision) == 1
+    assert (await _outbox_rows())[0].status == "done"
+
+
+def test_mark_done_sync_carries_the_same_predicate(db, owner):
+    memory = _memory(owner)
+    with sync_session() as sync_db:
+        sync_db.add(memory)
+        outbox.bump_revision(memory)
+        sync_db.commit()
+    _activate_generation_sync("memory", "orivory_memories__new")
+    with sync_session() as sync_db:
+        sync_db.add(IndexOutbox(kind="memory", entity_id=memory.id.hex,
+                                tenant_id=str(memory.user_id).replace("-", ""), revision=1,
+                                operation="upsert", target_generation=outbox.TARGET_GENERATION,
+                                status="pending"))
+        sync_db.commit()
+        assert outbox.mark_done_sync(sync_db, entity_id=memory.id, revision=memory.revision) == 0
+        assert sync_db.execute(select(IndexOutbox)).scalars().one().status == "pending"
+
+
+def _activate_generation_sync(kind: str, generation: str) -> None:
+    with sync_session() as sync_db:
+        sync_db.add(IndexGeneration(id=uuid.uuid4().hex, kind=kind, generation=generation,
+                                    fingerprint="f" * 64, is_active=True))
+        sync_db.commit()
