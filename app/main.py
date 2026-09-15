@@ -16,34 +16,29 @@ from app.retrieval.vector_retriever import VectorUnavailableError
 
 log = structlog.get_logger()
 
-# A boot replays at most this many drain batches of 50 intents. A crash-time
-# backlog heals over a few starts without delaying readiness; anything left
-# stays pending in SQLite for the next boot (a background loop is P3's, and is
-# deliberately absent here).
-_STARTUP_DRAIN_BATCHES = 2
-_STARTUP_DRAIN_BATCH_SIZE = 50
+# The boot replays ONE bounded batch of intents before serving: the background
+# loop's first tick can be a whole interval away, and a booting app should not
+# make a user wait for it. Everything after that batch is
+# app/retrieval/memory/drain_loop.py's — on both dialects (P3).
 
 
-async def _drain_index_outbox_on_startup() -> None:
-    """Replay pending index intents at boot — SQLite deployments only.
+async def _drain_index_outbox_at_boot() -> None:
+    """Replay one batch of pending intents at boot — SQLite and Postgres alike.
 
-    Mirrors the ``bootstrap_sqlite`` guard. Bounded and failure-tolerant: a
-    vector outage (or any drain-level error) must never keep the app from
-    booting, so it is logged and the intents stay pending with backoff for the
-    next start. The report of every batch is logged for observability.
+    Bounded and failure-tolerant: a vector outage (or any drain-level error)
+    must never keep the app from booting, so it is logged and the intents stay
+    pending with backoff for the background loop. The report is logged for
+    observability.
     """
-    if not settings.DATABASE_URL.startswith("sqlite"):
-        return
-    from app.retrieval.memory.outbox import drain_pending
+    from app.retrieval.memory.drain_loop import _should_drain, drain_once
 
+    if not _should_drain():
+        return
     try:
-        for _ in range(_STARTUP_DRAIN_BATCHES):
-            report = await drain_pending(batch_size=_STARTUP_DRAIN_BATCH_SIZE)
-            log.info("Index outbox startup drain", **report)
-            if report.get("claimed", 0) < _STARTUP_DRAIN_BATCH_SIZE:
-                break  # nothing left: a second batch would claim zero
+        report = await drain_once(batch_size=settings.OUTBOX_DRAIN_BATCH_SIZE)
+        log.info("Index outbox boot drain", **report)
     except Exception as e:
-        log.warning("Index outbox startup drain failed", error=str(e))
+        log.warning("Index outbox boot drain failed", error=str(e))
 
 
 def _requested_processes() -> int:
@@ -105,7 +100,10 @@ async def lifespan(app: FastAPI):
         from app.database import bootstrap_sqlite
         await bootstrap_sqlite()
         log.info("SQLite schema bootstrapped")
-    await _drain_index_outbox_on_startup()
+    from app.retrieval.memory.drain_loop import start_drain_loop, stop_drain_loop
+
+    await _drain_index_outbox_at_boot()
+    drain_task = await start_drain_loop()
     try:
         from app.storage import ensure_bucket
         await ensure_bucket()
@@ -125,6 +123,10 @@ async def lifespan(app: FastAPI):
         else:
             yield
     finally:
+        # Stop the drain loop first: in local mode its vector writes hold the
+        # storage folder, and closing the client under a live batch would fail
+        # that batch for nothing (it stays pending with backoff).
+        await stop_drain_loop(drain_task)
         # Always close the vector client(s): in local mode this is what releases
         # the storage-folder lock for the next process — or for the offline
         # migration CLI that owns the folder during a cutover.

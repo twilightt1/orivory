@@ -440,7 +440,7 @@ async def test_drain_batch_size_bounds_one_run(db, owner, monkeypatch):
     assert second["claimed"] == 1
 
 
-# ── startup drain (T5): restart replay, bounded batches, never a boot blocker ─
+# ── boot drain (P3): one bounded batch, both dialects, never a boot blocker ──
 
 
 class _LogCapture:
@@ -456,7 +456,7 @@ class _LogCapture:
         self.events.append(("warning", event, kw))
 
     def reports(self) -> list[dict]:
-        return [kw for _level, event, kw in self.events if event == "Index outbox startup drain"]
+        return [kw for _level, event, kw in self.events if event == "Index outbox boot drain"]
 
 
 def _pin_this_files_url(monkeypatch, tmp_path) -> None:
@@ -503,8 +503,8 @@ async def test_pending_intent_survives_a_restart_and_is_applied_on_the_next_boot
         sync_eng.dispose()
 
 
-async def test_startup_drain_is_bounded_to_two_batches(db, owner, monkeypatch, tmp_path):
-    """At most 2 x 50 intents per boot: the rest stays pending for the next start."""
+async def test_boot_drain_is_bounded_to_one_batch(db, owner, monkeypatch, tmp_path):
+    """One batch of 50 per boot: the background loop owns the rest (P3)."""
     indexed: list[str] = []
 
     async def upsert_ok(memory):
@@ -522,15 +522,15 @@ async def test_startup_drain_is_bounded_to_two_batches(db, owner, monkeypatch, t
     captured = _LogCapture()
     monkeypatch.setattr(main, "log", captured)
 
-    await main._drain_index_outbox_on_startup()
+    await main._drain_index_outbox_at_boot()
 
-    assert len(indexed) == 100  # a third batch would have claimed the last 20
+    assert len(indexed) == 50  # a second batch is the loop's, not the boot's
     statuses = [row.status for row in await _outbox_rows()]
-    assert statuses.count("done") == 100 and statuses.count("pending") == 20
-    assert [report["claimed"] for report in captured.reports()] == [50, 50]
+    assert statuses.count("done") == 50 and statuses.count("pending") == 70
+    assert [report["claimed"] for report in captured.reports()] == [50]
 
 
-async def test_startup_drain_keeps_intents_pending_when_chroma_is_down(
+async def test_boot_drain_keeps_intents_pending_when_chroma_is_down(
     db, owner, monkeypatch, tmp_path
 ):
     """The ruling: a vector outage at boot leaves the intent pending, never blocks boot."""
@@ -549,7 +549,7 @@ async def test_startup_drain_keeps_intents_pending_when_chroma_is_down(
     captured = _LogCapture()
     monkeypatch.setattr(main, "log", captured)
 
-    await main._drain_index_outbox_on_startup()  # must return, not raise
+    await main._drain_index_outbox_at_boot()  # must return, not raise
 
     row = (await _outbox_rows())[0]
     assert row.status == "pending" and row.attempts == 1
@@ -557,7 +557,7 @@ async def test_startup_drain_keeps_intents_pending_when_chroma_is_down(
     assert [report["failed"] for report in captured.reports()] == [1]  # the report was logged
 
 
-async def test_startup_drain_failure_is_logged_not_raised(db, owner, monkeypatch, tmp_path):
+async def test_boot_drain_failure_is_logged_not_raised(db, owner, monkeypatch, tmp_path):
     """Even a drain-level failure is a warning: the app must still boot."""
     from sqlalchemy import text
 
@@ -573,26 +573,57 @@ async def test_startup_drain_failure_is_logged_not_raised(db, owner, monkeypatch
     captured = _LogCapture()
     monkeypatch.setattr(main, "log", captured)
 
-    await main._drain_index_outbox_on_startup()
+    await main._drain_index_outbox_at_boot()
 
     level, event, kw = captured.events[0]
-    assert (level, event) == ("warning", "Index outbox startup drain failed")
+    assert (level, event) == ("warning", "Index outbox boot drain failed")
     assert kw["error"]
 
 
-async def test_startup_drain_is_a_noop_outside_sqlite_deployments(db, owner, monkeypatch):
-    """Mirrors the bootstrap_sqlite guard: a Postgres boot does not drain here."""
+async def test_boot_drain_runs_outside_sqlite_deployments(db, owner, monkeypatch, tmp_path):
+    """P3: the boot drain's SQLite-only gate is gone — both dialects drain.
+
+    The URL is Postgres-shaped; the drain itself lands on this test's private
+    SQLite file, so the code path plainly no longer branches on the dialect.
+    """
     memory = _memory(owner)
     db.add(memory)
     outbox.bump_revision(memory)
     await outbox.enqueue_upsert(db, memory)
     await db.commit()
 
+    indexed: list[str] = []
+
+    async def upsert_ok(memory_row):
+        indexed.append(str(memory_row.id))
+
+    monkeypatch.setattr(outbox, "upsert_memory", upsert_ok)  # the vector write is not the contract here
     monkeypatch.setattr(main.settings, "DATABASE_URL", "postgresql+asyncpg://user:pw@db/orivory")
     captured = _LogCapture()
     monkeypatch.setattr(main, "log", captured)
 
-    await main._drain_index_outbox_on_startup()
+    await main._drain_index_outbox_at_boot()
+
+    assert [report["claimed"] for report in captured.reports()] == [1]
+    assert indexed == [str(memory.id)]
+    row = (await _outbox_rows())[0]
+    assert row.status == "done"  # drained, not skipped
+
+
+async def test_boot_drain_is_a_noop_when_the_drain_is_disabled(db, owner, monkeypatch, tmp_path):
+    """``OUTBOX_DRAIN_ENABLED=false``: no boot batch either, logs stay quiet."""
+    memory = _memory(owner)
+    db.add(memory)
+    outbox.bump_revision(memory)
+    await outbox.enqueue_upsert(db, memory)
+    await db.commit()
+
+    _pin_this_files_url(monkeypatch, tmp_path)
+    monkeypatch.setattr(main.settings, "OUTBOX_DRAIN_ENABLED", False)
+    captured = _LogCapture()
+    monkeypatch.setattr(main, "log", captured)
+
+    await main._drain_index_outbox_at_boot()
 
     assert captured.events == []
     row = (await _outbox_rows())[0]
