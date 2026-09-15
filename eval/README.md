@@ -32,6 +32,7 @@ This directory contains evaluation tooling for the Orivory RAG demo.
 | `run_eval.py` | CLI entrypoint for offline and live API evaluation modes. |
 | `live_api_eval.py` | Live API evaluator, SSE parser, response collector, and live scoring helpers. |
 | `Orivory_offline_eval.py` | Lightweight keyword sanity check used by `run_eval.py --mode offline`. |
+| `ablation_mean_vs_cls.py` | NOT an eval entrypoint: the P1b mean-vs-CLS ablation (both pooling contracts on one corpus, one embedded Qdrant) whose committed `ablation_mean_vs_cls.json` is the cutover's evidence artifact. Evidence only — never a gate; SKIPs without the arctic ONNX cache. |
 
 ## Benchmarks
 
