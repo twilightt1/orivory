@@ -5,7 +5,6 @@ into the existing graph tables without requiring migrations.
 """
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
@@ -19,7 +18,9 @@ from app.graph.extraction import (
     ExtractedEntity,
     ExtractedRelation,
     extract_entities,
+    extract_entities_sync,
     extract_relations,
+    extract_relations_sync,
     normalize_entity_name,
     normalize_entity_type,
     normalize_relation_type,
@@ -117,7 +118,7 @@ def build_memory_graph_sync(
     if _already_processed(memory) and not force:
         return GraphBuildResult(memory_id=str(memory.id), user_id=str(memory.user_id), skipped=True)
 
-    entity_result = asyncio.run(extract_entities(memory))
+    entity_result = extract_entities_sync(memory)
     entities = entity_result.entities
 
     created_entities = 0
@@ -137,7 +138,7 @@ def build_memory_graph_sync(
 
     db.flush()
 
-    relation_result = asyncio.run(extract_relations(memory, entities))
+    relation_result = extract_relations_sync(memory, entities)
     relation_stats = _persist_relations_sync(db, memory, relation_result.relations, entity_by_key)
 
     _mark_processed(memory, entity_result, relation_result)
