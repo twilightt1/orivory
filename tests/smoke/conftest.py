@@ -36,9 +36,9 @@ def docker_services():
             "port": 6379,
             "db": 0,
         },
-        "chroma": {
+        "qdrant": {
             "host": "localhost",
-            "port": 8001,
+            "port": 6333,
         },
         "minio": {
             "host": "localhost",

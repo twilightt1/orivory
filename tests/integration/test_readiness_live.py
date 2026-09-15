@@ -15,5 +15,5 @@ async def test_live_readiness_reports_all_dependencies_ok():
     payload = await check_readiness()
 
     assert payload["status"] == "ok"
-    assert set(payload["checks"]) == {"postgres", "redis", "minio", "chroma", "mcp_hub"}
+    assert set(payload["checks"]) == {"postgres", "redis", "minio", "qdrant", "mcp_hub"}
     assert all(check["status"] == "ok" for check in payload["checks"].values())

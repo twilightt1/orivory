@@ -17,7 +17,7 @@ def is_docker_available():
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(2)
         # Try common service ports
-        for port in [5432, 6379, 8001, 9000]:
+        for port in [5432, 6379, 6333, 9000]:
             try:
                 sock.connect(("localhost", port))
                 sock.close()
@@ -93,36 +93,36 @@ class TestPostgresHealth:
 
 
 @pytest.mark.smoke
-class TestChromaDBHealth:
-    """Tests for ChromaDB service."""
+class TestQdrantHealth:
+    """Tests for the Qdrant vector store service."""
 
-    def test_chroma_heartbeat(self, docker_services):
-        """ChromaDB should respond to heartbeat check."""
+    def test_qdrant_is_ready(self, docker_services):
+        """Qdrant /readyz should answer 200 once its shards are ready."""
         skip_if_no_docker()
         import requests
 
         try:
-            response = requests.get("http://localhost:8001/api/v2/heartbeat", timeout=5)
+            response = requests.get("http://localhost:6333/readyz", timeout=5)
             assert response.status_code == 200
-            data = response.json()
-            # Real Chroma v2 API: {"nanosecond heartbeat": N} — no "success" key.
-            assert "nanosecond heartbeat" in data
+            # Real Qdrant /readyz: plain text "all shards are ready".
+            assert "ready" in response.text
         except requests.exceptions.RequestException:
-            pytest.skip("ChromaDB not available")
+            pytest.skip("Qdrant not available")
 
-    def test_chroma_version(self, docker_services):
-        """ChromaDB should report version."""
+    def test_qdrant_version(self, docker_services):
+        """Qdrant should report its version on the root endpoint."""
         skip_if_no_docker()
         import requests
 
         try:
-            response = requests.get("http://localhost:8001/api/v2/version", timeout=5)
+            response = requests.get("http://localhost:6333/", timeout=5)
             assert response.status_code == 200
             data = response.json()
-            # Real Chroma v2 API returns a bare string like "1.0.0".
-            assert isinstance(data, str) and len(data) > 0
+            # Real Qdrant root: {"title": "qdrant - vector search engine", "version": "1.x.y"}
+            assert data["title"] == "qdrant - vector search engine"
+            assert isinstance(data["version"], str) and len(data["version"]) > 0
         except requests.exceptions.RequestException:
-            pytest.skip("ChromaDB not available")
+            pytest.skip("Qdrant not available")
 
 
 @pytest.mark.smoke

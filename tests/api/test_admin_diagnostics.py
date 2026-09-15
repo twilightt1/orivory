@@ -20,7 +20,7 @@ def _diagnostics_payload():
             "postgres": {"status": "ok", "latency_ms": 1.0},
             "redis": {"status": "ok", "latency_ms": 1.0},
             "minio": {"status": "ok", "latency_ms": 1.0},
-            "chroma": {"status": "ok", "latency_ms": 1.0},
+            "qdrant": {"status": "ok", "latency_ms": 1.0},
             "celery": {"status": "ok", "latency_ms": 1.0},
         },
         "config": {

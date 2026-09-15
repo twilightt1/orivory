@@ -1,6 +1,6 @@
-"""Lite-mode readiness for the vector store (T2 fix round 1).
+"""Lite-mode readiness for the vector store (T2 fix round 1, key renamed in T7).
 
-Regression pin: the lite branch of ``health_service._check_chroma`` used to
+Regression pin: the lite branch of ``health_service._check_qdrant`` used to
 probe Chroma's HTTP client — which lite never starts, so ``GET /ready``
 answered 503 ``degraded`` forever. The lite probe now opens the embedded
 Qdrant owner client (in-process, no socket, one client) and nothing else.
@@ -16,15 +16,14 @@ from app.services import health_service
 
 
 def _lite(monkeypatch, folder) -> None:
-    """LITE_MODE's shape: embedded Qdrant, local Chroma, no external services."""
+    """LITE_MODE's shape: embedded Qdrant, no external services."""
     monkeypatch.setattr(settings, "QDRANT_MODE", "local")
     monkeypatch.setattr(settings, "QDRANT_LOCAL_PATH", str(folder))
-    monkeypatch.setattr(settings, "CHROMA_MODE", "local")
 
 
 async def _probe() -> dict:
     """The vector-store probe, exactly as ``/ready`` measures it."""
-    _, payload = await health_service._measure("chroma", health_service._check_chroma)
+    _, payload = await health_service._measure("qdrant", health_service._check_qdrant)
     return payload
 
 
@@ -64,7 +63,7 @@ async def test_lite_readiness_probe_fails_when_the_folder_is_foreign_owned(
     foreign = QdrantClient(path=str(folder))
     try:
         with pytest.raises(RuntimeError, match="already accessed"):
-            await health_service._check_chroma()
+            await health_service._check_qdrant()
         payload = await _probe()
         assert payload["status"] == "failed"
         assert "already accessed" in payload["error"]
