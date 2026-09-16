@@ -73,6 +73,15 @@ class Memory(Base):
     # (spec §4.1 — never `updated_at`).
     revision:      Mapped[int]        = mapped_column(Integer, default=1, server_default="1", nullable=False)
 
+    # Authorization boundary (P4a): every pre-P4 row was backfilled to
+    # 'personal' by the SQLite ladder's v4 -> v5 step (or by this column's
+    # server default on a fresh install). Never set from client input in this
+    # phase — the only value that exists is `namespaces.PERSONAL`. `String(32)`
+    # is deliberate: the ladder's ADD COLUMN spells the same type
+    # (`VARCHAR(32) NOT NULL DEFAULT 'personal'`), so an upgraded file and a
+    # fresh one are indistinguishable.
+    namespace:     Mapped[str]        = mapped_column(String(32), nullable=False, server_default="personal")
+
     # Usage feedback (P2.1): bumped when a memory is recalled & used in an
     # answer; decayed periodically when untouched. Drives the salience loop.
     recall_count:  Mapped[int]        = mapped_column(Integer(), default=0, nullable=False)
@@ -97,6 +106,9 @@ class Memory(Base):
         Index("ix_memories_user_salience", "user_id", "salience"),
         Index("ix_memories_source", "user_id", "source_type"),
         Index("ix_memories_user_last_used", "user_id", "last_used_at"),
+        # The namespace boundary is queried WITH the owner: `namespace = ? AND
+        # user_id = ?` is the shape every reader is about to take (P4a Task 2+).
+        Index("ix_memories_namespace_user", "namespace", "user_id"),
     )
 
 
