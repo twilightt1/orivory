@@ -44,7 +44,8 @@ live here too: the lifespan warms the embedder BEFORE the boot drain, the
 example env files carry the shipped P2 retrieval defaults (CI copies
 ``.env.test.example`` to ``.env``, so a stale example is a stale deployment),
 and the trace may only carry DECLARED keys (the P3 gate's leaked-key pin,
-re-asserted on every trace this file builds).
+re-asserted on every trace this file builds — the API's serialized body
+included).
 """
 from __future__ import annotations
 
@@ -59,6 +60,7 @@ from types import SimpleNamespace
 
 import pytest
 import yaml
+from dotenv import dotenv_values
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import event, select, text
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -108,20 +110,30 @@ CI_STEP_NAME = "Run P2 retrieval/hybrid suites (temp SQLite, no services)"
 CI_ABLATION_STEP_NAME = "Run P2 retrieval ablation + its contract test"
 GATE_MODULE = "tests/retrieval/test_p2_gate.py"
 
-# The example-file defaults R13(p2) signed (the cap, not the window) and the P2
-# knobs the plan added. CI copies ``.env.test.example`` to ``.env`` for the
-# compose jobs, so what these files say IS what CI and an example-seeded
-# deployment run.
-ENV_EXAMPLE_DEFAULTS = (
-    "JINA_RERANKER_TOP_N=20",
-    "RETRIEVAL_RERANK_POOL_MULTIPLIER=2.0",
-    "JINA_RERANKER_TIMEOUT_SECONDS=10.0",
-    "RETRIEVAL_HYBRID_ENABLED=false",
-    "RETRIEVAL_RRF_K=60",
-    "EMBED_EXECUTOR_WORKERS=2",
-    "EMBED_ORT_INTRA_OP_THREADS=0",
-    "EMBED_WARMUP_ON_BOOT=true",
+# The P2 knobs the plan added (R13(p2) signed the cap, not the window). CI
+# copies ``.env.test.example`` to ``.env`` for the compose jobs, so what these
+# files say IS what CI and an example-seeded deployment run. The pin below
+# PARSES the files and compares a mapping against the live settings defaults:
+# a commented-out line, a wrong value and a missing key all fail — a substring
+# match passes on the first two.
+ENV_EXAMPLE_KNOBS = (
+    "JINA_RERANKER_TOP_N",
+    "RETRIEVAL_RERANK_POOL_MULTIPLIER",
+    "JINA_RERANKER_TIMEOUT_SECONDS",
+    "RETRIEVAL_HYBRID_ENABLED",
+    "RETRIEVAL_RRF_K",
+    "EMBED_EXECUTOR_WORKERS",
+    "EMBED_ORT_INTRA_OP_THREADS",
+    "EMBED_WARMUP_ON_BOOT",
 )
+
+
+def _example_value(value) -> str:
+    """How a dotenv file spells a settings default (bools are lowercase)."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
 
 # The group marker: rows whose content carries it embed to ONE shared vector, so
 # a test can put a group ahead of another in the store's own cosine order
@@ -227,10 +239,15 @@ def _assert_trace_is_declared(response) -> None:
 
     This run may only write ``stage_ms`` keys ``RECALL_TRACE_STAGE_KEYS``
     declares and ``counts`` keys ``RECALL_TRACE_COUNTER_KEYS`` declares, so an
-    undeclared extra cannot leak into a debug payload.
+    undeclared extra cannot leak into a debug payload. Takes the model object
+    or the API's serialized body, and is called on EVERY trace this file
+    builds.
     """
-    assert set(response.trace.stage_ms) <= set(RECALL_TRACE_STAGE_KEYS)
-    assert set(response.trace.counts) <= set(RECALL_TRACE_COUNTER_KEYS)
+    trace = response["trace"] if isinstance(response, dict) else response.trace
+    stage_ms = trace["stage_ms"] if isinstance(trace, dict) else trace.stage_ms
+    counts = trace["counts"] if isinstance(trace, dict) else trace.counts
+    assert set(stage_ms) <= set(RECALL_TRACE_STAGE_KEYS)
+    assert set(counts) <= set(RECALL_TRACE_COUNTER_KEYS)
 
 
 def _coverage(env) -> dict[str, int]:
@@ -378,6 +395,7 @@ async def test_rerank_zero_timeout_invalid_and_refill(live, monkeypatch):
     assert response.results[0].match_reasons[0] == "rerank:0.00"
     assert response.trace.counts["reranked"] == handed[0], "the whole head merged"
     assert fallback_counts().get("retrieval.rerank_failed", 0) == 0
+    _assert_trace_is_declared(response)
 
     # (b) timeout: the typed transport failure degrades to dense order, the
     # registered counter fires, and the count is unchanged.
@@ -391,6 +409,7 @@ async def test_rerank_zero_timeout_invalid_and_refill(live, monkeypatch):
     assert fallback_counts()["retrieval.rerank_failed"] == 1
     assert response.trace.stage_ms["rerank"] > 0.0  # recorded in the finally
     assert "reranked" not in response.trace.counts  # no reranked head was served
+    _assert_trace_is_declared(response)
 
     # (c) invalid response: the same contract, the same counter.
     async def _invalid(_query, chunks, *, top_n=None):
@@ -469,6 +488,7 @@ async def test_no_pre_acl_text_reaches_the_rerank_transport(live, monkeypatch):
         )
     assert str(row.id) in {chunk["memory_id"] for chunk in seen}
     assert "pre-acl stale text alpha" not in response.model_dump_json()
+    _assert_trace_is_declared(response)
 
 
 # ══ §9: heartbeat / event-loop responsiveness (ingest + recall) ═════════════
@@ -514,6 +534,7 @@ async def test_the_loop_beats_while_ingest_and_recall_run_concurrently(live, mon
             _recall(live, live.alice.id, t1_text("heartbeat", 0)),
             t1_ingest(shim, [t1_text("live", index) for index in range(HEARTBEAT_INGEST)]),
         )
+    _assert_trace_is_declared(response)
 
     print(ticker.summary())
     assert landed == HEARTBEAT_INGEST  # the write-through really ran
@@ -763,6 +784,7 @@ async def test_vector_outage_answers_from_the_lexical_leg_or_stays_typed(live, m
     # The store is back: the same tenant answers normally again.
     response = await _recall(live, live.alice.id, "outage drill token zxqv", top_k=5)
     assert str(row.id) in _returned(response)
+    _assert_trace_is_declared(response)
 
 
 # ══ §9: MCP and API share auth + semantics; MCP payload stays index-only ═══
@@ -797,6 +819,7 @@ async def test_mcp_and_api_share_semantics_and_the_mcp_payload_is_index_only(liv
     finally:
         app.dependency_overrides.clear()
     assert api.status_code == 200, api.text
+    _assert_trace_is_declared(api.json())
 
     principal = AgentPrincipal(
         user_id=live.alice.id, agent_client_id=uuid.uuid4(), name="GateAgent",
@@ -912,12 +935,16 @@ def test_the_example_env_files_carry_the_p2_retrieval_defaults(path):
     """CI copies ``.env.test.example`` to ``.env``: a stale example is a stale run.
 
     The R13 cap (20, not the pre-R13 5) and every P2 knob the plan added must be
-    in BOTH examples — an example-seeded deployment silently running the pre-R13
-    cap loses the whole-window rerank.
+    in BOTH examples, UNCOMMENTED and equal to the live settings default — an
+    example-seeded deployment silently running the pre-R13 cap loses the
+    whole-window rerank, and a commented-out line is a missing one.
     """
-    file_text = path.read_text(encoding="utf-8")
-    for needed in ENV_EXAMPLE_DEFAULTS:
-        assert needed in file_text, f"{path.name} is missing {needed}"
+    parsed = dotenv_values(path)
+    shipped = {knob: _example_value(getattr(settings, knob)) for knob in ENV_EXAMPLE_KNOBS}
+    from_file = {knob: parsed.get(knob) for knob in ENV_EXAMPLE_KNOBS}
+    assert from_file == shipped, (
+        f"{path.name} does not carry the shipped retrieval defaults"
+    )
 
 
 def test_ci_runs_the_p2_gate_suites_and_the_ablation():
@@ -940,6 +967,8 @@ def test_ci_runs_the_p2_gate_suites_and_the_ablation():
         "tests/retrieval/test_hybrid_recall.py",
         "tests/retrieval/test_event_loop_responsiveness.py",
         "tests/retrieval/test_p2_ablation_contract.py",
+        # the graph-build offload suite (T9); needs no artifact guard
+        "tests/retrieval/test_graph_build_offload.py",
         # the suites that had no CI step of their own before this task
         "tests/retrieval/test_semantic_rerank.py",
         "tests/retrieval/test_p0_final_safety.py",

@@ -1263,9 +1263,15 @@ When `temporal=true`, the system orders results by temporal relevance and annota
 }
 ```
 
-#### Enhanced Recall with Multi-Hop Reasoning (v2.0)
+#### Enhanced Recall with Multi-Hop Reasoning (v2.0) — not implemented
 
-When `multi_hop=true`, the system chains across multiple memories to answer complex questions that require connecting disparate pieces of knowledge.
+> **Not implemented in this release.** The shipped
+> `POST /api/v1/memories/recall` accepts only `query`, `top_k` and
+> `include_personal_context` (`RecallRequest`), and no response carries
+> `chains` or `insights`. The sketch below is a v2.0 design note, not a
+> buildable example.
+
+The v2.0 design: with `multi_hop=true`, the system chains across multiple memories to answer complex questions that require connecting disparate pieces of knowledge.
 
 **Request:**
 

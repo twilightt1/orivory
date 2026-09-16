@@ -264,7 +264,9 @@ curl -fsS -H "Authorization: Bearer $ADMIN_ACCESS_TOKEN" \
 - **Budgets (signed §12.2).** Read-your-writes stays **2.0 s** for a recall
   ALONE (the P3 barrier); under concurrent bulk ingest a `503
   index_freshness_timeout` is the accepted shape (ruling R9) — clients retry.
-  Recall **p95 <= 150 ms** at fixture scale, asserted by the P2 gate. RSS
+  Recall **p95 <= 150 ms** at fixture scale, asserted by the P3 gate
+  (`tests/retrieval/test_p3_gate.py`, `LATENCY_P95_MS`) — the P2 gate asserts
+  the §9 retrieval row, not a latency budget. RSS
   <= 1 GB is measured, not gated (a P5 item). The embed executor
   (`EMBED_EXECUTOR_WORKERS`, default 2) is the loop-lag lever; ORT's
   `EMBED_ORT_INTRA_OP_THREADS` is the oversubscription dial (0 = ORT default,
@@ -304,16 +306,20 @@ P2 binary, which re-runs the step.
 
 `app/observability/fallbacks.py` (inspect with `fallback_counts()`, or grep the
 `Fallback activated` debug logs; aggregate centrally in a multi-process
-deployment). Alert on the RATE, not on any single activation:
+deployment). Alert on the RATE, not on any single activation. These are the
+labels the current code emits — this table IS the alert surface:
 
 | label | means |
 |---|---|
 | `retrieval.vector_unavailable` | vector store down, the lexical leg answered (SQLite) or the typed 503 was served |
 | `retrieval.rerank_failed` | Jina/reranker error or timeout, dense order kept |
-| `retrieval.bm25_rebuild_failed` | BM25 lazy rebuild failed, stale index used (document path) |
 | `mcp.search_sql_fallback` | MCP search answered from the SQL ordering — barrier timeout, vector outage, or a degraded leg served empty (R23/R25) |
-| `crag.grading_failed` | doc grading error, defaulted IRRELEVANT |
 | `index.outbox_drain_failed` | a drain round raised; intents stay pending for the retry |
+
+Two labels from older releases — `retrieval.bm25_rebuild_failed` and
+`crag.grading_failed` — have NO emitting call site in the current code (they
+survive only in the module's docstring). Their counters stay at zero: do not
+build alerts on them.
 
 ```bash
 curl -fsS -H "Authorization: Bearer $ADMIN...OKEN" \
