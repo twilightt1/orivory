@@ -966,6 +966,17 @@ Remove a document from a conversation and delete its indexed chunks.
 
 Orivory's memory system stores and retrieves knowledge using semantic search and temporal reasoning.
 
+> **Namespace boundary (P4a, personal-only).** Every memory endpoint — list,
+> digest, stats, get, create, patch, delete, recall, share — is scoped to the
+> caller's namespace, and a row of the caller's own account that lives outside
+> it (a workspace/team row, once sharing ships) is answered exactly like a
+> foreign tenant's: `404`, same body as a missing id, no existence oracle. The
+> public share link is scoped too: it serves rows of the public namespace only.
+> `namespace` is **not** a request field and **not** a response field anywhere in
+> this API — it is never derived from client input, no response carries it, and
+> the response shapes are unchanged by P4a. The only namespace in P4a is
+> `personal`, so on a single-user deployment this note changes nothing visible.
+
 ### POST /api/v1/memories
 
 Create a new memory entry.
@@ -2810,11 +2821,20 @@ Requests without a valid token — or with a revoked token — are rejected befo
 | Tool            | Scope         | Description                                          |
 |-----------------|---------------|------------------------------------------------------|
 | `search_memory` | `memory:read` | Semantic search over the caller's memory hub          |
+| `timeline`      | `memory:read` | Anchor + chronological neighbours around one memory   |
 | `get_memory`    | `memory:read` | Fetch one memory by ID                                |
 | `list_recent`   | `memory:read` | List the caller's most recent memories                |
 | `add_memory`    | `memory:write`| Store a new memory (title, content, optional tags)    |
+| `correct_memory`| `memory:write`| Supersede a fact (correction) with provenance         |
 | `delete_memory` | `memory:write`| Delete one memory by ID                               |
 | `forget_memory` | `memory:write`| Erase memories with cascades + verification receipt (see [§14](#14-erasure-receipts)) |
+
+Every tool is scoped to the caller's namespace as well as to the caller's
+account (the token's owner), and `timeline` filters its neighbours by that
+namespace and by the dirty rule — a stale derived row no longer appears beside
+the anchor, while superseded rows still do (labelled). A revoked token (or one
+whose owner lost the scope) is refused before any tool runs, and the boundary is
+enforced again below the identity layer, on the SQL that reads the rows.
 
 Scopes are enforced per call: a token with only `memory:read` cannot `add_memory` or `delete_memory`.
 

@@ -37,7 +37,7 @@ makemigration:
 
 # CI-safe unit tests only (skips live infra and Redis-bound auth tests).
 test:
-	python -m pytest tests -q --ignore=tests/integration --ignore=tests/api/test_auth_api.py --ignore=tests/api/test_admin_api.py --ignore=tests/test_auth.py
+	python -m pytest tests -q --ignore=tests/integration --ignore=tests/test_auth.py
 
 # Targeted lint matching CI's narrow path list.
 lint:

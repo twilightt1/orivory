@@ -3,7 +3,7 @@
 > Single source of truth for how Orivory works. Supersedes the pre-pivot
 > `architecture.md` / `TECHNICAL_ARCHITECTURE_v2.md` /
 > `SOTA_TECHNICAL_SPECIFICATION.md` / `AI_ML_OVERVIEW.md` (removed — history
-> lives in git). Last verified against the code: 2026-09-04.
+> lives in git). Last verified against the code: 2026-09-16.
 
 Orivory is a **memory hub for AI agents**. One mental model:
 
@@ -34,6 +34,22 @@ unifies them.
   generic_import, mcp_agent, conversation_excerpt, …), `source_ref`
   (dedup key), `content`, `tags`, and the salience fields
   (`salience`, `recall_count`, `last_used_at`).
+- **Namespace (P4a) — an authorization boundary, not a tag.** Every memory row
+  carries `namespace` (`VARCHAR(32) NOT NULL DEFAULT 'personal'`, index on
+  `(namespace, user_id)`; SQLite ladder v5, Alembic revision for Postgres). Two
+  rows with the same text in two namespaces are two facts with different
+  owners' permissions: every reader/writer/admin/export composes
+  `visibility.namespace_predicate(...)` — the ONE spelling, built from
+  `namespaces.PERSONAL` / `personal_namespace(user_id)` — into the SAME SQL
+  statement as the row it protects (before any LIMIT or aggregate), and
+  primary-key reads (`db.get`) check the loaded row against the same value.
+  Namespace is never derived from client input. **P4a ships personal-only:
+  sharing is OFF**, `personal` is the only value that exists, and every pre-P4
+  row was backfilled into it — a single-namespace deployment answers exactly as
+  it did before the column existed. Qdrant payloads carry `namespace` and the
+  memory filter also accepts a key-less point as personal (R32), so pre-P4
+  vectors keep answering. Operationally:
+  [OPERATIONS_RUNBOOK.md](OPERATIONS_RUNBOOK.md) §P4a.
 - **Qdrant** — the vector index, one generation per kind and embedding
   contract (`orivory_memories__<contract>`, `orivory_chunks__<contract>`),
   written best-effort after every DB write (Postgres is truth; the reindex
@@ -69,7 +85,7 @@ where identity, permissions and audit live.
 |---|---|
 | `identity.py` | `AgentPrincipal` (user + agent client + scopes), token extraction (`Authorization: Bearer` or `X-Orivory-Agent-Token`), `resolve_principal` (sha256 lookup, active-only, touches `last_used_at`) |
 | `server.py` | FastMCP (official `mcp` SDK, stateless HTTP, `json_response=True`) mounted at `/mcp` when `MCP_HUB_ENABLED`; ASGI scope-normalization adapter (Starlette 1.6 exact-path 307 would strip `Authorization`); `MCP_HUB_ALLOWED_HOSTS` → explicit `TransportSecuritySettings` for reverse proxies |
-| `tools.py` | Six tools: `search_memory`, `get_memory`, `list_recent`, `add_memory`, `delete_memory`, `forget_memory`. Each resolves its own principal, enforces scopes, appends a `memory_access_logs` row (the ledger) |
+| `tools.py` | Eight tools: `search_memory`, `timeline`, `get_memory`, `list_recent`, `add_memory`, `correct_memory`, `delete_memory`, `forget_memory`. Each resolves its own principal, enforces scopes, and reads/writes only the caller's own namespace; every authorized call appends a `memory_access_logs` row (the ledger) |
 
 **Identity model.** `agent_clients` registers an external agent: name,
 `sha256` token hash (plaintext `oa_<32 hex>` shown exactly once), scopes
@@ -101,7 +117,13 @@ memory_ids, *, requested_by)`:
    then re-query the vector index and re-count residual DB rows. Each target
    carries
    `vector_state`: `verified` / `pending` / `unknown` / `residual` (a failed
-   purge stays `pending` — the intent is what retries it).
+   purge stays `pending` — the intent is what retries it). Two namespace
+   counters ride `db_residual` (P4a): `cascaded_out_of_namespace` (rows the FK
+   cascade removes that the walk never collected — another namespace, or
+   another user's) and `derived_out_of_namespace` (the erasing user's other
+   namespaces); either one keeps the receipt from reaching `completed`. Their
+   known ceilings are documented in
+   [OPERATIONS_RUNBOOK.md](OPERATIONS_RUNBOOK.md) §P4a.
 5. **Receipt** — one `erasure_receipts` row per call, with additive
    `detail.verification` and `detail.index_pending` (omitted when nothing was
    erased — no erase, no verification claim):
@@ -208,6 +230,13 @@ by characters before the LLM call; the fallback answer is an explicit
   (default 2.0s), and **fails closed** with a typed 503
   (`index_freshness_timeout`) instead of answering an empty result for a write
   that has not landed. Operationally: [OPERATIONS_RUNBOOK.md](OPERATIONS_RUNBOOK.md).
+- **SQLite schema v5 (P4a).** The ladder adds `memories.namespace` + its
+  `(namespace, user_id)` index on the `v4 -> v5` transition (ONCE; the column
+  default IS the backfill) and takes its own `<db>.pre-p4.bak` milestone
+  snapshot. A pre-P4 binary refuses a v5 file
+  (`unsupported SQLite schema version 5; expected 4`); the documented way back
+  and forward is [ROLLBACK_P1B.md](ROLLBACK_P1B.md) §7. Postgres gets the same
+  column from an Alembic revision (server default `'personal'`, NOT NULL).
 
 ## 8. REST surface map
 
@@ -219,7 +248,7 @@ by characters before the LLM call; the fallback answer is an explicit
 | `/api/v1/agents` | Agent client registration/revoke + access ledger |
 | `/api/v1/erasure-receipts` | Create/list/fetch erasure receipts |
 | `/api/v1/imports` | One-shot export upload |
-| `/api/v1/entities`, `/sources`, `/insights`, `/discovery`, `/workspaces`, `/analytics`, `/referral` | Second-brain surfaces |
+| `/api/v1/entities`, `/sources`, `/insights`, `/discovery`, `/workspaces`, `/analytics`, `/referral` | Second-brain surfaces — **dormant/unmounted on the slim branch** (`app/api/v1/router.py`; the files stay in tree and their memory reads are still covered by the namespace fence) |
 | `/mcp` | MCP server (agents) |
 | `/health`, `/ready` | Liveness + readiness |
 

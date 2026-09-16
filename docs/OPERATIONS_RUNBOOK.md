@@ -139,6 +139,115 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml logs --tail=200 
 docker compose -f docker-compose.yml -f docker-compose.prod.yml restart app
 ```
 
+## P4a — namespace ACL (personal-only) and the v5 ladder
+
+P4a makes the namespace a REAL column and a single authorization predicate, with
+sharing deliberately OFF: the only namespace in existence is `personal`, every
+pre-P4 row was backfilled into it, so a single-namespace deployment answers
+exactly as it did before the column existed.
+
+- **Schema v5.** `memories.namespace` (`VARCHAR(32) NOT NULL DEFAULT 'personal'`)
+  plus the `ix_memories_namespace_user(namespace, user_id)` index, installed by
+  the ladder's `v4 -> v5` step — ONCE, on the version transition, and on a fresh
+  install too (which has nothing to back up). The ADD COLUMN *is* the backfill:
+  the constant default stamps every pre-existing row, and nothing per-row is ever
+  computed. A later boot never re-asserts or repairs the column (a restart must
+  not re-assert a namespace an operator moved). The step's own milestone
+  snapshot is `<db>.pre-p4.bak` — never overwritten, reused when an interrupted
+  upgrade resumes.
+- **One predicate.** `app/retrieval/memory/visibility.py::namespace_predicate`
+  is the only spelling of the boundary, and its value comes from
+  `namespaces.PERSONAL` / `personal_namespace(user_id)` — never from client
+  input (ruling R33: the reindex request body and the migration CLI take no
+  namespace from a caller). Every reader composes it into the SAME statement as
+  the row it protects (before any LIMIT/aggregate), and primary-key surfaces
+  (`db.get`) check the loaded row against the same value.
+- **Qdrant payload, and the `is_empty` branch (R32).** The payload carries
+  `namespace`, and the memory filter is
+  `should[match(namespace), is_empty(namespace)]` for the `personal` query. The
+  `is_empty` branch exists because a point written BEFORE the key existed is
+  personal: a bare `must` match would make a pre-P4 install recall nothing until
+  a full reindex. It is a spelling of the ONE namespace (`personal`) — a query
+  for any other namespace must not inherit pre-P4 points — and it must be
+  dropped when a second namespace is served (sharing on): from then on a
+  key-less point cannot be assumed personal.
+- **What is NOT here.** Sharing/team namespaces (P4b); a namespace component in
+  the cache keys (§4.3 — no cache read/write path is live in P4a: the retrieval
+  query cache has no producer or consumer and the response cache has no caller,
+  both are invalidation-only today, so P4b must add the component when it wires
+  them); and a namespace column on the outbox record (the applier re-reads the
+  row and writes THAT row's namespace — R33).
+- **The fence, and its ceiling.** `tests/api/test_dormant_router_acl.py` scans
+  every `select(...)` that NAMES a memory model under `app/`, allowlisted by file
+  and statement count, alias-aware. Green there is NOT "every read is guarded":
+  `sqlalchemy.select` behind a module alias, `text()` queries, a model passed
+  through a variable, `update`/`delete` writes and Python-side row checks
+  (`db.get` + `_owned`) are outside the scan. Those surfaces are pinned
+  behaviourally instead (`tests/retrieval/test_visibility.py`,
+  `tests/retrieval/test_p4a_gate.py`).
+
+### Rollback: a pre-P4 binary, and coming back
+
+A pre-P4 binary's ladder tops out at v4 and refuses a v5 file with
+`unsupported SQLite schema version 5; expected 4`. The documented way back is
+[ROLLBACK_P1B.md](ROLLBACK_P1B.md) §7 — re-stamp `user_version = 4` on a COPY
+(drop the `namespace` column and its index too if the target binary must not see
+them), and roll forward by booting a P4a binary: the step re-runs, inspects the
+column instead of re-adding it, and reuses the operator's `.pre-p4.bak`.
+
+**A milestone snapshot is not a clean "before" state, and its name is not its
+version stamp.** The snapshots are taken mid-ladder, and SQLite commits DDL
+immediately while `user_version` is stamped only at the very END of the whole
+ladder run. Measured, and pinned by
+`tests/retrieval/test_p4a_gate.py::test_a_milestone_snapshot_is_not_promised_clean`:
+a v3 install upgraded in one boot gets a `<db>.pre-p4.bak` that reads
+`user_version = 3` while already containing the v4 FTS objects, and an adopted
+(unversioned v1-shape) install gets snapshots that all read `user_version = 0`,
+with `.pre-p2.bak`/`.pre-p4.bak` already holding the v2 tables and columns. Check
+the stamp AND the objects inside a snapshot
+(`sqlite3 <snapshot> "PRAGMA user_version"`) before pointing an older binary at
+it.
+
+### Erasure receipts: the out-of-namespace residuals
+
+`db_residual` gained two namespace counters, and either one keeps a receipt from
+ever reaching `completed` (`completed_with_residual` at best):
+
+- `cascaded_out_of_namespace` (R36/F1): rows the `parent_id` FK cascade removes
+  even though the walk did not collect them — a same-account row in another
+  namespace (or another user's) whose vector the erasure never purges;
+- `derived_out_of_namespace` (I3): rows of the erasing user's other namespaces
+  that derive from an erased id; the walk inside the namespace still reports
+  `derived_closure='complete'` for what it DID complete, and this key records
+  what it deliberately left outside.
+
+Three known ceilings, all diagnostic — none of them changes a verdict:
+
+- the pre-delete cascade count under-counts below the first level (a cascade
+  that removes three rows two levels down is counted once);
+- a cascade below a node of the DERIVED closure is not walked at all, and such a
+  receipt can read `completed` — latent while `cm_derived_from` has no writer
+  (P4a ships no consolidation producer);
+- `residual_rows` is an upper bound, not a partition: a cross-user child is
+  counted in BOTH `cross_user_children` and `cascaded_out_of_namespace`, so the
+  number can exceed the rows that exist.
+
+### Migration CLI / export: `--namespace`
+
+`backfill` / `verify` (and `rollback_to_chroma.py`) read ONE namespace: the
+`--namespace` flag defaults to `personal` — the only namespace P4a can hold — so
+an operator's export never sweeps in rows the ACL would refuse to serve. The
+internal `namespace=None` escape hatch is a whole-database AUDIT read, not a
+serving path; when a second namespace gets its own points, that audit will see
+them as "orphans" (points with no row in the exported namespace) and block
+`verify`/`cutover` — P4b must revisit this before enabling sharing.
+
+### Timeline neighbours hide dirty rows (behavior change)
+
+MCP `timeline` neighbours are filtered by the caller's namespace AND
+`not_dirty_predicate()`: a stale derived row is wrong data, not history, so it
+no longer appears beside the anchor. Superseded neighbours still do (labelled).
+
 ## Background indexing (P3)
 
 Every canonical write stamps a durable `index_outbox` intent in the SAME SQL
