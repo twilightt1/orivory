@@ -184,7 +184,7 @@ async def test_erase_deletes_owned_memory_and_writes_receipt(no_chroma):
     assert target["vectors_deleted"] == [str(mid)]
     assert target["vector_residual"] == [] and target["vector_residual_checked"] is True
     assert target["db_residual"] == {"children": 0, "entity_links": 0, "source_links": 0,
-                                     "cross_user_children": 0}
+                                     "cross_user_children": 0, "derived_out_of_namespace": 0}
     assert receipt.detail["requested_by"] == "rest_api"
     assert receipt.detail["summary"] == {"requested": 1, "erased": 1, "skipped": 0, "errors": 0, "residual_vectors": 0, "residual_rows": 0}
     assert no_chroma == [str(mid)]

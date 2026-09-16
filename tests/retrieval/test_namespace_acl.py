@@ -13,20 +13,20 @@ is ambient (pattern: ``tests/retrieval/test_visibility.py``). Only the
 out-of-process vector seams are stubbed (the write-back embed and the erasure
 purge/readback); every SQL statement and every HTTP hop is real.
 
-The AST pins at the bottom are the anti-regression half: a new ``select(Memory)``
-in these surfaces that forgets its namespace predicate — or a literal
-``'personal'`` written back into a query — fails here. Task 5 widens the same
-scan to every dormant reader under ``app/``.
+The AST half of this file moved to Task 5: ``tests/api/test_dormant_router_acl.py``
+scans every module under ``app/`` (these surfaces included), so the two-file
+scan that used to live at the bottom is gone. What stays is the one thing that
+fence does not judge — a literal ``'personal'`` written back into a query.
 """
 from __future__ import annotations
 
-import ast
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest_asyncio
+from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import create_engine, event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -35,9 +35,12 @@ from sqlalchemy.pool import NullPool
 
 import app.models  # noqa: F401 — register every ORM table on Base
 from app import database
+from app.api.v1 import demo as demo_api
+from app.api.v1 import entities as entities_api
 from app.api.v1 import memories as memories_api
 from app.database import Base, get_db
 from app.main import app as asgi_app
+from app.models.entity import Entity, MemoryEntity
 from app.models.memory import Memory
 from app.models.user import User
 from app.retrieval.memory import namespaces
@@ -86,6 +89,14 @@ async def live(tmp_path, monkeypatch):
 
     asgi_app.dependency_overrides[get_db] = _db_override
 
+    # The dormant routers are UNMOUNTED on the slim app (see api/v1/router.py),
+    # so the behavioural proof for them needs the mount that a re-enable would
+    # install: same overrides, same real SQL, plus the routes themselves.
+    dormant_app = FastAPI()
+    for module in (demo_api, entities_api):
+        dormant_app.include_router(module.router, prefix="/api/v1")
+    dormant_app.dependency_overrides[get_db] = _db_override
+
     # The out-of-process seams this suite is not about: the vector write-back
     # (index_new_memory / safe_upsert_to_index) and the erasure purge + presence
     # readback. The SQL under them and the HTTP hops above them stay real.
@@ -103,12 +114,13 @@ async def live(tmp_path, monkeypatch):
     async with eng.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
-    def as_user(user_id: uuid.UUID) -> AsyncClient:
+    def as_user(user_id: uuid.UUID, *, mounted: bool = False) -> AsyncClient:
         async def _current_user():
             return _user(user_id)
 
-        asgi_app.dependency_overrides[get_current_verified_user] = _current_user
-        return AsyncClient(transport=ASGITransport(app=asgi_app), base_url="http://test")
+        target = dormant_app if mounted else asgi_app
+        target.dependency_overrides[get_current_verified_user] = _current_user
+        return AsyncClient(transport=ASGITransport(app=target), base_url="http://test")
 
     async def seed(*rows: object) -> None:
         async with sessions() as session:
@@ -123,6 +135,7 @@ async def live(tmp_path, monkeypatch):
         yield SimpleNamespace(as_user=as_user, seed=seed, read=read)
     finally:
         asgi_app.dependency_overrides.clear()
+        dormant_app.dependency_overrides.clear()
         await eng.dispose()
         sync_eng.dispose()
 
@@ -284,87 +297,54 @@ async def test_share_is_scoped_to_the_public_namespace(world):
     assert other_tenant.status_code == 200
 
 
-# ── pins (Step 3): class-level, not line-level ───────────────────────────────
+# ── dormant readers: the same boundary, behaviourally (P4a Task 5) ───────────
+
+
+async def test_entity_memories_serve_only_the_callers_namespace(world):
+    """``entities`` is one of the dormant routers the fence watches — proven on
+    rows here, not only by the AST scan: the same entity linked to a personal and
+    a team memory returns the personal one only."""
+    entity = Entity(id=uuid.uuid4(), user_id=world.a, name="SQLite", entity_type="tool",
+                    aliases=[], mention_count=0, extra_metadata={})
+    await world.live.seed(
+        entity,
+        MemoryEntity(id=uuid.uuid4(), memory_id=world.a_personal.id,
+                     entity_id=entity.id, salience=0.5),
+        MemoryEntity(id=uuid.uuid4(), memory_id=world.a_team.id,
+                     entity_id=entity.id, salience=0.9),
+    )
+
+    async with world.live.as_user(world.a, mounted=True) as client:
+        out = await client.get(f"/api/v1/entities/{entity.id}/memories")
+
+    assert out.status_code == 200
+    assert [m["id"] for m in out.json()] == [str(world.a_personal.id)]
+
+
+async def test_demo_status_counts_only_the_namespace(world):
+    """``demo`` reads ``memories`` through ``demo_data_service``: a user whose
+    only rows live in another namespace has no memories (the seed gate too)."""
+    c = uuid.uuid4()
+    await world.live.seed(_user(c), _mem(c, "C team", namespace=TEAM))
+
+    async with world.live.as_user(c, mounted=True) as client:
+        body = (await client.get("/api/v1/demo/status")).json()
+
+    assert body == {"has_memories": False, "has_demo_data": False}
+
+
+# ── pin: the namespace VALUE is never spelled as a literal ───────────────────
+#
+# The ``select(Memory)`` scan that used to live here covered two files. Task 5's
+# fence (``tests/api/test_dormant_router_acl.py``) scans every module under
+# ``app/`` — these two included — so that scope moved there; a second copy here
+# would only be a pin that can drift from the inventory.
 
 REPO = Path(__file__).resolve().parents[2]
 SURFACES = (
     REPO / "app" / "api" / "v1" / "memories.py",
     REPO / "app" / "services" / "digest_service.py",
 )
-
-
-def _is_select(node: ast.AST) -> bool:
-    return (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-            and node.func.id == "select")
-
-
-def _namespace_aliases(tree: ast.AST) -> set[str]:
-    """Names a module binds to a ``namespace_predicate(...)`` call.
-
-    A reader may hoist the predicate into a local (``namespace = namespace_predicate(ns)``)
-    and compose it into every query of the function; the alias counts as the
-    predicate ONLY where a statement actually references it — a query that
-    forgets the name still fails below.
-    """
-    aliases: set[str] = set()
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Call):
-            continue
-        func = node.value.func
-        if not (isinstance(func, ast.Name) and func.id == "namespace_predicate"):
-            continue
-        aliases.update(t.id for t in node.targets if isinstance(t, ast.Name))
-    return aliases
-
-
-def _memory_statements(path: Path) -> list[tuple[int, str, bool]]:
-    """``(line, source, carries_namespace_predicate)`` per ``select(...)`` over ``Memory``.
-
-    Statement-level: the predicate may be chained after the ``select()`` (a
-    ``.where(...)``) and only the statement as a whole can be judged. Comments
-    are stripped so a sentence cannot satisfy the pin.
-    """
-    source = path.read_text()
-    tree = ast.parse(source)
-    aliases = _namespace_aliases(tree)
-    parents = {child: parent
-               for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
-    found: list[tuple[int, str, bool]] = []
-    for node in ast.walk(tree):
-        if not _is_select(node):
-            continue
-        if not any(isinstance(sub, ast.Name) and sub.id == "Memory" for sub in ast.walk(node)):
-            continue
-        stmt: ast.AST = node
-        while not isinstance(stmt, ast.stmt):
-            stmt = parents[stmt]
-        segment = "\n".join(line.split("#", 1)[0]
-                            for line in (ast.get_source_segment(source, stmt) or "").splitlines())
-        referenced = {sub.id for sub in ast.walk(stmt) if isinstance(sub, ast.Name)}
-        guarded = "namespace_predicate(" in segment or bool(referenced & aliases)
-        found.append((stmt.lineno, segment, guarded))
-    return found
-
-
-def test_every_memory_read_in_these_surfaces_carries_the_namespace_predicate():
-    """A ``select(Memory)`` without ``namespace_predicate`` is a leak waiting.
-
-    This half pins the QUERY surfaces (list + its pagination total, the three
-    stats aggregates, share, all three digest queries). The primary-key surfaces
-    (get / patch / delete / create-with-parent) cannot carry a predicate on a
-    ``db.get``, so they are pinned behaviourally by the tests above instead.
-
-    Scoped to the files this task owns — the dormant readers (``discovery``,
-    ``entities``, ``insights``, ...) get the same treatment, over all of
-    ``app/``, in Task 5.
-    """
-    scanned = {path: _memory_statements(path) for path in SURFACES}
-    assert all(scanned.values()), "the scan must find the reads it judges (never pass vacuously)"
-
-    missing = [f"{path.relative_to(REPO)}:{line}"
-               for path, statements in scanned.items()
-               for line, _segment, guarded in statements if not guarded]
-    assert not missing, f"memory reads without the namespace predicate: {missing}"
 
 
 def test_the_rest_surfaces_never_hardcode_the_personal_literal():

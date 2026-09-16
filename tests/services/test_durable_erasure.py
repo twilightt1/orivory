@@ -282,6 +282,78 @@ async def test_collect_derived_ids_raises_typed_error(db):
         await collect_derived_ids(db, uuid.uuid4(), [uuid.uuid4()])
 
 
+# ── the namespace boundary on the erasure walk (P4a Task 5, R35/I3) ──────────
+
+TEAM = "team"  # a namespace P4a cannot create through any API — seeded directly
+
+
+async def test_erase_refuses_a_row_outside_the_namespace(db, no_chroma):
+    """R35: erasure is a read of ``memories`` like every other surface.
+
+    A same-account row in another namespace is not this caller's to forget: it
+    is refused as ``not_found_or_foreign`` (the same answer a missing id gets)
+    and the row, its vector and its children never move.
+    """
+    uid = await _owner(db)
+    theirs = _memory(uid, "theirs", namespace=TEAM)
+    db.add(theirs)
+    await db.commit()
+
+    receipt = await erase_memories(db, uid, [theirs.id], requested_by="rest_api")
+
+    assert receipt.detail["targets"][0]["status"] == "not_found_or_foreign"
+    assert receipt.detail["summary"]["erased"] == 0
+    assert theirs.id in await _memory_ids(), "a cross-namespace erase (R35)"
+
+
+async def test_the_descendant_walk_stays_inside_the_namespace(db, no_chroma):
+    """R35: the walk by ``parent_id`` carries the boundary too.
+
+    A child row in another namespace is never collected, purged or verified by
+    this walk — its vector is not this scope's to delete (P4b walks per
+    namespace). The DB-level cascade may still take the row; the walk must not
+    claim it.
+    """
+    uid = await _owner(db)
+    root = _memory(uid, "root")
+    mine = _memory(uid, "mine", parent_id=root.id)
+    theirs = _memory(uid, "theirs child", parent_id=root.id, namespace=TEAM)
+    db.add_all([root, mine, theirs])
+    await db.commit()
+
+    receipt = await erase_memories(db, uid, [root.id], requested_by="rest_api")
+
+    target = receipt.detail["targets"][0]
+    assert target["affected_memory_ids"] == [str(mine.id)]
+    assert str(theirs.id) not in target["vectors_deleted"]
+    assert str(theirs.id) not in target["affected_memory_ids"]
+
+
+async def test_a_derived_row_outside_the_namespace_is_recorded_as_residual(db, no_chroma):
+    """I3: the derived closure walks one namespace, so a derived row in another
+    namespace survives the erase — the receipt records it as a residual instead
+    of claiming a complete closure over data it never walked.
+    """
+    uid = await _owner(db)
+    source = _memory(uid, "source")
+    mine = _memory(uid, "mine", extra_metadata={"cm_derived_from": [str(source.id)]})
+    theirs = _memory(uid, "theirs", namespace=TEAM,
+                     extra_metadata={"cm_derived_from": [str(source.id)]})
+    db.add_all([source, mine, theirs])
+    await db.commit()
+
+    receipt = await erase_memories(db, uid, [source.id], requested_by="rest_api")
+
+    target = receipt.detail["targets"][0]
+    assert target["derived_closure"] == "complete"  # in-scope closure did finish
+    assert target["db_residual"]["derived_out_of_namespace"] == 1
+    assert receipt.status == "completed_with_residual", (
+        "a derivative that outlived the erase is never a clean completion")
+    ids = await _memory_ids()
+    assert mine.id not in ids, "the derived row in scope is erased"
+    assert theirs.id in ids, "the row in the other namespace is not this walk's"
+
+
 async def test_vector_store_delete_reports_failure(monkeypatch):
     class _Client:
         async def delete(self, **_kwargs):

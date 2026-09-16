@@ -1011,3 +1011,105 @@ async def test_admin_reindex_passes_the_namespace_explicitly(db, monkeypatch):
     assert out.queued is True
     assert seen["user_id"] == str(owner)
     assert seen["namespace"] == namespaces.personal_namespace(owner)
+
+
+# ── P4a Task 5: the erasure tool, the fallback order, the row-in-hand mirror ──
+
+
+async def test_mcp_forget_refuses_a_row_outside_the_namespace(db, monkeypatch):
+    """R35: ``forget_memory`` is namespace-bounded like get/list/search.
+
+    Reviewer's reproduce: a same-account row in ``team`` was erased by a
+    ``memory:write`` agent while every other tool answered "not found" for it.
+    It is skipped here, and the row, its children and its vector stay put.
+    """
+    owner = await _owner(db)
+    theirs = _mem(owner, "theirs", namespace=TEAM)
+    db.add(theirs)
+    await db.commit()
+
+    async def _no_purge(_memory_id):
+        return True
+
+    async def _absent(_memory_ids):
+        return set()
+
+    # The tool boundary is pinned on its own: the id must never REACH the
+    # erasure service. The service refuses the row too (defence in depth), so a
+    # pin that only looks at the outcome cannot see this guard — it would stay
+    # green with the tool's pre-read deleted.
+    reached: list[list[str]] = []
+    real_erase = hub_tools.erase_memories
+
+    async def _spy(db_, user_id, memory_ids, *, requested_by):
+        reached.append([str(m) for m in memory_ids])
+        return await real_erase(db_, user_id, memory_ids, requested_by=requested_by)
+
+    monkeypatch.setattr("app.services.erasure_service.safe_delete_from_index", _no_purge)
+    monkeypatch.setattr("app.services.erasure_service._vector_present_ids", _absent)
+    monkeypatch.setattr(hub_tools, "erase_memories", _spy)
+    _as_reader(monkeypatch, owner, frozenset({"memory:write"}))
+
+    out = await hub_tools.forget_memory(memory_ids=[str(theirs.id)])
+
+    assert reached == [[]], "the id outside the namespace never reaches the erasure service"
+    assert out["erased"] == 0 and out["skipped"] == 1
+    async with database.AsyncSessionLocal() as session:
+        assert await session.get(Memory, theirs.id) is not None, "cross-namespace erase (R35)"
+
+
+async def test_mcp_forget_still_erases_the_callers_own_row(db, monkeypatch):
+    """The same call on the caller's own namespace is unchanged (P4a)."""
+    owner = await _owner(db)
+    mine = _mem(owner, "mine")
+    db.add(mine)
+    await db.commit()
+
+    async def _no_purge(_memory_id):
+        return True
+
+    async def _absent(_memory_ids):
+        return set()
+
+    monkeypatch.setattr("app.services.erasure_service.safe_delete_from_index", _no_purge)
+    monkeypatch.setattr("app.services.erasure_service._vector_present_ids", _absent)
+    _as_reader(monkeypatch, owner, frozenset({"memory:write"}))
+
+    out = await hub_tools.forget_memory(memory_ids=[str(mine.id)])
+
+    assert out["erased"] == 1 and out["skipped"] == 0
+    async with database.AsyncSessionLocal() as session:
+        assert await session.get(Memory, mine.id) is None
+
+
+async def test_the_sql_fallback_order_is_namespaced(db, monkeypatch):
+    """I2: ``_sql_recall_ids`` pinned DIRECTLY, order included.
+
+    Through ``search_memory`` the hydration re-check hid this predicate: dropping
+    it left every test green while the fallback ordering itself served another
+    namespace's row first.
+    """
+    owner = await _owner(db)
+    team_row = _aged(owner, "team salient", namespace=TEAM, salience=0.99)
+    mine = _aged(owner, "mine", salience=0.20)
+    db.add_all([team_row, mine])
+    await db.commit()
+    principal = _as_reader(monkeypatch, owner)
+
+    out = await hub_tools._sql_recall_ids(principal, 10)
+
+    assert [str(mid) for mid, _score in out] == [str(mine.id)]
+
+
+def test_the_hidden_mirror_rejects_another_namespace():
+    """M1: ``_hidden`` is the second layer (a pool assembled from the index), and
+    it is pinned on a row in hand — no query, no hydration, just the mirror."""
+    mine = _mem(uuid.uuid4(), "mine")
+    theirs = _mem(mine.user_id, "theirs", namespace=TEAM)
+
+    assert rmod._hidden(theirs, namespace=namespaces.PERSONAL) is True
+    assert rmod._hidden(theirs, namespace=TEAM) is False
+    assert rmod._hidden(mine, namespace=namespaces.PERSONAL) is False
+    assert rmod._hidden(mine) is False, (
+        "no namespace handed: the lifecycle rule alone (unchanged)")
+

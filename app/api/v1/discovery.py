@@ -43,6 +43,8 @@ from app.database import get_db
 from app.middleware.response_cache import CacheInvalidation
 from app.models.memory import Memory
 from app.models.user import User
+from app.retrieval.memory.namespaces import personal_namespace
+from app.retrieval.memory.visibility import namespace_predicate
 from app.utils.dependencies import enforce_llm_quota, get_current_verified_user
 
 log = logging.getLogger(__name__)
@@ -201,8 +203,12 @@ async def get_document_graph(
 
     Analyzes user's documents to build a graph of relationships.
     """
-    # Fetch user's memories
-    query = select(Memory).where(Memory.user_id == current_user.id)
+    # Fetch the caller's memories — their tenant AND namespace, like every
+    # other memory reader (P4a/T5: this router is dormant, not exempt).
+    query = select(Memory).where(
+        Memory.user_id == current_user.id,
+        namespace_predicate(personal_namespace(current_user.id)),
+    )
     if doc_ids:
         doc_id_list = [d.strip() for d in doc_ids.split(",")]
         try:
@@ -367,7 +373,10 @@ async def get_next_step(
 
     # Fetch user's documents
     result = await db.execute(
-        select(Memory).where(Memory.user_id == current_user.id)
+        select(Memory).where(
+            Memory.user_id == current_user.id,
+            namespace_predicate(personal_namespace(current_user.id)),
+        )
     )
     memories = result.scalars().all()
 
@@ -414,7 +423,10 @@ async def advance_discovery(
 
     # Get next step
     result = await db.execute(
-        select(Memory).where(Memory.user_id == current_user.id)
+        select(Memory).where(
+            Memory.user_id == current_user.id,
+            namespace_predicate(personal_namespace(current_user.id)),
+        )
     )
     memories = result.scalars().all()
 
@@ -464,7 +476,10 @@ async def complete_discovery(
 
     # Synthesize findings
     result = await db.execute(
-        select(Memory).where(Memory.user_id == current_user.id)
+        select(Memory).where(
+            Memory.user_id == current_user.id,
+            namespace_predicate(personal_namespace(current_user.id)),
+        )
     )
     memories = result.scalars().all()
 
@@ -542,7 +557,10 @@ async def get_graph_metrics(
 ) -> GraphMetricsResponse:
     """Get metrics for user's document graph."""
     result = await db.execute(
-        select(Memory).where(Memory.user_id == current_user.id)
+        select(Memory).where(
+            Memory.user_id == current_user.id,
+            namespace_predicate(personal_namespace(current_user.id)),
+        )
     )
     memories = result.scalars().all()
 
@@ -574,7 +592,10 @@ async def get_synthesis(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found.")
 
     result = await db.execute(
-        select(Memory).where(Memory.user_id == current_user.id)
+        select(Memory).where(
+            Memory.user_id == current_user.id,
+            namespace_predicate(personal_namespace(current_user.id)),
+        )
     )
     memories = result.scalars().all()
 

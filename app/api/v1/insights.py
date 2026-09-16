@@ -33,6 +33,8 @@ from app.database import get_db
 from app.middleware.response_cache import CacheInvalidation
 from app.models.insight import InsightCard, InsightStatusEnum
 from app.models.user import User
+from app.retrieval.memory.namespaces import personal_namespace
+from app.retrieval.memory.visibility import namespace_predicate
 from app.utils.dependencies import enforce_llm_quota, get_current_verified_user
 
 log = logging.getLogger(__name__)
@@ -219,8 +221,11 @@ async def generate_insights(
     """
     from app.models.memory import Memory
 
-    # Fetch user's memories (as documents)
-    query = select(Memory).where(Memory.user_id == current_user.id)
+    # Fetch the caller's memories (as documents) — their namespace only.
+    query = select(Memory).where(
+        Memory.user_id == current_user.id,
+        namespace_predicate(personal_namespace(current_user.id)),
+    )
     if body.document_ids:
         # Filter by specific document IDs if provided
         query = query.where(Memory.id.in_(body.document_ids))
@@ -423,9 +428,10 @@ async def refresh_insights_endpoint(
     result = await db.execute(existing_query)
     existing_cards = result.scalars().all()
 
-    # Get recent memories for activity
+    # Get recent memories for activity — the caller's namespace only.
     recent_query = select(Memory).where(
-        Memory.user_id == current_user.id
+        Memory.user_id == current_user.id,
+        namespace_predicate(personal_namespace(current_user.id)),
     ).order_by(desc(Memory.captured_at)).limit(10)
     recent_result = await db.execute(recent_query)
     recent_memories = recent_result.scalars().all()

@@ -563,9 +563,11 @@ async def delete_memory(memory_id: str) -> dict[str, Any]:
 async def forget_memory(memory_ids: list[str]) -> dict[str, Any]:
     """Erase memories + every derived artifact, with a verification receipt.
 
-    Requires ``memory:write``. Foreign/missing ids are recorded in the
-    receipt as ``not_found_or_foreign`` (never an existence leak). Every
-    authorized call appends one ``mcp_forget`` ledger row pointing at the
+    Requires ``memory:write``. Ids that are not the caller's — another tenant's,
+    or one of the caller's OWN rows outside their namespace — are resolved out
+    before the erasure service sees them (R35) and reported as ``skipped``:
+    the same answer a missing id gets, so there is never an existence leak.
+    Every authorized call appends one ``mcp_forget`` ledger row pointing at the
     receipt; the receipt carries the per-target cascade + verification detail.
     """
     principal = _current_principal()
@@ -584,8 +586,22 @@ async def forget_memory(memory_ids: list[str]) -> dict[str, Any]:
     if not valid:
         return {"error": "invalid memory id"}
     async with _session() as db:
-        receipt = await erase_memories(db, principal.user_id, valid, requested_by=f"agent:{principal.name}")
+        # The boundary FIRST: the erasure walk is a read of ``memories`` like
+        # every other surface, so an id outside the caller's namespace is never
+        # handed to it (and never counted as erased).
+        allowed = set((await db.execute(
+            select(Memory.id).where(
+                Memory.id.in_(valid),
+                Memory.user_id == principal.user_id,
+                namespace_predicate(_namespace_of(principal)),
+            )
+        )).scalars().all())
+        in_namespace = [m for m in valid if m in allowed]
+        skipped = len(valid) - len(in_namespace)
+        receipt = await erase_memories(db, principal.user_id, in_namespace,
+                                       requested_by=f"agent:{principal.name}")
         summary = receipt.detail.get("summary", {})
+        skipped += summary.get("skipped", 0)
         db.add(
             _ledger_entry(
                 principal,
@@ -594,7 +610,7 @@ async def forget_memory(memory_ids: list[str]) -> dict[str, Any]:
                     "receipt_id": str(receipt.id),
                     "requested": [str(m) for m in valid],
                     "erased": summary.get("erased", 0),
-                    "skipped": summary.get("skipped", 0),
+                    "skipped": skipped,
                 },
             )
         )
@@ -603,7 +619,7 @@ async def forget_memory(memory_ids: list[str]) -> dict[str, Any]:
         "receipt_id": str(receipt.id),
         "status": receipt.status,
         "erased": summary.get("erased", 0),
-        "skipped": summary.get("skipped", 0),
+        "skipped": skipped,
         "invalid": invalid,
     }
 

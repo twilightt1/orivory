@@ -246,7 +246,9 @@ async def collect_derived_ids(db, user_id, erased_ids: list) -> list:
 
     Scoped to the user's OWN namespace (P4a/T4): the closure is enumerated over
     the rows an erasure may touch — another namespace's rows are another
-    boundary's problem (P4b: an erasure walks per namespace).
+    boundary's problem (P4b: an erasure walks per namespace). Callers that must
+    REPORT what this narrowing leaves behind use
+    :func:`collect_derived_ids_outside_namespace` (the same rule, complement).
 
     Raises :class:`DerivedClosureError` when the closure cannot be read — a
     silent ``[]`` is an unfalsifiable claim of completeness.
@@ -264,3 +266,30 @@ async def collect_derived_ids(db, user_id, erased_ids: list) -> list:
                 if str(m.id) not in erased and _depends_on(m, erased)]
     except Exception as exc:
         raise DerivedClosureError(f"derived-memory closure query failed: {exc}") from exc
+
+
+async def collect_derived_ids_outside_namespace(db, user_id, erased_ids: list) -> list:
+    """Ids deriving from ``erased_ids`` in the user's OTHER namespaces (I3).
+
+    The complement of the rule above, derived from the same
+    ``namespace_predicate`` — the erasure walk does not reach these rows, so a
+    receipt that only read :func:`collect_derived_ids` would report a complete
+    closure while a derivative survived. They are reported as a residual
+    instead (never deleted: another boundary owns them).
+
+    Raises :class:`DerivedClosureError` on a failed read, same as the sibling.
+    """
+    # Local import: ``visibility`` imports this module's cm_* markers (cycle).
+    from app.retrieval.memory.visibility import namespace_predicate
+
+    try:
+        erased = {str(e) for e in erased_ids}
+        rows = (await db.execute(
+            select(Memory).where(Memory.user_id == user_id,
+                                 ~namespace_predicate(personal_namespace(user_id)))
+        )).scalars().all()
+        return [m.id for m in rows
+                if str(m.id) not in erased and _depends_on(m, erased)]
+    except Exception as exc:
+        raise DerivedClosureError(
+            f"out-of-namespace derived closure query failed: {exc}") from exc
