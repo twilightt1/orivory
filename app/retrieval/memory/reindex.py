@@ -9,6 +9,12 @@ Postgres into Qdrant so recall can always be made whole again.
 Usage:
     reindex_user_memories_sync(str(user_id))                     # only missing
     reindex_user_memories_sync(str(user_id), only_missing=False)  # rebuild all
+    reindex_user_memories_sync(str(user_id), namespace="personal")  # explicit ns
+
+``namespace`` defaults to the user's own (``namespaces.personal_namespace``) —
+P4a: ``personal``, the only one there is. A caller passes it explicitly; the
+default only ever narrows to the caller's own rows, so a forgotten argument
+cannot widen the backfill.
 """
 from __future__ import annotations
 
@@ -18,21 +24,26 @@ from sqlalchemy import select
 
 from app.database import sync_session
 from app.models.memory import Memory
-from app.retrieval.memory.visibility import current_memory_predicate
+from app.retrieval.memory.namespaces import personal_namespace
+from app.retrieval.memory.visibility import current_memory_predicate, namespace_predicate
 
 log = logging.getLogger(__name__)
 
 _PAGE_SIZE = 200
 
 
-def reindex_user_memories_sync(user_id: str, only_missing: bool = True) -> dict:
-    """Embed a user's memories into Qdrant in batches.
+def reindex_user_memories_sync(user_id: str, only_missing: bool = True, *,
+                              namespace: str | None = None) -> dict:
+    """Embed one user's memories of ONE namespace into Qdrant in batches.
 
     Returns a summary dict: scanned, already_indexed, reindexed, pages.
     Raises on failure after logging (the admin caller reports ``queued=False``).
 
     Current rows only: superseded rows are history and dirty rows are stale —
     neither belongs in the vector index (the predicate applies before paging).
+    The namespace predicate is the same statement's other half: a row outside
+    the authorized namespace is never embedded (P4a: one namespace, so the
+    boundary is byte-equivalent to the pre-P4 read).
 
     ``only_missing`` is valid only for a collection whose fingerprint and
     contract-generation token match the active runtime. A mismatch aborts
@@ -50,6 +61,7 @@ def reindex_user_memories_sync(user_id: str, only_missing: bool = True) -> dict:
     reindexed = 0
     pages = 0
     offset = 0
+    ns = namespace or personal_namespace(user_id)
 
     try:
         with sync_session() as db:
@@ -57,7 +69,9 @@ def reindex_user_memories_sync(user_id: str, only_missing: bool = True) -> dict:
                 rows = (
                     db.execute(
                         select(Memory)
-                        .where(Memory.user_id == user_id, current_memory_predicate())
+                        .where(Memory.user_id == user_id,
+                               namespace_predicate(ns),
+                               current_memory_predicate())
                         .order_by(Memory.indexed_at)
                         .offset(offset)
                         .limit(_PAGE_SIZE)
@@ -91,6 +105,7 @@ def reindex_user_memories_sync(user_id: str, only_missing: bool = True) -> dict:
 
         summary = {
             "user_id": user_id,
+            "namespace": ns,
             "only_missing": only_missing,
             "scanned": scanned,
             "already_indexed": already_indexed,

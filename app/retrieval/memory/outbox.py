@@ -120,6 +120,16 @@ def _entity_id(value) -> str:
 
 
 def _upsert_values(memory, target_generation: str) -> dict[str, Any]:
+    """The intent's column values, read off the row that enqueued it.
+
+    There is deliberately no ``namespace`` column here (and no copy of it in
+    the payload schema this record writes): the record carries the TENANT, and
+    the applier re-reads the row, so the namespace a point is written with is
+    the row's own AT APPLY TIME — via ``vector_store._memory_to_metadata``,
+    never a second, staler copy of an authorization boundary parked on the
+    intent (R32(p4a): a missing key counts as personal; the record itself
+    cannot go missing, since the read is by primary key).
+    """
     if getattr(memory, "id", None) is None:
         # The row's id is a Python-side default, applied at flush; the intent
         # must carry the same id, so materialize it early (same generator).
@@ -612,6 +622,13 @@ async def _delete_vector_or_fail(entity_id: str) -> None:
     An unconfirmed delete must never ack ``done``: the intent is the only
     record that the vector still has to go, so a failure stays pending and
     rides the normal backoff retry.
+
+    Deleted by POINT ID — the entity's own UUID — so this is identity-exact and
+    needs no namespace clause (R32(p4a) is about the READ filters: a point that
+    predates the key is personal). A namespace-scoped SELECTOR here would only
+    add a way to MISS the point — the intent would then ride the retry loop
+    forever while the point stayed served — so the boundary stays on the
+    filter-based deletes (the chunk family's sweeps) and on every read.
     """
     if not await delete_memory(entity_id):
         raise VectorDeleteUnconfirmed(f"vector delete not confirmed for {entity_id}")

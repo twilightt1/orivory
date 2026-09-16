@@ -56,7 +56,7 @@ async def test_recall_hides_superseded_and_dirty(monkeypatch, barrier_outbox):
     db = _FakeDB(rows=[cur, old, dirty])
     async def _rw(q, context=None): return {"rewritten_query": q, "entities": [], "_fallback_used": False, "reasoning": ""}
     async def _emb(q): return [0.1, 0.2]
-    async def _search(emb, user_id=None, top_k=10):
+    async def _search(emb, user_id=None, top_k=10, namespace=None):
         return [{"memory_id": str(old.id), "score": 0.99},
                 {"memory_id": str(dirty.id), "score": 0.98},
                 {"memory_id": str(cur.id), "score": 0.5}]
@@ -81,7 +81,7 @@ async def test_recall_fast_path_skips_llm(monkeypatch, barrier_outbox):
         called.append(q)
         return {"rewritten_query": q, "entities": [], "_fallback_used": False, "reasoning": ""}
     async def _emb(q): return [0.1, 0.2]
-    async def _search(emb, user_id=None, top_k=10):
+    async def _search(emb, user_id=None, top_k=10, namespace=None):
         return [{"memory_id": str(cur.id), "score": 0.9}]
     monkeypatch.setattr(R, "rewrite_query", _rw)
     monkeypatch.setattr(R, "embed_query", _emb)

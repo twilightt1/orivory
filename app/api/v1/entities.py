@@ -25,6 +25,8 @@ from app.models.entity import Entity, MemoryEntity, Relation
 from app.models.memory import Memory
 from app.models.user import User
 from app.retrieval.memory.correction import state_of
+from app.retrieval.memory.namespaces import personal_namespace
+from app.retrieval.memory.visibility import namespace_predicate
 from app.schemas.Orivory import (
     EntityCreate,
     EntityListResponse,
@@ -277,7 +279,11 @@ async def list_memories_for_entity(
     rows = (await db.execute(
         select(Memory)
         .join(MemoryEntity, MemoryEntity.memory_id == Memory.id)
-        .where(MemoryEntity.entity_id == entity_id, Memory.user_id == current_user.id)
+        .where(
+            MemoryEntity.entity_id == entity_id,
+            Memory.user_id == current_user.id,
+            namespace_predicate(personal_namespace(current_user.id)),
+        )
         .order_by(Memory.captured_at.desc())
         .limit(limit)
     )).scalars().all()

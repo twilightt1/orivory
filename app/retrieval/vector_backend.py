@@ -41,7 +41,11 @@ SERVER_REQUEST_TIMEOUT = 5
 # holds one user's small store anyway.
 _PAYLOAD_INDEXES: dict[str, dict[str, PayloadSchemaType]] = {
     "memory": {
+        # The two boundaries the memory filter always reads, then the
+        # caller's allowlisted fields. `namespace` is queried through R32's
+        # should[ match, is_empty ] — a keyword index answers both branches.
         "user_id": PayloadSchemaType.KEYWORD,
+        "namespace": PayloadSchemaType.KEYWORD,
         "tags": PayloadSchemaType.KEYWORD,
         "pinned": PayloadSchemaType.BOOL,
         "salience": PayloadSchemaType.FLOAT,

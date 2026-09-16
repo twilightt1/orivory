@@ -67,8 +67,12 @@ from app.retrieval.embedding_fingerprint import (
     generation_name,
 )
 from app.retrieval.memory import outbox, vector_store
+from app.retrieval.memory.namespaces import PERSONAL
 
 DB_NAME = "migrate.db"
+# The second namespace P4b brings (P4a spells only ``personal``): seeded
+# directly, because no client input can create one.
+TEAM = "team"
 DIM = 8
 # The embedding contract this suite pins (never the ambient one: the same
 # tests run on a 384-dim lite install and a 1536-dim OpenAI one).
@@ -175,9 +179,10 @@ async def _add_user(sessions, email: str) -> User:
     return user
 
 
-async def _add_memory(sessions, user_id, content: str, *, metadata: dict | None = None) -> Memory:
+async def _add_memory(sessions, user_id, content: str, *, metadata: dict | None = None,
+                      namespace: str = PERSONAL) -> Memory:
     memory = Memory(id=uuid.uuid4(), user_id=user_id, content=content, tags=[],
-                    extra_metadata=metadata or {})
+                    extra_metadata=metadata or {}, namespace=namespace)
     async with sessions() as db:
         db.add(memory)
         await db.commit()
@@ -966,3 +971,44 @@ async def test_an_aborted_backfill_exits_non_zero(world, monkeypatch):
     report = cli.backfill(kind="memory", batch=1)
     assert report["complete"] is False and report["errors"]
     assert cli.main(["backfill", "--kind", "memory", "--batch", "1"]) == 1
+
+
+# ── P4a/T4: the bulk memory reads carry the namespace ────────────────────────
+
+
+async def test_the_bulk_memory_reads_are_namespaced(env):
+    """P4a/T4: the export's eligibility map AND the Chroma rollback's export
+    read ONE namespace (default ``personal``, the only one a P4a deployment
+    holds). A row of the same tenant outside it is not exported — and the
+    collection ends up holding exactly the eligible personal rows."""
+    await _ladder(env)
+    alice = await _add_user(env.sessions, "alice@test.invalid")
+    personal = await _add_memory(env.sessions, alice.id, "personal note")
+    team = await _add_memory(env.sessions, alice.id, "team note", namespace=TEAM)
+
+    with env.cli._session() as session:
+        rows = env.cli.memory_rows(session)
+
+    assert set(rows) == {str(personal.id)}, "the default read is scoped, never unscoped"
+
+    report = env.cli.backfill(kind="memory", batch=4)
+
+    assert report["complete"] is True
+    assert _scroll_ids(env.cli.data_generation("memory")) == {str(personal.id)}
+    assert str(team.id) not in _scroll_ids(env.cli.data_generation("memory"))
+
+
+async def test_the_rollback_export_is_namespaced(env, rollback_cli):
+    """The rollback CLI shares the ONE eligibility definition, so it inherits
+    the same boundary: the old binary resurrects no row the live reader would
+    not serve."""
+    await _ladder(env)
+    alice = await _add_user(env.sessions, "alice@test.invalid")
+    personal = await _add_memory(env.sessions, alice.id, "personal note")
+    await _add_memory(env.sessions, alice.id, "team note", namespace=TEAM)
+
+    with env.cli._session() as session:
+        served, rows = rollback_cli._eligible_memories(session)
+
+    assert {str(memory.id) for memory, _ in served} == {str(personal.id)}
+    assert set(rows) == {str(personal.id)}

@@ -29,7 +29,8 @@ Surface (SYNC, like the ladder — an async caller wraps it with
 - :func:`create_index` — the DDL (virtual table + the three triggers), idempotent.
 - :func:`rebuild` — coverage check + backfill; the ladder's transition step and
   the operator's repair path.
-- :func:`search` — tenant + visibility filtered, budgeted MATCH, BM25 ascending.
+- :func:`search` — tenant + namespace + visibility filtered, budgeted MATCH,
+  BM25 ascending.
 - :func:`is_available` — cheap probe for callers that must fail open (T5's
   vector-outage fallback): ``False`` off SQLite or before the v4 ladder ran.
 """
@@ -54,7 +55,8 @@ from sqlalchemy.engine import Connection
 
 from app.models.memory import Memory
 from app.models.types import GUID
-from app.retrieval.memory.visibility import current_memory_predicate
+from app.retrieval.memory.namespaces import personal_namespace
+from app.retrieval.memory.visibility import current_memory_predicate, namespace_predicate
 
 log = logging.getLogger(__name__)
 
@@ -207,16 +209,24 @@ def match_expression(query: str) -> str:
 
 
 def search(conn: Connection, query: str, *, user_id: uuid.UUID | str,
-           limit: int) -> list[dict[str, Any]]:
+           limit: int, namespace: str | None = None) -> list[dict[str, Any]]:
     """Rank ``user_id``'s CURRENT memories against ``query`` (best first).
 
     Returns ``[{"memory_id": <canonical uuid str>, "score": <bm25>, "rank": i}]``
     with zero-based ranks — BM25 ascending is better, so the lexical order is
     dense-independent and ready for rank fusion (spec §7.4).
 
-    The tenant and ``current_memory_predicate()`` clauses are applied on the
-    canonical join BEFORE the LIMIT: a superseded, dirty or foreign-tenant row
-    can never occupy one of the ``limit`` slots, whatever its BM25 says.
+    The tenant, namespace and ``current_memory_predicate()`` clauses are applied
+    on the canonical join BEFORE the LIMIT: a superseded, dirty, foreign-tenant
+    or out-of-namespace row can never occupy one of the ``limit`` slots,
+    whatever its BM25 says. The namespace clause is exact here — ``memory_fts``
+    is not a second copy of the boundary, the join reads ``memories.namespace``,
+    and the ladder backfilled every pre-P4 row to ``personal`` (so R32's
+    "a missing key is personal" branch has no analogue in this leg).
+
+    ``namespace`` defaults to the caller's own (``namespaces.personal_namespace``)
+    through ``visibility.namespace_predicate`` — the one SQL spelling of the
+    boundary, so this leg cannot drift from the rows (P4a: personal-only).
     """
     if conn.dialect.name != "sqlite":
         # Before the empty-query short circuit, deliberately: off SQLite this is
@@ -228,6 +238,8 @@ def search(conn: Connection, query: str, *, user_id: uuid.UUID | str,
     expression = match_expression(query)
     if not expression or limit <= 0:
         return []
+    if namespace is None:
+        namespace = personal_namespace(user_id)
 
     tenant = bindparam("tenant_id", user_id, type_=GUID())
     stmt = (
@@ -236,6 +248,7 @@ def search(conn: Connection, query: str, *, user_id: uuid.UUID | str,
         .select_from(_FTS.join(Memory, Memory.id == _FTS.c.memory_id))
         .where(literal_column(TABLE).op("MATCH")(bindparam("match", expression)))
         .where(_FTS.c.user_id == tenant, Memory.user_id == tenant)
+        .where(namespace_predicate(namespace))
         .where(current_memory_predicate())
         .order_by(literal_column(f"bm25({TABLE})").asc(), Memory.id.asc())
         .limit(limit)

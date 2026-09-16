@@ -15,6 +15,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.memory import Memory
+from app.retrieval.memory.namespaces import personal_namespace
+from app.retrieval.memory.visibility import namespace_predicate
 
 log = logging.getLogger(__name__)
 
@@ -305,9 +307,17 @@ async def create_demo_memories(
 
 
 async def check_user_has_memories(user_id: UUID, db: AsyncSession) -> bool:
-    """Check if user already has memories."""
+    """Check if user has memories in their OWN namespace (P4a/T5).
+
+    Reads ``memories`` like any other surface, so it carries the namespace
+    boundary: a row outside the caller's namespace is not a memory the caller
+    has (P4a: one namespace, so this is the same answer the pre-P4 read gave).
+    """
     result = await db.execute(
-        select(Memory.id).where(Memory.user_id == user_id).limit(1)
+        select(Memory.id).where(
+            Memory.user_id == user_id,
+            namespace_predicate(personal_namespace(user_id)),
+        ).limit(1)
     )
     return result.scalar_one_or_none() is not None
 

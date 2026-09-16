@@ -10,6 +10,12 @@ Vocabulary (precedence superseded > dirty > needs-check > current):
 - current / needs-check — served, labeled with their state.
 - superseded — readable in direct get / timeline / history views, labeled.
 - dirty — never served, never used as context or rerank evidence.
+
+The namespace boundary (``namespace_predicate``) is the second rule every reader
+of ``memories`` composes: an authorization predicate, not a lifecycle label —
+two rows with the same text in two namespaces are two facts with different
+owners' permissions (spec §8.2). It belongs in the SAME statement as the row it
+protects, for the same reason the lifecycle predicates do.
 """
 from __future__ import annotations
 
@@ -21,6 +27,31 @@ from app.retrieval.memory.correction import (
     CM_NEEDS_CHECK,
     CM_SUPERSEDED_BY,
 )
+
+
+def namespace_predicate(namespace: str):
+    """The namespace boundary as a SQL predicate — the one spelling of it.
+
+    ``namespace`` always comes from ``app.retrieval.memory.namespaces`` (never
+    from client input, never a literal in a query), so a predicate cannot drift
+    from the value the rows actually carry. Compose it with the lifecycle
+    predicate: ``where(Memory.user_id == ..., namespace_predicate(ns), not_dirty_predicate())``.
+
+    ``None``/empty is REFUSED, like ``qdrant_filter.build_filter`` refuses it:
+    ``None`` would compile to ``namespace IS NULL`` and ``''`` to ``= ''`` —
+    predicates no caller means. ``None`` means the whole database in the
+    migration CLI's vocabulary, so compiling it into a WHERE clause would read
+    rows the caller never authorized. A padded value is normalized once
+    (``str(namespace).strip()``) to the spelling the rows carry, for the same
+    reason: matched verbatim it would match nothing, in silence.
+    """
+    if namespace is None or not str(namespace).strip():
+        raise ValueError(
+            "namespace_predicate needs a namespace: it is an authorization boundary — "
+            "None compiles to IS NULL (the CLI's whole-DB vocabulary), never to a "
+            "predicate a reader may run"
+        )
+    return Memory.namespace == str(namespace).strip()
 
 
 def _has(key: str):

@@ -22,12 +22,19 @@ IS_SQLITE = settings.DATABASE_URL.startswith("sqlite")
 # v1 = the pre-versioning schema, v2 = revisions + outbox/generation tables,
 # v3 = the P1b generation rows (a DATA step: no DDL, no new tables/columns),
 # v4 = the P2 FTS5 memory index + its triggers (DDL: a virtual table, which can
-# never come from model metadata — the ladder creates it with exec_driver_sql).
-SQLITE_SCHEMA_VERSION = 4
+# never come from model metadata — the ladder creates it with exec_driver_sql),
+# v5 = the P4a namespace column + its (namespace, user_id) index (DDL; the
+# backfill IS the column default, so every pre-existing row is 'personal').
+SQLITE_SCHEMA_VERSION = 5
 
 # Objects added by the v1 -> v2 ladder; excluded from the v1 shape check.
 V2_TABLES = ("index_outbox", "index_generations", "memory_suppressions")
 V2_COLUMNS = {"memories": "revision", "document_chunks": "revision"}
+# Columns added by LATER ladder steps, excluded from the v1 shape check for the
+# same reason: a pre-versioning install predates them too, and adoption must
+# accept the genuine v1 shape whether or not an earlier boot already got this
+# far (a partially-upgraded file is upgraded again, not refused).
+V5_COLUMNS = {"memories": "namespace"}
 
 
 def _make_engine():
@@ -89,10 +96,10 @@ def _upgradable_v1_schema(sync_conn) -> bool:
 
     Pre-versioning installs (<= v1.1.0) built the full v1 schema with
     ``create_all`` and left ``PRAGMA user_version`` at 0. v1 is the model
-    metadata minus the v2 additions (revision columns + index_outbox /
-    index_generations / memory_suppressions), so such a DB is adoptable and
-    then upgraded by the ladder. Any missing v1 table or column is divergence
-    and must fail closed.
+    metadata minus the ladder's own additions (the v2 tables + revision columns,
+    and the v5 namespace column), so such a DB is adoptable and then upgraded by
+    the ladder. Any missing v1 table or column is divergence and must fail
+    closed.
     """
     insp = sa_inspect(sync_conn)
     existing = set(insp.get_table_names())
@@ -101,9 +108,9 @@ def _upgradable_v1_schema(sync_conn) -> bool:
             continue
         if table.name not in existing:
             return False
-        v2_column = V2_COLUMNS.get(table.name)
+        later_columns = (V2_COLUMNS.get(table.name), V5_COLUMNS.get(table.name))
         have = {col["name"] for col in insp.get_columns(table.name)}
-        if {col.name for col in table.columns if col.name != v2_column} - have:
+        if {col.name for col in table.columns if col.name not in later_columns} - have:
             return False
     return True
 
@@ -288,6 +295,37 @@ def _upgrade_v3_to_v4(sync_conn) -> None:
     log.info("SQLite schema v4: FTS5 memory index ready", extra=report)
 
 
+def _upgrade_v4_to_v5(sync_conn) -> None:
+    """v4 -> v5: ``memories.namespace`` + its ``(namespace, user_id)`` index.
+
+    Runs ONCE, on the version transition, and on a fresh install too (which has
+    nothing to back up). The column is NOT NULL with a constant default, so the
+    ADD COLUMN is itself the backfill: every pre-existing row IS ``'personal'`` —
+    the only namespace this phase can produce (it is never derived from client
+    input, so there is nothing per-row to compute).
+
+    The DDL mirrors the model byte for byte: ``String(32) NOT NULL
+    server_default="personal"`` renders as exactly the raw SQL below, so an
+    upgraded file and a fresh one are indistinguishable (``tests/lite`` compares
+    their ``PRAGMA table_info``). ``VARCHAR(32)``, not ``TEXT``: the type the
+    model declares is the type the ladder installs.
+
+    Idempotent: a crash between the DDL and the version stamp re-enters with the
+    column already present, and SQLite has no ``ADD COLUMN IF NOT EXISTS`` — so
+    the column is inspected first (the index has ``IF NOT EXISTS``). A later boot
+    never re-runs it: a restart must not re-assert a namespace an operator moved.
+    """
+    insp = sa_inspect(sync_conn)
+    have = {col["name"] for col in insp.get_columns("memories")}
+    if "namespace" not in have:
+        sync_conn.exec_driver_sql(
+            "ALTER TABLE memories ADD COLUMN namespace VARCHAR(32) NOT NULL DEFAULT 'personal'"
+        )
+    sync_conn.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS ix_memories_namespace_user ON memories(namespace, user_id)"
+    )
+
+
 def _conn_sqlite_path(conn) -> str:
     """File path of the SQLite database behind an engine/connection."""
     path = conn.engine.url.database
@@ -313,7 +351,9 @@ def upgrade_sqlite_schema(conn) -> None:
     generation-rows data step, which runs ONCE — the CLI's ``cutover`` owns
     every later pointer move), then v3 -> v4 (the P2 FTS5 memory index + its
     triggers, also ONCE — a restart never rebuilds an index an operator
-    repaired). Divergence fails closed — ``create_all`` is never used as an
+    repaired), then v4 -> v5 (the P4a namespace column + its index, ONCE — the
+    column default backfills every existing row with ``'personal'``).
+    Divergence fails closed — ``create_all`` is never used as an
     existing-schema migration mechanism.
     """
     from app import models  # noqa: F401 — register every model on Base
@@ -322,7 +362,7 @@ def upgrade_sqlite_schema(conn) -> None:
     version = int(conn.execute(text("PRAGMA user_version")).scalar_one())
     tables = set(sa_inspect(conn).get_table_names())
     fresh_install = version == 0 and not tables
-    if version not in (0, 1, 2, 3, SQLITE_SCHEMA_VERSION):
+    if version not in (0, 1, 2, 3, 4, SQLITE_SCHEMA_VERSION):
         raise RuntimeError(
             f"unsupported SQLite schema version {version}; expected {SQLITE_SCHEMA_VERSION}"
         )
@@ -366,6 +406,16 @@ def upgrade_sqlite_schema(conn) -> None:
         # The v3 -> v4 DDL step, ONCE, on the transition; a fresh install runs
         # it too, so every v4 install serves a lexical leg.
         _upgrade_v3_to_v4(conn)
+    if version in (0, 1, 2, 3, 4):
+        # P4a milestone backup: its OWN name, taken where the ladder stands now
+        # (v4, pre-namespace). The P1b/P2 files are snapshots of EARLIER states —
+        # nothing to inherit, so no rename — and are never overwritten. A fresh
+        # install has nothing to back up.
+        if tables:
+            _backup_before_ddl(path, suffix="pre-p4")
+        # The v4 -> v5 DDL step, ONCE, on the transition; a fresh install runs it
+        # too, so every v5 install carries the column the ACL predicates read.
+        _upgrade_v4_to_v5(conn)
     conn.execute(text(f"PRAGMA user_version = {SQLITE_SCHEMA_VERSION}"))
     integrity = conn.exec_driver_sql("PRAGMA integrity_check").fetchone()
     if integrity is None or integrity[0] != "ok":

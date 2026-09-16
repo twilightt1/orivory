@@ -28,9 +28,14 @@ from app.database import get_db
 from app.models.memory import Memory
 from app.models.user import User
 from app.retrieval.memory.correction import state_of
+from app.retrieval.memory.namespaces import PERSONAL, namespace_of, personal_namespace
 from app.retrieval.memory.outbox import bump_revision, enqueue_upsert, mark_done
 from app.retrieval.memory.retriever import MemoryRetriever
-from app.retrieval.memory.visibility import not_dirty_predicate, state_expression
+from app.retrieval.memory.visibility import (
+    namespace_predicate,
+    not_dirty_predicate,
+    state_expression,
+)
 from app.retrieval.memory.write_back import index_new_memory, safe_upsert_to_index
 from app.schemas.Orivory import (
     DigestResponse,
@@ -88,6 +93,19 @@ def _memory_response(
     )
 
 
+async def _owned(memory: Memory | None, user: User) -> bool:
+    """May ``user`` read/write ``memory``? Theirs AND in their namespace.
+
+    The one spelling of the boundary for a row already in hand: a primary-key
+    get (``db.get``) cannot carry a predicate, so the check is on the loaded row
+    — against the same ``namespaces`` value the SQL predicate is built from. A
+    foreign row and a missing one answer the same 404.
+    """
+    return (memory is not None
+            and memory.user_id == user.id
+            and namespace_of(memory) == personal_namespace(user.id))
+
+
 @router.post("", response_model=MemoryResponse, status_code=status.HTTP_201_CREATED)
 async def create_memory(
     body: MemoryCreate,
@@ -97,9 +115,9 @@ async def create_memory(
     """Create a new memory. The owning user is taken from the auth context."""
     if body.parent_id is not None:
         # Parent must exist and belong to the caller — otherwise a client could
-        # parent into (and later cascade-delete into) another user's subtree.
-        parent = await db.get(Memory, body.parent_id)
-        if parent is None or parent.user_id != current_user.id:
+        # parent into (and later cascade-delete into) another user's subtree, or
+        # into a namespace it cannot read.
+        if not await _owned(await db.get(Memory, body.parent_id), current_user):
             raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Parent memory not found")
     # Compression-before-storage (feature-flagged, best-effort): long
     # bodies get an AI summary + compressed body before persisting. Any
@@ -114,6 +132,7 @@ async def create_memory(
 
     memory = Memory(
         user_id=current_user.id,
+        namespace=personal_namespace(current_user.id),
         title=body.title,
         content=content,
         summary=summary,
@@ -161,11 +180,14 @@ async def list_memories(
 
     Dirty rows are never listed (their derived view is stale); superseded rows
     are listed with ``state="superseded"`` — history stays readable, labeled.
+    Only the caller's namespace is listed, and the pagination ``total`` carries
+    the same predicate as the page.
     """
+    namespace = namespace_predicate(personal_namespace(current_user.id))
     base = select(Memory, state_expression()).where(
-        Memory.user_id == current_user.id, not_dirty_predicate())
+        Memory.user_id == current_user.id, namespace, not_dirty_predicate())
     count_base = select(func.count(Memory.id)).where(
-        Memory.user_id == current_user.id, not_dirty_predicate())
+        Memory.user_id == current_user.id, namespace, not_dirty_predicate())
 
     if source_type:
         base = base.where(Memory.source_type == source_type)
@@ -229,10 +251,11 @@ async def memory_stats(
     current_user: Annotated[User, Depends(get_current_verified_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> dict:
-    """Aggregate counts for the memory dashboard."""
+    """Aggregate counts for the memory dashboard (the caller's namespace only)."""
+    namespace = namespace_predicate(personal_namespace(current_user.id))
     rows = (await db.execute(
         select(Memory.source_type, func.count(Memory.id))
-        .where(Memory.user_id == current_user.id)
+        .where(Memory.user_id == current_user.id, namespace)
         .group_by(Memory.source_type)
     )).all()
 
@@ -243,12 +266,13 @@ async def memory_stats(
     recent = (await db.execute(
         select(func.count(Memory.id)).where(
             Memory.user_id == current_user.id,
+            namespace,
             Memory.captured_at >= week_ago,
         )
     )).scalar_one()
 
     tags_rows = (await db.execute(
-        select(Memory.tags).where(Memory.user_id == current_user.id)
+        select(Memory.tags).where(Memory.user_id == current_user.id, namespace)
     )).scalars().all()
     tag_counts: dict[str, int] = {}
     for tags in tags_rows:
@@ -277,7 +301,7 @@ async def get_memory(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> MemoryResponse:
     memory = await db.get(Memory, memory_id)
-    if not memory or memory.user_id != current_user.id:
+    if not await _owned(memory, current_user):
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Memory not found.")
     return _memory_response(memory)
 
@@ -290,7 +314,7 @@ async def update_memory(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> MemoryResponse:
     memory = await db.get(Memory, memory_id)
-    if not memory or memory.user_id != current_user.id:
+    if not await _owned(memory, current_user):
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Memory not found.")
 
     data = body.model_dump(exclude_unset=True)
@@ -329,8 +353,7 @@ async def delete_memory(
     leak); the erase is one closure transaction that leaves a receipt and a
     durable delete intent per affected id.
     """
-    memory = await db.get(Memory, memory_id)
-    if not memory or memory.user_id != current_user.id:
+    if not await _owned(await db.get(Memory, memory_id), current_user):
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Memory not found.")
     await erase_memories(db, current_user.id, [memory_id], requested_by="rest_api")
 
@@ -396,10 +419,18 @@ async def get_shared_memory(
 ) -> SharedMemoryResponse:
     """Get a shared memory publicly (no auth required).
 
-    Only memories with is_shared=True are accessible.
+    Only memories with is_shared=True are accessible — and only in the public
+    (personal) namespace: sharing a row never widens it into a namespace the
+    public has no claim to. The link stays owner-agnostic.
     """
-    memory = await db.get(Memory, memory_id)
-    if not memory or not getattr(memory, 'is_shared', False):
+    memory = (await db.execute(
+        select(Memory).where(
+            Memory.id == memory_id,
+            Memory.is_shared.is_(True),
+            namespace_predicate(PERSONAL),
+        )
+    )).scalar_one_or_none()
+    if memory is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Memory not found or not shared")
 
     return SharedMemoryResponse(

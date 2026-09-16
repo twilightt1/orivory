@@ -75,15 +75,17 @@ class _FakeDB:
 
     erasure_receipts → read tests (count → total, rows → rows); count( +
     memory_entities/memory_sources → link counts (residual when the statement
-    carries a list param); count( + memories → residual children count;
-    otherwise the descendant-ids query (param = BFS frontier — one id or a
-    list of them). BFS children are ownership-aware: ``foreign_child_ids``
-    rows belong to another user and are returned only when the statement
-    carries no ``user_id`` filter — i.e. when the service dropped the filter.
+    carries a list param); count( + ``memories.id NOT IN`` / ``memories.user_id
+    !=`` → the two pre-delete cascade counts (F1 / R29c); count( + memories →
+    residual children count; otherwise the descendant-ids query (param = BFS
+    frontier — one id or a list of them). BFS children are ownership-aware:
+    ``foreign_child_ids`` rows belong to another user and are returned only
+    when the statement carries no ``user_id`` filter — i.e. when the service
+    dropped the filter.
     """
 
     def __init__(self, *, owned=None, child_ids=None, entity_links=0, source_links=0, residual=None, rows=None, total=0,
-                 foreign_child_ids=None, cross_user_children=0):
+                 foreign_child_ids=None, cross_user_children=0, cascaded_out_of_namespace=0):
         self._owned = owned or {}
         self._child_ids = child_ids or {}
         self._foreign_child_ids = foreign_child_ids or {}
@@ -91,6 +93,7 @@ class _FakeDB:
         self._source_links = source_links
         self._residual = residual or {"children": 0, "entity_links": 0, "source_links": 0}
         self._cross_user_children = cross_user_children
+        self._cascaded_out_of_namespace = cascaded_out_of_namespace
         self._rows = rows or []
         self._total = total
         self.added = []
@@ -118,6 +121,10 @@ class _FakeDB:
                 return _FakeScalar(self._residual["entity_links"] if residual else self._entity_links)
             if "memory_sources" in sql:
                 return _FakeScalar(self._residual["source_links"] if residual else self._source_links)
+            if "memories.id not in" in sql:
+                # The pre-delete cascade capture count (F1): rows with a parent
+                # in the closure that the walk itself never collected.
+                return _FakeScalar(self._cascaded_out_of_namespace)
             if "memories.user_id !=" in sql:
                 # The pre-delete cross-user cascade count (R29c): rows another
                 # user parents onto the erased ids — unknowable from this scope.
@@ -184,7 +191,8 @@ async def test_erase_deletes_owned_memory_and_writes_receipt(no_chroma):
     assert target["vectors_deleted"] == [str(mid)]
     assert target["vector_residual"] == [] and target["vector_residual_checked"] is True
     assert target["db_residual"] == {"children": 0, "entity_links": 0, "source_links": 0,
-                                     "cross_user_children": 0}
+                                     "cross_user_children": 0, "cascaded_out_of_namespace": 0,
+                                     "derived_out_of_namespace": 0}
     assert receipt.detail["requested_by"] == "rest_api"
     assert receipt.detail["summary"] == {"requested": 1, "erased": 1, "skipped": 0, "errors": 0, "residual_vectors": 0, "residual_rows": 0}
     assert no_chroma == [str(mid)]
@@ -279,6 +287,31 @@ async def test_erase_records_cross_user_cascade_rows_as_residual(no_chroma):
     # already removed the rows and the residual would be invisible.
     sqls = [_sql(stmt).lower() for stmt in db.statements]
     counted = next(i for i, sql in enumerate(sqls) if "memories.user_id !=" in sql)
+    deleted = next(i for i, sql in enumerate(sqls) if "delete from memories" in sql)
+    assert counted < deleted
+
+
+async def test_erase_records_an_out_of_namespace_cascade_as_residual(no_chroma):
+    """F1: the same-user child of ANOTHER namespace goes with the cascade too —
+    the walk never collected it, so only the pre-delete count can record it."""
+    user_id, mid, foreign_ns_child = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    db = _FakeDB(
+        owned={mid: _memory_row(mid, user_id)},
+        foreign_child_ids={mid: [foreign_ns_child]},
+        cascaded_out_of_namespace=1,
+    )
+
+    receipt = await erase_memories(db, user_id, [mid], requested_by="rest_api")
+
+    target = receipt.detail["targets"][0]
+    assert target["db_residual"]["cascaded_out_of_namespace"] == 1
+    assert target["affected_memory_ids"] == []
+    assert receipt.status == "completed_with_residual"
+    assert receipt.detail["summary"]["residual_rows"] == 1
+
+    # Taken BEFORE the delete: past it the cascade has removed the row.
+    sqls = [_sql(stmt).lower() for stmt in db.statements]
+    counted = next(i for i, sql in enumerate(sqls) if "memories.id not in" in sql)
     deleted = next(i for i, sql in enumerate(sqls) if "delete from memories" in sql)
     assert counted < deleted
 

@@ -54,7 +54,7 @@ class _FakeDB:
 
 
 def _fake_vector_search(cands):
-    async def _search(_embedding, *, user_id, top_k=10, where=None):
+    async def _search(_embedding, *, user_id, top_k=10, where=None, namespace=None):
         return cands[:top_k]
 
     return _search

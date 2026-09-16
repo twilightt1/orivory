@@ -25,10 +25,35 @@ def _receipt(user_id: uuid.UUID, memory_id: uuid.UUID, *, erased: int, skipped: 
     )
 
 
+class _FakeRows:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def scalars(self):
+        return self
+
+    def all(self):
+        return self._rows
+
+
 class _FakeDB:
-    def __init__(self):
+    def __init__(self, *, allowed: list | None = None):
         self.added = []
         self.committed = 0
+        self.allowed = allowed  # the R35 pre-read's answer; None = every id requested
+
+    async def execute(self, stmt):
+        """The namespace pre-read (R35) — the tool's one SELECT.
+
+        By default it resolves every id the statement asked for (the tests below
+        are about the service call, not the filter); ``allowed=[]`` is the
+        cross-namespace case.
+        """
+        if self.allowed is not None:
+            return _FakeRows(list(self.allowed))
+        asked = next((value for value in stmt.compile().params.values()
+                      if isinstance(value, (list, tuple))), [])
+        return _FakeRows(list(asked))
 
     def add(self, obj):
         self.added.append(obj)
@@ -127,3 +152,28 @@ async def test_forget_filters_invalid_ids_and_reports_them(writer, monkeypatch):
 
     assert [str(m) for m in seen[0]] == [good]
     assert result["invalid"] == ["nope"]
+
+
+async def test_forget_never_hands_an_id_outside_the_namespace_to_erasure(monkeypatch):
+    """R35a: the boundary is resolved BEFORE the service sees the ids.
+
+    The reviewer's reproduce, at the tool boundary: a same-account row in
+    another namespace must not reach the erase path at all.
+    """
+    p = _principal(("memory:write",))
+    db = _FakeDB(allowed=[])  # the pre-read resolves nothing: not the caller's row
+    seen: list[list[uuid.UUID]] = []
+
+    async def _spy(db_, user_id, memory_ids, *, requested_by):
+        seen.append(list(memory_ids))
+        await db_.commit()
+        return _receipt(user_id, uuid.uuid4(), erased=len(memory_ids), skipped=0)
+
+    monkeypatch.setattr(hub_tools, "_current_principal", lambda: p)
+    monkeypatch.setattr(hub_tools, "_session", lambda: _FakeCtx(db))
+    monkeypatch.setattr(hub_tools, "erase_memories", _spy)
+
+    out = await hub_tools.forget_memory(memory_ids=[str(uuid.uuid4())])
+
+    assert seen == [[]], "a row outside the namespace never reaches the erasure service"
+    assert out["erased"] == 0 and out["skipped"] == 1

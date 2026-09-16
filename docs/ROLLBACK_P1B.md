@@ -3,7 +3,8 @@
 **This escape hatch exists for ONE release** (spec §12). After that release the
 Qdrant path is the only path, §1-§4 and `scripts/rollback_to_chroma.py` are
 deleted, and the P1b-compatible restore is `verify --restore-drill` alone. §6
-(P2 -> pre-P2) is the exception: see §5 for its removal condition.
+(P2 -> pre-P2) and §7 (P4a -> pre-P4) are the exceptions: see §5 for their
+removal condition.
 
 P1b cuts over by flipping the generation pointer: the SQLite database keeps
 serving, but the vectors moved to Qdrant and the local embedding contract went
@@ -46,6 +47,7 @@ Arguments:
 | `--fingerprint` | `legacy-mean` only — the contract the old binary expects |
 | `--out-db` | where the SQLite copy goes (default: beside the store); must not already exist |
 | `--batch` | rows per embedding batch (default 64) |
+| `--namespace` | which memory namespace to export (default `personal` — P4a's only namespace) |
 
 Exit codes: `0` rebuilt and every gate passed; `1` rebuilt, a gate failed (see
 the marker below); `2` refused before doing anything.
@@ -210,9 +212,10 @@ supported restore is `verify --restore-drill` plus a Qdrant snapshot restore.
 objects, re-stamp `user_version = 3`) has no other home and is the only
 documented way back from a v4 file to a pre-P2 binary — deleting it in the
 release after P1b would remove the recipe in exactly the release that ships P2.
-Before §1-§4 go, move §6 into
+The same holds for §7 (the P4a recipe): it ships with the phase that creates the
+need. Before §1-§4 go, move §6 and §7 into
 [OPERATIONS_RUNBOOK.md](OPERATIONS_RUNBOOK.md) (and re-point this document's
-references to it).
+references to them).
 
 ## 6. Rolling a P2 install back to a pre-P2 binary
 
@@ -253,4 +256,43 @@ SQL
 - If a full restore is acceptable instead, the ladder's own `.pre-p2.bak`
   snapshot beside the database is the pre-P2 bytes — and, like `.pre-p1b.bak`,
   restoring it silently drops every write made after it was taken.
+
+## 7. Rolling a P4a install back to a pre-P4 binary
+
+A P4a (lite) install runs SQLite `user_version = 5`: the v4 schema plus
+`memories.namespace` (`VARCHAR(32) NOT NULL DEFAULT 'personal'`) and the
+`ix_memories_namespace_user(namespace, user_id)` index. Both come from the
+ladder's own DDL (model metadata does not create them on an existing file).
+
+A pre-P4 binary cannot open such a file: its ladder accepts `0..4` and refuses
+with `unsupported SQLite schema version 5; expected 4`. Going back needs the
+same two moves as §6 — **stamp the version the target ladder tops out at, and
+take the objects it cannot know about with it**:
+
+```bash
+# On a COPY, never on the live file. Verify with PRAGMA integrity_check after.
+sqlite3 /data/orivory.rollback-p4.db <<'SQL'
+DROP INDEX IF EXISTS ix_memories_namespace_user;  -- SQLite refuses to drop an
+ALTER TABLE memories DROP COLUMN namespace;       -- INDEXED column: index first
+PRAGMA user_version = 4;                          -- the pre-P4 ladder's top
+SQL
+```
+
+- The stamp ALONE (`user_version = 4`, column left in place) is the minimal
+  rollback and is safe for a pre-P4 binary: it never names `namespace`, so its
+  `SELECT`s simply read the extra column and any insert that omits it gets the
+  column default `'personal'`. The test that pins the round trip
+  (`tests/retrieval/test_p4a_gate.py`) does exactly this. The DDL above is the
+  conservative variant: the old binary then sees the v4 shape it built itself.
+- Rolling forward again is a boot with a P4a binary: the ladder re-runs the
+  `v4 -> v5` step, which INSPECTS the column instead of re-adding it (SQLite has
+  no `ADD COLUMN IF NOT EXISTS`), reuses the operator's existing `.pre-p4.bak`
+  rather than overwriting it, and never re-asserts a namespace an operator moved
+  by hand.
+- `.pre-p4.bak` beside the database is the pre-namespace bytes — and, like the
+  other milestone snapshots, restoring it silently drops every write made after
+  it was taken. On an install whose ladder carried several steps in ONE boot,
+  the snapshot's NAME is not its version stamp (mid-ladder `VACUUM INTO` copies
+  can hold later objects at an earlier `PRAGMA user_version`): check the stamp
+  inside before pointing an older binary at it.
 

@@ -80,7 +80,8 @@ def _open_receipt(user_id: uuid.UUID, memory_id: uuid.UUID | None = None, *,
             "vector_residual": [],
             "vector_residual_checked": False,
             "db_residual": {"children": 0, "entity_links": 0, "source_links": 0,
-                            "cross_user_children": 0},
+                            "cross_user_children": 0, "cascaded_out_of_namespace": 0,
+                            "derived_out_of_namespace": 0},
             "index_pending": 1,
         }]},
         created_at=at,
@@ -191,12 +192,87 @@ async def test_the_drain_lands_the_delete_then_reconcile_upgrades_once(
     assert refreshed.detail["index_pending"] == 0
     assert refreshed.detail["targets"][0]["vector_state"] == "verified"
     assert refreshed.detail["targets"][0]["db_residual"] == {
-        "children": 0, "entity_links": 0, "source_links": 0, "cross_user_children": 0}
+        "children": 0, "entity_links": 0, "source_links": 0, "cross_user_children": 0,
+        "cascaded_out_of_namespace": 0, "derived_out_of_namespace": 0}
 
     # Exactly once: the upgraded receipt is terminal, so the next pass skips it.
     assert await reconcile_erasure_receipts() == {
         "checked": 0, "upgraded": 0, "still_unverified": 0}
     assert (await _receipt(receipt.id)).status == "completed"
+
+
+async def test_a_receipt_that_left_a_derivative_behind_never_upgrades(
+    db, monkeypatch, store_down
+):
+    """I3: a derivative another namespace holds is data that OUTLIVED the erase,
+    so the residual is PRESERVED through a clean readback — never re-counted
+    away into a ``completed``.
+
+    The residual is written directly: a recorded residual makes the erase's own
+    verdict ``completed_with_residual`` (terminal, never scanned), so the gate is
+    pinned on the state reconcile would face if such a receipt were ever open.
+    """
+    uid = await _owner(db)
+    mem = _memory(uid)
+    db.add(mem)
+    await db.commit()
+
+    receipt = await erase_memories(db, uid, [mem.id], requested_by="rest_api")
+    assert receipt.status == "completed_unverified"  # open: the readback never ran
+
+    async with database.AsyncSessionLocal() as session:
+        row = await session.get(ErasureReceipt, receipt.id)
+        assert row is not None
+        targets = copy.deepcopy(row.detail["targets"])
+        targets[0]["db_residual"]["derived_out_of_namespace"] = 1
+        row.detail = {**row.detail, "targets": targets}
+        await session.commit()
+
+    async def _absent(_memory_ids):
+        return set()
+
+    monkeypatch.setattr(erasure_service, "_vector_present_ids", _absent)
+    report = await reconcile_erasure_receipts()
+
+    assert report == {"checked": 1, "upgraded": 0, "still_unverified": 1}
+    refreshed = await _receipt(receipt.id)
+    assert refreshed.status == "completed_unverified"
+    assert refreshed.detail["targets"][0]["db_residual"]["derived_out_of_namespace"] == 1
+
+
+async def test_a_receipt_that_recorded_an_out_of_namespace_cascade_never_upgrades(
+    db, monkeypatch, store_down
+):
+    """F1: rows the cascade took outside this namespace are PRESERVED through a
+    clean readback, exactly like the other pre-delete counts — a later pass can
+    never re-count them away into a ``completed`` (they no longer exist to be
+    counted)."""
+    uid = await _owner(db)
+    mem = _memory(uid)
+    db.add(mem)
+    await db.commit()
+
+    receipt = await erase_memories(db, uid, [mem.id], requested_by="rest_api")
+    assert receipt.status == "completed_unverified"  # open: the readback never ran
+
+    async with database.AsyncSessionLocal() as session:
+        row = await session.get(ErasureReceipt, receipt.id)
+        assert row is not None
+        targets = copy.deepcopy(row.detail["targets"])
+        targets[0]["db_residual"]["cascaded_out_of_namespace"] = 1
+        row.detail = {**row.detail, "targets": targets}
+        await session.commit()
+
+    async def _absent(_memory_ids):
+        return set()
+
+    monkeypatch.setattr(erasure_service, "_vector_present_ids", _absent)
+    report = await reconcile_erasure_receipts()
+
+    assert report == {"checked": 1, "upgraded": 0, "still_unverified": 1}
+    refreshed = await _receipt(receipt.id)
+    assert refreshed.status == "completed_unverified"
+    assert refreshed.detail["targets"][0]["db_residual"]["cascaded_out_of_namespace"] == 1
 
 
 # ── (c)/(d) terminal receipts are never revised ─────────────────────────────
