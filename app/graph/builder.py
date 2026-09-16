@@ -132,7 +132,12 @@ def build_memory_graph_sync(
     *,
     force: bool = False,
 ) -> GraphBuildResult:
-    """Synchronous builder used from Celery/CLI contexts."""
+    """Synchronous builder for off-loop callers.
+
+    Used from CLI/script contexts and from worker threads
+    (``write_back.safe_enqueue_graph_build`` hands it to ``asyncio.to_thread``);
+    never from a running event loop — see ``_run_extraction``.
+    """
     memory = db.get(Memory, memory_id)
     if memory is None:
         return GraphBuildResult(memory_id=str(memory_id), user_id=None, skipped=True, error="memory_not_found")

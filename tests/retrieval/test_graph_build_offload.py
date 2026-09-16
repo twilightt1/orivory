@@ -14,15 +14,20 @@ Nothing about the stores or the builder is faked here: a private SQLite file
 bound as the app's own (the P1b gate's ``_bind_engines``), the real
 ``build_memory_graph_sync``, and the real deterministic extraction fallback.
 Two seams are substituted only because no claim in this file is about them:
-the LLM provider (``app.graph.extraction._get_client`` raises, so extraction
-takes its offline fallback) and the embed leg (T1 owns that one, with the real
-embedder, in ``test_event_loop_responsiveness.py``).
+the LLM provider (``app.graph.extraction._get_client`` — it raises in the
+graph-build tests, so extraction takes its offline fallback, and it counts
+in-flight creates in the concurrency test) and the embed leg (T1 owns that one,
+with the real embedder, in ``test_event_loop_responsiveness.py``).
 """
 from __future__ import annotations
 
+import asyncio
+import gc
+import json
 import logging
 import threading
 import uuid
+import warnings
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
@@ -31,6 +36,7 @@ import pytest_asyncio
 from sqlalchemy import select
 
 from app import database
+from app.agents import llm_client
 from app.config import settings
 from app.database import sync_session
 from app.graph.builder import build_memory_graph_sync
@@ -144,11 +150,18 @@ async def test_the_sync_builder_refuses_a_running_loop_with_the_fix(store):
 
     Pre-fix this raised the bare ``asyncio.run() cannot be called from a
     running event loop`` (and leaked a never-awaited coroutine); the point is
-    that a future caller gets told exactly what to do instead of a mystery.
+    that a future caller gets told exactly what to do instead of a mystery,
+    and that the refused coroutine is closed — not left to raise
+    ``RuntimeWarning: coroutine 'extract_entities' was never awaited``.
     """
     _user_id, memory_id = await _seed_memory(store)
-    with sync_session() as db, pytest.raises(RuntimeError, match=r"asyncio\.to_thread"):
-        build_memory_graph_sync(db, str(memory_id))
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        with sync_session() as db, pytest.raises(RuntimeError, match=r"asyncio\.to_thread"):
+            build_memory_graph_sync(db, str(memory_id))
+        gc.collect()
+    leaks = [str(record.message) for record in caught if "never awaited" in str(record.message)]
+    assert not leaks, f"the refused coroutine was never awaited: {leaks}"
 
 
 async def test_graph_failure_is_loud_and_never_fails_the_write(store, monkeypatch, caplog):
@@ -169,3 +182,70 @@ async def test_graph_failure_is_loud_and_never_fails_the_write(store, monkeypatc
         if record.levelno >= logging.ERROR and str(memory_id) in record.getMessage()
     ]
     assert loud, f"the graph failure was not loud:\n{caplog.text}"
+    for record in loud:
+        assert record.exc_info is not None, "the graph failure was logged without its traceback"
+        assert "graph store down" in str(record.exc_info[1]), "the traceback lost the cause"
+
+
+async def test_concurrent_syncs_never_exceed_the_llm_concurrency_limit(store, monkeypatch):
+    """N>limit memories synced at once: the shared gate caps the provider burst.
+
+    The connector-sync path awaits one full extraction per synced memory inside
+    ``POST /sources/{id}/sync``, and extraction used to call
+    ``chat.completions.create`` outside ``LLM_MAX_CONCURRENCY`` entirely
+    (P2/T9 fix round 1, I1: the gate only wrapped ``complete()`` /
+    ``complete_stream()``). The write path is exercised for real; the only fake
+    is the provider, and its counting create must never see more calls in
+    flight than the gate allows.
+    """
+    limit = 2
+    monkeypatch.setattr(settings, "LLM_MAX_CONCURRENCY", limit)
+    monkeypatch.setattr(llm_client, "_llm_semaphore", None, raising=False)
+
+    state = {"inflight": 0, "peak": 0, "calls": 0}
+    counter_lock = threading.Lock()
+
+    async def _create(**_kwargs):
+        with counter_lock:
+            state["calls"] += 1
+            state["inflight"] += 1
+            state["peak"] = max(state["peak"], state["inflight"])
+        try:
+            await asyncio.sleep(0.05)  # hold the slot long enough to overlap
+        finally:
+            with counter_lock:
+                state["inflight"] -= 1
+        payload = {
+            "entities": [
+                {"name": "Project Atlas", "type": "project"},
+                {"name": "lantern walk", "type": "event"},
+            ],
+            "relations": [
+                {"source": "Project Atlas", "target": "lantern walk", "relation": "related_to"},
+            ],
+        }
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps(payload)))]
+        )
+
+    fake_client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=_create))
+    )
+    monkeypatch.setattr("app.graph.extraction._get_client", lambda: fake_client)
+
+    seeds = [await _seed_memory(store) for _ in range(limit * 3)]
+
+    async def _sync(user_id, memory_id):
+        async with store.sessions() as db:
+            await SourceSyncService(db)._index_memories([str(memory_id)], user_id=user_id)
+
+    await asyncio.gather(*(_sync(user_id, memory_id) for user_id, memory_id in seeds))
+
+    assert state["peak"] <= limit, (
+        f"extraction burst the provider: {state['peak']} concurrent creates "
+        f"with LLM_MAX_CONCURRENCY={limit}"
+    )
+    assert state["calls"] >= limit, "the gate starved the provider: extraction never ran"
+    for _user_id, memory_id in seeds:
+        metadata, _entities, _links, _relations = _graph_state(memory_id)
+        assert metadata.get("graph_extracted_at"), f"memory {memory_id} never got its graph"

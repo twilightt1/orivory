@@ -131,10 +131,11 @@ jobs:
         # Never a gate: the artifact is the evidence, the contract test pins its
         # SHAPE (arms/slices/verdicts), and the script itself refuses to
         # download the ~90MB arctic ONNX on a cold runner — so the step runs it
-        # when the cache is warm and says why it skipped when it is not. Only a
-        # CLEAN probe may skip: the probe prints its verdict and exits 0, so a
-        # missing dependency or a broken import FAILS the step instead of being
-        # reported as a cold cache. Before P2 this script and its contract test
+        # when the cache is warm and says why it skipped when it is not. Only an
+        # explicit verdict acts: a failing probe (missing dependency, broken
+        # import) FAILS the step, only 'cold' prints the skip line, and any
+        # other output FAILS it too — nothing is reported as a cold cache that
+        # did not say 'cold'. Before P2 this script and its contract test
         # appeared in no CI step at all.
         run: |
           python -m pytest --confcutdir=tests/retrieval tests/retrieval/test_p2_ablation_contract.py -q
@@ -142,11 +143,18 @@ jobs:
             echo "the arctic cache probe itself failed — not a cold cache" >&2
             exit 1
           fi
-          if [ "$cache" = "cached" ]; then
-            python eval/ablation_retrieval_p2.py
-          else
-            echo "arctic artifacts not cached → the ablation SKIPS; eval/ablation_retrieval_p2.json is the committed evidence"
-          fi
+          case "$cache" in
+            cached)
+              python eval/ablation_retrieval_p2.py
+              ;;
+            cold)
+              echo "arctic artifacts not cached → the ablation SKIPS; eval/ablation_retrieval_p2.json is the committed evidence"
+              ;;
+            *)
+              echo "the arctic cache probe printed an unexpected verdict '$cache' — only 'cold' may skip" >&2
+              exit 1
+              ;;
+          esac
 
       - name: Run benchmark unit tests (DB-free)
         run: python -m pytest --confcutdir=tests/benchmarks tests/benchmarks -q
