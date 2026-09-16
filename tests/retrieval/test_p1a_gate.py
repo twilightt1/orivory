@@ -145,7 +145,7 @@ async def _recall(db, user_id, candidate_ids, monkeypatch, *, rerank_input=None)
     from app.retrieval.memory import retriever as retriever_module
     from app.retrieval.memory.retriever import MemoryRetriever
 
-    async def _search(_embedding, *, user_id, top_k):
+    async def _search(_embedding, *, user_id, top_k, namespace=None):
         return [{"memory_id": str(i), "score": 0.9, "content": "stale payload"}
                 for i in candidate_ids]
 

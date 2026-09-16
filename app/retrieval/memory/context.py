@@ -29,7 +29,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.memory import Memory
-from app.retrieval.memory.visibility import current_memory_predicate
+from app.retrieval.memory.namespaces import personal_namespace
+from app.retrieval.memory.visibility import current_memory_predicate, namespace_predicate
 
 log = logging.getLogger(__name__)
 
@@ -38,6 +39,7 @@ async def fetch_personal_context(
     db: AsyncSession,
     user_id: UUID,
     *,
+    namespace: str | None = None,
     lookback_days: int = 7,
     recent_limit: int = 20,
     cap: int = 30,
@@ -47,6 +49,10 @@ async def fetch_personal_context(
     Args:
         db: Async DB session.
         user_id: Owning user.
+        namespace: The namespace the slice is read from. ``None`` resolves to
+            the user's own (``namespaces.personal_namespace``) — fail-closed:
+            a caller that forgets it can only ever narrow to the user's own
+            rows, never widen the read.
         lookback_days: Include memories captured in the last N days.
         recent_limit: Also include the N most recent regardless of age.
         cap: Final result cap (default 30).
@@ -54,13 +60,15 @@ async def fetch_personal_context(
     Returns:
         List of ``Memory`` objects, sorted by ``captured_at`` desc.
     """
+    ns = namespace or personal_namespace(user_id)
+    boundary = namespace_predicate(ns)
     now = datetime.now(UTC)
     cutoff = now - timedelta(days=lookback_days)
 
     # 1) Pinned memories (cap at `cap` to avoid runaway).
     pinned_q = (
         select(Memory)
-        .where(Memory.user_id == user_id, Memory.pinned.is_(True),
+        .where(Memory.user_id == user_id, boundary, Memory.pinned.is_(True),
                current_memory_predicate())
         .order_by(Memory.captured_at.desc())
         .limit(cap)
@@ -69,7 +77,7 @@ async def fetch_personal_context(
     # 2) Recent-in-window memories (cap at 50 to avoid huge lists).
     recent_q = (
         select(Memory)
-        .where(Memory.user_id == user_id, Memory.captured_at >= cutoff,
+        .where(Memory.user_id == user_id, boundary, Memory.captured_at >= cutoff,
                current_memory_predicate())
         .order_by(Memory.captured_at.desc())
         .limit(50)
@@ -79,7 +87,7 @@ async def fetch_personal_context(
     #    we dedup by id below).
     last_n_q = (
         select(Memory)
-        .where(Memory.user_id == user_id, current_memory_predicate())
+        .where(Memory.user_id == user_id, boundary, current_memory_predicate())
         .order_by(Memory.captured_at.desc())
         .limit(recent_limit)
     )

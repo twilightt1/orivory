@@ -45,9 +45,13 @@ bad input).
 
     python scripts/migrate_qdrant.py inventory --out report.json
     python scripts/migrate_qdrant.py backup --dir /backups
-    python scripts/migrate_qdrant.py backfill --kind memory --batch 200 [--resume]
+    python scripts/migrate_qdrant.py backfill --kind memory --batch 200 [--resume] [--namespace personal]
     python scripts/migrate_qdrant.py verify --kind memory
     python scripts/migrate_qdrant.py cutover --yes
+
+``--namespace`` (backfill, P4a) scopes the memory export; the default is
+``personal`` — the only namespace a P4a deployment can hold — so the flag is
+informational until sharing lands.
 """
 from __future__ import annotations
 
@@ -94,6 +98,8 @@ from app.retrieval.embedding_fingerprint import (  # noqa: E402
 )
 from app.retrieval.memory import outbox, vector_store  # noqa: E402
 from app.retrieval.memory.correction import state_of  # noqa: E402
+from app.retrieval.memory.namespaces import PERSONAL  # noqa: E402
+from app.retrieval.memory.visibility import namespace_predicate  # noqa: E402
 from app.services.erasure_service import ERASURE_STATUS_COMPLETED  # noqa: E402
 
 log = logging.getLogger("migrate_qdrant")
@@ -297,17 +303,26 @@ def _suppressed_sources(session: Session) -> set[tuple[str, str]]:
     }
 
 
-def memory_rows(session: Session) -> dict[str, dict]:
-    """``{memory_id: {...}}`` for EVERY memory row, eligible or not.
+def memory_rows(session: Session, *, namespace: str | None = PERSONAL) -> dict[str, dict]:
+    """``{memory_id: {...}}`` for every memory row, eligible or not.
 
     Eligible = the read path's serve set: ``state_of`` current or needs-check
     (superseded and dirty are history/never-served), and NOT a projection whose
     source identity the user suppressed (a forgotten source must not keep a
     servable vector, R28).
+
+    ``namespace`` is the P4a namespace boundary (Task 4): a bulk read here is
+    never an unscoped read — it defaults to ``personal``, the only namespace
+    there is — so the export and the audit that gates it read the same set.
+    ``None`` is the escape hatch for a whole-database read (P4b: an audit that
+    must see every namespace passes it deliberately).
     """
     suppressed = _suppressed_sources(session)
     rows: dict[str, dict] = {}
-    for memory in session.execute(select(Memory)).scalars():
+    stmt = select(Memory)
+    if namespace is not None:
+        stmt = stmt.where(namespace_predicate(namespace))
+    for memory in session.execute(stmt).scalars():
         state = state_of(memory)
         reason = None
         if state == "superseded":
@@ -391,8 +406,10 @@ def correction_chains(session: Session) -> list[dict]:
     return chains
 
 
-def sql_rows(session: Session, kind: str) -> dict[str, dict]:
-    return memory_rows(session) if kind == KIND_MEMORY else chunk_rows(session)
+def sql_rows(session: Session, kind: str, *,
+             namespace: str | None = PERSONAL) -> dict[str, dict]:
+    return (memory_rows(session, namespace=namespace) if kind == KIND_MEMORY
+            else chunk_rows(session))
 
 
 def manifest_rows(session: Session, kind: str) -> list[IndexGeneration]:
@@ -960,9 +977,10 @@ def _checkpoint_key(kind: str) -> str:
     return f"{data_generation(kind)}|{kind}"
 
 
-def _eligible_ids(session: Session, kind: str) -> set[str]:
+def _eligible_ids(session: Session, kind: str, *,
+                  namespace: str | None = PERSONAL) -> set[str]:
     return {
-        entity_id for entity_id, record in sql_rows(session, kind).items()
+        entity_id for entity_id, record in sql_rows(session, kind, namespace=namespace).items()
         if record["reason"] is None
     }
 
@@ -976,8 +994,14 @@ def _backfill_page(session: Session, kind: str, last_id: uuid.UUID | None, batch
     return list(session.execute(stmt).scalars())
 
 
-def backfill(*, kind: str, batch: int = DEFAULT_BATCH, resume: bool = False) -> dict:
-    """Build the contract generation with a keyset scan; checkpoint per batch."""
+def backfill(*, kind: str, batch: int = DEFAULT_BATCH, resume: bool = False,
+             namespace: str | None = PERSONAL) -> dict:
+    """Build the contract generation with a keyset scan; checkpoint per batch.
+
+    ``namespace`` scopes the memory export (Task 4): the default is
+    ``personal`` — P4a's only namespace — so ``--namespace`` is a flag whose
+    default already matches what every deployment can hold.
+    """
     if kind not in KINDS:
         raise MigrationRefused(f"unknown kind {kind!r}; expected one of {list(KINDS)}")
     if batch < 1:
@@ -1003,7 +1027,7 @@ def backfill(*, kind: str, batch: int = DEFAULT_BATCH, resume: bool = False) -> 
         with _session() as session:
             # ponytail: the eligibility map is O(rows) in RAM; page-local
             # eligibility if a deployment ever backs up millions of rows.
-            rows_meta = sql_rows(session, kind)
+            rows_meta = sql_rows(session, kind, namespace=namespace)
             while True:
                 page = _backfill_page(session, kind, last_id, batch)
                 if not page:
@@ -1039,7 +1063,9 @@ def backfill(*, kind: str, batch: int = DEFAULT_BATCH, resume: bool = False) -> 
                 })
                 _write_checkpoint(state)
         with _session() as session:
-            report["gc_deleted"] = _gc_stale(kind, generation, _eligible_ids(session, kind))
+            report["gc_deleted"] = _gc_stale(
+                kind, generation, _eligible_ids(session, kind, namespace=namespace)
+            )
         report["elapsed_s"] = round(time.monotonic() - started, 3)
         report["rows_per_sec"] = round(
             report["upserted"] / report["elapsed_s"], 2) if report["elapsed_s"] else None
@@ -1474,6 +1500,9 @@ def _parser() -> argparse.ArgumentParser:
     bf.add_argument("--kind", choices=list(KINDS), required=True)
     bf.add_argument("--batch", type=int, default=DEFAULT_BATCH)
     bf.add_argument("--resume", action="store_true", help="continue from the checkpoint")
+    bf.add_argument("--namespace", default=PERSONAL,
+                    help="memory namespace to export (P4a: 'personal', the only "
+                         "one there is)")
 
     vf = sub.add_parser("verify", help="full read-side audit against the live collection")
     vf.add_argument("--kind", choices=list(KINDS), default=None,
@@ -1499,7 +1528,8 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "backup":
             report = backup(dest_dir=args.dir)
         elif args.command == "backfill":
-            report = backfill(kind=args.kind, batch=args.batch, resume=args.resume)
+            report = backfill(kind=args.kind, batch=args.batch, resume=args.resume,
+                              namespace=args.namespace)
         elif args.command == "verify":
             if args.restore_drill:
                 if args.dir is None:

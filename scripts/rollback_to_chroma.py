@@ -17,7 +17,9 @@ What the rebuild guarantees (rulings R30-R32):
 
 - the eligible set is the LIVE reader's set, computed by the migration CLI's ONE
   eligibility definition (``migrate_qdrant.memory_rows`` / ``chunk_rows``) — a
-  superseded, dirty, suppressed or unowned row is never resurrected;
+  superseded, dirty, suppressed or unowned row is never resurrected, and the
+  memory half is scoped to ONE namespace (P4a: ``personal``, the only one there
+  is; ``--namespace`` overrides it);
 - the vectors and the recorded contract are the LEGACY MEAN contract
   (``e5_local.arctic_embed_passages_mean``), never the CLS one the live Qdrant
   generation serves;
@@ -82,6 +84,8 @@ from app.retrieval.embedding_fingerprint import (  # noqa: E402
     fingerprint_generation,
 )
 from app.retrieval.memory import outbox, vector_store  # noqa: E402
+from app.retrieval.memory.namespaces import PERSONAL  # noqa: E402
+from app.retrieval.memory.visibility import namespace_predicate  # noqa: E402
 
 log = logging.getLogger("rollback_to_chroma")
 
@@ -278,11 +282,18 @@ def _session(db_path: Path) -> Iterator[Session]:
         engine.dispose()
 
 
-def _eligible_memories(db: Session) -> tuple[list[tuple[Memory, dict]], dict[str, dict]]:
-    """Live rows split into (served, excluded) by the CLI's own eligibility."""
-    rows = migration.memory_rows(db)
+def _eligible_memories(db: Session, *, namespace: str = PERSONAL
+                       ) -> tuple[list[tuple[Memory, dict]], dict[str, dict]]:
+    """Live rows split into (served, excluded) by the CLI's own eligibility.
+
+    ``namespace`` is the boundary this rebuild exports (P4a: ``personal``, the
+    only one there is): the old binary has no notion of a namespace, and a
+    copied row the LIVE read path would not serve must not be resurrected just
+    because the artifact is a copy.
+    """
+    rows = migration.memory_rows(db, namespace=namespace)
     served: list[tuple[Memory, dict]] = []
-    for memory in db.execute(select(Memory)).scalars():
+    for memory in db.execute(select(Memory).where(namespace_predicate(namespace))).scalars():
         record = rows[str(memory.id)]
         if record["reason"] is None:
             served.append((memory, record))
@@ -578,8 +589,14 @@ def gate_findings(*, client, memory_collection: str, chunk_collections: dict, ex
 
 
 def rollback(*, db_path: Path, chroma_path: Path, fingerprint: str = MEAN,
-             out_db: Path | None = None, embed_passages=None, batch: int = DEFAULT_BATCH) -> dict:
-    """Rebuild the pre-P1b Chroma store + the SQLite copy the old binary opens."""
+             out_db: Path | None = None, embed_passages=None, batch: int = DEFAULT_BATCH,
+             namespace: str = PERSONAL) -> dict:
+    """Rebuild the pre-P1b Chroma store + the SQLite copy the old binary opens.
+
+    ``namespace`` scopes the memory export (P4a: ``personal``, the only one a
+    P4a deployment holds) — passed to the eligibility definition, so the rebuilt
+    store carries exactly the rows the live reader would serve.
+    """
     started = time.monotonic()
     if not migration.is_sqlite():
         raise RollbackRefused(
@@ -636,7 +653,7 @@ def rollback(*, db_path: Path, chroma_path: Path, fingerprint: str = MEAN,
         _copy_database(db_path, emitted)
         client = open_chroma(chroma_path)
         with _session(emitted) as db:
-            served_memories, memory_rows = _eligible_memories(db)
+            served_memories, memory_rows = _eligible_memories(db, namespace=namespace)
             grouped = _eligible_chunks(db)
             chunk_rows = migration.chunk_rows(db)
             memory_points = rebuild_memory(client, served_memories, embed=embed, batch=batch)
@@ -717,6 +734,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--out-db", type=Path, default=None,
                         help="where to emit the SQLite copy (default: beside the store)")
     parser.add_argument("--batch", type=int, default=DEFAULT_BATCH)
+    parser.add_argument("--namespace", default=PERSONAL,
+                        help="memory namespace to export (P4a: 'personal', the "
+                             "only one there is)")
     return parser
 
 
@@ -725,7 +745,8 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         report = rollback(db_path=args.db, chroma_path=args.chroma_path,
-                          fingerprint=args.fingerprint, out_db=args.out_db, batch=args.batch)
+                          fingerprint=args.fingerprint, out_db=args.out_db,
+                          batch=args.batch, namespace=args.namespace)
     except RollbackRefused as exc:
         print(f"refused: {exc}", file=sys.stderr)
         return 2

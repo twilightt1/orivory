@@ -107,7 +107,8 @@ class _Store:
         self.outage = outage
         self.calls: list[int] = []
 
-    async def __call__(self, _embedding, *, user_id, top_k=10, where=None):
+    async def __call__(self, _embedding, *, user_id, top_k=10, where=None,
+                       namespace=None):
         self.calls.append(top_k)
         if self.outage:
             raise VectorUnavailableError("vector store down")
@@ -137,7 +138,8 @@ class _ShiftingStore:
         self.pages = [list(page) for page in pages]
         self.calls: list[int] = []
 
-    async def __call__(self, _embedding, *, user_id, top_k=10, where=None):
+    async def __call__(self, _embedding, *, user_id, top_k=10, where=None,
+                       namespace=None):
         page = self.pages[min(len(self.calls), len(self.pages) - 1)]
         self.calls.append(top_k)
         return [

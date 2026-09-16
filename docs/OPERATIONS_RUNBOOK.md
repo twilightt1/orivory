@@ -407,6 +407,8 @@ python scripts/migrate_qdrant.py backup --dir /backups/p1b
 python scripts/migrate_qdrant.py backfill --kind memory --batch 200
 python scripts/migrate_qdrant.py backfill --kind chunk  --batch 200
 #    interrupted? re-run the same command with --resume
+#    memory exports ONE namespace: --namespace defaults to `personal` (P4a's
+#    only namespace), so the flag only matters once sharing lands
 
 # 5. verify — full read-side audit of the live collection, per kind
 python scripts/migrate_qdrant.py verify --kind memory

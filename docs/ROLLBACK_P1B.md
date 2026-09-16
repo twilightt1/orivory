@@ -46,6 +46,7 @@ Arguments:
 | `--fingerprint` | `legacy-mean` only — the contract the old binary expects |
 | `--out-db` | where the SQLite copy goes (default: beside the store); must not already exist |
 | `--batch` | rows per embedding batch (default 64) |
+| `--namespace` | which memory namespace to export (default `personal` — P4a's only namespace) |
 
 Exit codes: `0` rebuilt and every gate passed; `1` rebuilt, a gate failed (see
 the marker below); `2` refused before doing anything.

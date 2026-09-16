@@ -23,6 +23,8 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.memory import Memory
+from app.retrieval.memory.namespaces import personal_namespace
+from app.retrieval.memory.visibility import namespace_predicate
 
 log = logging.getLogger(__name__)
 
@@ -46,10 +48,12 @@ async def bump_salience(
 ) -> int:
     """Increase salience for memories that were used in an answer.
 
-    Scoped by ``user_id`` so a stray id can't touch another user's data.
-    Increments ``recall_count`` and stamps ``last_used_at``. Returns the
-    number of rows updated. Best-effort: the caller should not let a failure
-    here break the chat turn.
+    Scoped by ``user_id`` AND the user's own namespace (P4a: ``personal``,
+    resolved through ``namespaces.personal_namespace``) so a stray id can't
+    touch another user's data — or a row of theirs outside this surface's
+    namespace. Increments ``recall_count`` and stamps ``last_used_at``. Returns
+    the number of rows updated. Best-effort: the caller should not let a
+    failure here break the chat turn.
     """
     ids: list[UUID] = []
     for mid in memory_ids:
@@ -68,7 +72,9 @@ async def bump_salience(
     rows = (
         await db.execute(
             select(Memory.id, Memory.salience).where(
-                Memory.user_id == user_id, Memory.id.in_(ids)
+                Memory.user_id == user_id,
+                namespace_predicate(personal_namespace(user_id)),
+                Memory.id.in_(ids),
             )
         )
     ).all()

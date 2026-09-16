@@ -45,9 +45,10 @@ from app.models.memory_access_log import MemoryAccessLog
 from app.observability.fallbacks import count_fallback
 from app.retrieval.embedder import EmbeddingDimensionMismatch
 from app.retrieval.memory.correction import Slot, get_cm, resolve_correction, state_of
+from app.retrieval.memory.namespaces import namespace_of, personal_namespace
 from app.retrieval.memory.outbox import IndexFreshnessTimeout, mark_done
 from app.retrieval.memory.retriever import MemoryRetriever
-from app.retrieval.memory.visibility import not_dirty_predicate
+from app.retrieval.memory.visibility import namespace_predicate, not_dirty_predicate
 from app.retrieval.memory.write_back import index_new_memory
 from app.retrieval.vector_retriever import VectorUnavailableError
 from app.services.erasure_service import erase_memories
@@ -97,6 +98,25 @@ def _memory_brief(memory: Memory) -> dict[str, Any]:
     }
 
 
+def _owned(memory: Memory | None, principal: AgentPrincipal) -> bool:
+    """May ``principal`` read/write ``memory``? Theirs AND in their namespace.
+
+    The same spelling as the REST surfaces' check (``_owned`` in
+    ``app/api/v1/memories.py``): a primary-key read (``db.get``) cannot carry a
+    predicate, so the boundary is checked on the loaded row against the same
+    ``namespaces`` value the SQL predicate is built from. A foreign row and a
+    missing one answer the same "not found".
+    """
+    return (memory is not None
+            and memory.user_id == principal.user_id
+            and namespace_of(memory) == personal_namespace(principal.user_id))
+
+
+def _namespace_of(principal: AgentPrincipal) -> str:
+    """The principal's own namespace — every read/write below is scoped to it."""
+    return personal_namespace(principal.user_id)
+
+
 def _memory_index_row(memory: Memory) -> dict[str, Any]:
     """Progressive-disclosure index row: no full content, a snippet only.
 
@@ -140,7 +160,9 @@ async def _sql_recall_ids(principal: AgentPrincipal, limit: int) -> list[tuple[U
     The pre-P2 body of the seam, kept as the R23(p2)/R25(p2) fallback when the
     recall path cannot answer. Dirty rows are filtered before the LIMIT so they
     cannot consume capped candidate slots; superseded rows stay eligible
-    (history widening happens at the hydration step).
+    (history widening happens at the hydration step). The namespace predicate
+    is the same boundary the healthy path reads — the fallback is a read of
+    ``memories`` like any other, never a wider one.
 
     The score half of each pair is the row's RAW salience, NOT the recall's
     fused/decayed score — the two orderings' numbers live on different scales.
@@ -148,11 +170,14 @@ async def _sql_recall_ids(principal: AgentPrincipal, limit: int) -> list[tuple[U
     mismatch is invisible; never start comparing these scores with the healthy
     path's.
     """
+    namespace = _namespace_of(principal)
     async with _session() as db:
         rows = (
             await db.execute(
                 select(Memory.id, Memory.salience)
-                .where(Memory.user_id == principal.user_id, not_dirty_predicate())
+                .where(Memory.user_id == principal.user_id,
+                       namespace_predicate(namespace),
+                       not_dirty_predicate())
                 .order_by(Memory.salience.desc(), Memory.captured_at.desc())
                 .limit(limit)
             )
@@ -240,12 +265,14 @@ async def search_memory(query: str, limit: int = 8, include_history: bool = Fals
         results: list[dict[str, Any]] = []
         if recalled:
             # Hydrate the ranked ids; re-check ownership in the same query so
-            # the recall seam can never widen access beyond the principal.
+            # the recall seam can never widen access beyond the principal —
+            # tenant AND namespace.
             rows = (
                 await db.execute(
                     select(Memory).where(
                         Memory.id.in_([mid for mid, _ in recalled]),
                         Memory.user_id == principal.user_id,
+                        namespace_predicate(_namespace_of(principal)),
                         # Dirty rows are never served, not even in history.
                         not_dirty_predicate(),
                     )
@@ -282,6 +309,13 @@ async def timeline(memory_id: str, window: int = 4) -> dict[str, Any]:
     neighbours captured before and after it — chronological context without
     fetching every detail. Cheaper than ``get_memory`` on many ids when
     you need surrounding history. Requires the ``memory:read`` scope.
+
+    The anchor is read by primary key (the caller asked for THAT id: theirs and
+    in their namespace, answered "not found" otherwise — no existence oracle).
+    The neighbours are a query, so their predicate is in the statement: same
+    tenant, same namespace, and never a dirty row — a stale derived row is
+    wrong data, not the history this tool exists to show. Superseded
+    neighbours stay, labelled.
     """
     principal = _current_principal()
     if principal is None:
@@ -295,7 +329,7 @@ async def timeline(memory_id: str, window: int = 4) -> dict[str, Any]:
     capped = max(1, min(window, 10))
     async with _session() as db:
         anchor = await db.get(Memory, anchor_id)
-        if anchor is None or anchor.user_id != principal.user_id:
+        if anchor is None or not _owned(anchor, principal):
             return {"error": "memory not found"}
 
         def _before_or_at(m: Memory) -> bool:
@@ -304,12 +338,15 @@ async def timeline(memory_id: str, window: int = 4) -> dict[str, Any]:
         def _after(m: Memory) -> bool:
             return (m.captured_at, m.id) > (anchor.captured_at, anchor.id)
 
+        boundary = namespace_predicate(_namespace_of(principal))
         before_rows = (
             (
                 await db.execute(
                     select(Memory)
                     .where(
                         Memory.user_id == principal.user_id,
+                        boundary,
+                        not_dirty_predicate(),
                         tuple_(Memory.captured_at, Memory.id) < tuple_(literal(anchor.captured_at), literal(anchor.id)),
                     )
                     .order_by(Memory.captured_at.desc(), Memory.id.desc())
@@ -325,6 +362,8 @@ async def timeline(memory_id: str, window: int = 4) -> dict[str, Any]:
                     select(Memory)
                     .where(
                         Memory.user_id == principal.user_id,
+                        boundary,
+                        not_dirty_predicate(),
                         tuple_(Memory.captured_at, Memory.id) > tuple_(literal(anchor.captured_at), literal(anchor.id)),
                     )
                     .order_by(Memory.captured_at.asc(), Memory.id.asc())
@@ -379,11 +418,16 @@ async def get_memory(memory_id: str) -> dict[str, Any]:
     except ValueError:
         return {"error": "invalid memory id"}
     async with _session() as db:
-        # Ownership is enforced in the query: a foreign id reads as "not found"
-        # instead of leaking another user's memory.
+        # Ownership is enforced in the query: a foreign id — another tenant's,
+        # or one of the caller's own rows outside their namespace — reads as
+        # "not found" instead of leaking a memory.
         row = (
             await db.execute(
-                select(Memory).where(Memory.id == mid, Memory.user_id == principal.user_id)
+                select(Memory).where(
+                    Memory.id == mid,
+                    Memory.user_id == principal.user_id,
+                    namespace_predicate(_namespace_of(principal)),
+                )
             )
         ).scalars().first()
         db.add(_ledger_entry(principal, ACTION_GET, memory_id=mid, detail={"found": row is not None}))
@@ -405,7 +449,9 @@ async def list_recent(limit: int = 20) -> dict[str, Any]:
         rows = (
             await db.execute(
                 select(Memory)
-                .where(Memory.user_id == principal.user_id, not_dirty_predicate())
+                .where(Memory.user_id == principal.user_id,
+                       namespace_predicate(_namespace_of(principal)),
+                       not_dirty_predicate())
                 .order_by(Memory.captured_at.desc(), Memory.id.desc())
                 .limit(capped)
             )
@@ -488,13 +534,18 @@ async def delete_memory(memory_id: str) -> dict[str, Any]:
     async with _session() as db:
         row = (
             await db.execute(
-                select(Memory).where(Memory.id == mid, Memory.user_id == principal.user_id)
+                select(Memory).where(
+                    Memory.id == mid,
+                    Memory.user_id == principal.user_id,
+                    namespace_predicate(_namespace_of(principal)),
+                )
             )
         ).scalars().first()
         if row is None:
             # The id rides ``detail``, not the ``memory_id`` column: that column
             # FKs memories.id (SET NULL) and a dangling reference fails the
-            # INSERT on Postgres.
+            # INSERT on Postgres. A row outside the caller's namespace is the
+            # same "not found" — the erasure path never sees it.
             db.add(_ledger_entry(principal, ACTION_DELETE,
                                  detail={"deleted": False, "memory_id": str(mid)}))
             await db.commit()
@@ -588,7 +639,10 @@ async def correct_memory(memory_id=None, subject="", attribute="", scope="defaul
             return {"error": "invalid memory id"}
         async with _session() as db:
             target = await db.get(Memory, mid)
-        if target is None or target.user_id != principal.user_id:
+        if not _owned(target, principal):
+            # A foreign id and one of the caller's own rows outside their
+            # namespace answer the same: correcting is a write, and a write
+            # never reaches across the boundary.
             return {"error": "memory not found"}
     async with _session() as db:
         out = await resolve_correction(

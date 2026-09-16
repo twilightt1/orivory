@@ -17,6 +17,7 @@ from app.models.document import Document
 from app.models.message import Message
 from app.models.user import User
 from app.models.user_quota import UserQuota
+from app.retrieval.memory.namespaces import personal_namespace
 from app.schemas.auth import UserResponse
 from app.services.audit_service import AuditService
 from app.services.diagnostics_service import build_diagnostics
@@ -467,6 +468,11 @@ async def reindex_memories(
     vector data loss, or to index memories captured before write-through
     embedding existed. ``only_missing`` (default) skips memories already
     present in the collection; set false to rebuild every vector.
+
+    The backfill is scoped to the target's OWN namespace, resolved here through
+    ``namespaces.personal_namespace`` (P4a: ``personal``, the only one there
+    is). The request body deliberately carries no namespace field: a namespace
+    is never derived from client input, so an admin cannot widen it.
     """
     target = await db.get(User, body.user_id)
     if not target:
@@ -482,6 +488,7 @@ async def reindex_memories(
     )
     await db.commit()
 
+    namespace = personal_namespace(body.user_id)
     try:
         from app.retrieval.memory.reindex import reindex_user_memories_sync
 
@@ -491,13 +498,15 @@ async def reindex_memories(
             reindex_user_memories_sync,
             str(body.user_id),
             only_missing=body.only_missing,
+            namespace=namespace,
         )
         return ReindexResponse(
             queued=True,
             task_id=None,
             user_id=body.user_id,
             only_missing=body.only_missing,
-            note="scanned={scanned} reindexed={reindexed} already_indexed={already_indexed} pages={pages}".format(**summary),
+            note="namespace={namespace} scanned={scanned} reindexed={reindexed} "
+                 "already_indexed={already_indexed} pages={pages}".format(**summary),
         )
     except Exception as exc:  # pragma: no cover - defensive
         return ReindexResponse(

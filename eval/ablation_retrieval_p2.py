@@ -456,7 +456,8 @@ class ExactCosineStore:
         self.outage = outage
         self.calls: list[int] = []
 
-    async def __call__(self, embedding, *, user_id: str, top_k: int = 10, where=None):
+    async def __call__(self, embedding, *, user_id: str, top_k: int = 10, where=None,
+                       namespace: str | None = None):
         self.calls.append(int(top_k))
         if self.outage:
             raise VectorUnavailableError("vector store down (ablation outage arm)")
@@ -594,7 +595,7 @@ def _rewrite_stub():
 
 
 def _identity_context():
-    async def _context(db, user_id):
+    async def _context(db, user_id, *, namespace=None):
         return []
 
     return _context

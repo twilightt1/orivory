@@ -26,6 +26,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import NullPool
 
 from app import database
+from app.api.v1 import admin as admin_api
 from app.api.v1.memories import list_memories
 from app.config import settings
 from app.database import Base
@@ -35,17 +36,23 @@ from app.models.memory import Memory
 from app.models.memory_access_log import MemoryAccessLog
 from app.models.user import User
 from app.observability.fallbacks import fallback_counts, reset_fallback_counts
+from app.retrieval.memory import lexical_index, namespaces, vector_store
+from app.retrieval.memory import reindex as reindex_module
 from app.retrieval.memory import retriever as rmod
-from app.retrieval.memory import vector_store
 from app.retrieval.memory.context import fetch_personal_context
 from app.retrieval.memory.correction import (
     CM_DERIVED_DIRTY,
     CM_NEEDS_CHECK,
     CM_SUPERSEDED_BY,
+    Slot,
+    collect_derived_ids,
+    resolve_correction,
     state_of,
 )
 from app.retrieval.memory.outbox import IndexFreshnessTimeout
 from app.retrieval.memory.reindex import reindex_user_memories_sync
+from app.retrieval.memory.retriever import MemoryRetriever
+from app.retrieval.memory.salience import bump_salience
 from app.retrieval.memory.visibility import (
     current_memory_predicate,
     state_expression,
@@ -100,19 +107,21 @@ async def _owner(db) -> uuid.UUID:
 
 
 def _mem(owner, title: str, *, meta: dict | None = None, minutes: int = 0,
-         pinned: bool = False) -> Memory:
+         pinned: bool = False, namespace: str = namespaces.PERSONAL) -> Memory:
     return Memory(
         id=uuid.uuid4(), user_id=owner, title=title, content=f"{title} body",
         tags=[], salience=0.5, pinned=pinned,
         captured_at=datetime.now(UTC) - timedelta(minutes=minutes),
         extra_metadata={} if meta is None else meta,
+        namespace=namespace,
     )
 
 
-def _as_reader(monkeypatch, uid: uuid.UUID) -> AgentPrincipal:
+def _as_reader(monkeypatch, uid: uuid.UUID,
+               scopes: frozenset[str] = frozenset({"memory:read"})) -> AgentPrincipal:
     """Point the MCP tools at the temp file with a read-scoped principal."""
     principal = AgentPrincipal(user_id=uid, agent_client_id=uuid.uuid4(), name="Vis",
-                               scopes=frozenset({"memory:read"}))
+                               scopes=scopes)
     monkeypatch.setattr(hub_tools, "_current_principal", lambda: principal)
     monkeypatch.setattr(hub_tools, "_session", database.AsyncSessionLocal)
     return principal
@@ -138,8 +147,9 @@ def _fixture_rows(owner) -> list[Memory]:
 AGED = datetime.now(UTC) - timedelta(days=3650)
 
 
-def _aged(owner, title: str, *, salience: float, meta: dict | None = None) -> Memory:
-    m = _mem(owner, title, meta=meta)
+def _aged(owner, title: str, *, salience: float, meta: dict | None = None,
+          namespace: str = namespaces.PERSONAL) -> Memory:
+    m = _mem(owner, title, meta=meta, namespace=namespace)
     m.salience = salience
     m.captured_at = AGED
     return m
@@ -156,7 +166,8 @@ class _Dense:
         self.outage = outage
         self.calls: list[int] = []
 
-    async def __call__(self, _embedding, *, user_id, top_k=10, where=None):
+    async def __call__(self, _embedding, *, user_id, top_k=10, where=None,
+                       namespace=None):
         self.calls.append(top_k)
         if self.outage:
             raise VectorUnavailableError("vector store down")
@@ -584,7 +595,7 @@ async def test_mcp_search_store_failure_falls_back_to_sql_ordering(
     await db.commit()
     _as_reader(monkeypatch, owner)
 
-    async def _boom(_embedding, *, user_id, top_k=10, where=None):
+    async def _boom(_embedding, *, user_id, top_k=10, where=None, namespace=None):
         raise RuntimeError("pgvector connection reset")
 
     monkeypatch.setattr(rmod, "search_memories", _boom)
@@ -617,7 +628,11 @@ async def test_mcp_search_genuine_no_match_stays_empty(db, monkeypatch, recall_s
     assert fallback_counts().get(hub_tools.SQL_FALLBACK_PATH, 0) == 0
 
 
-async def test_mcp_timeline_labels_every_row(db, monkeypatch):
+async def test_mcp_timeline_labels_superseded_history_and_hides_dirty(db, monkeypatch):
+    """Timeline is a history view: superseded rows stay readable, labelled.
+    Dirty rows are wrong data, not history — the neighbours' predicate hides
+    them like every other reader's (T4 widened it; before, a dirty neighbour
+    was served)."""
     owner = await _owner(db)
     older = _mem(owner, "older", meta={CM_SUPERSEDED_BY: "s"}, minutes=2)
     anchor = _mem(owner, "anchor", minutes=1)
@@ -628,10 +643,9 @@ async def test_mcp_timeline_labels_every_row(db, monkeypatch):
 
     out = await hub_tools.timeline(memory_id=str(anchor.id))
 
-    # Timeline is history: it serves every row, each labeled with its state.
     assert out["anchor"]["state"] == "current"
     assert [r["state"] for r in out["before"]] == ["superseded"]
-    assert [r["state"] for r in out["after"]] == ["dirty"]
+    assert out["after"] == [], "a dirty row is never served as surrounding context"
 
 
 async def test_reindex_indexes_current_rows_only(db, monkeypatch):
@@ -656,3 +670,344 @@ async def test_reindex_indexes_current_rows_only(db, monkeypatch):
     # needs-check is visible (labeled), so it is indexed; superseded/dirty are not.
     assert set(indexed) == {str(current.id), str(needs.id)}
     assert summary["reindexed"] == 2
+
+
+# ── P4a/T4: the namespace through the MCP tools, recall internals and admin ──
+
+TEAM = "team"  # the second namespace P4b brings: seeded directly, never by a client
+
+
+def _rank(ids):
+    async def _recall(_query, _limit):
+        return [(mid, 0.9) for mid in ids]
+
+    return _recall
+
+
+async def test_mcp_search_serves_only_the_callers_namespace(db, monkeypatch):
+    """The tool's own hydration query is a namespaced read: the recall seam can
+    rank another namespace's id, and the answer still cannot carry it."""
+    owner = await _owner(db)
+    mine = _mem(owner, "mine", minutes=1)
+    theirs = _mem(owner, "theirs", namespace=TEAM, minutes=2)
+    db.add_all([mine, theirs])
+    await db.commit()
+    _as_reader(monkeypatch, owner)
+    monkeypatch.setattr(hub_tools, "_recall_memory_ids", _rank([theirs.id, mine.id]))
+
+    out = await hub_tools.search_memory("body")
+
+    assert [r["id"] for r in out["results"]] == [str(mine.id)]
+
+
+async def test_mcp_search_recall_hydration_is_namespaced(db, monkeypatch, recall_seams):
+    """Through the REAL recall seam: the retriever's hydrate authorizes from
+    SQL, so a denser foreign-namespace row never reaches the tool."""
+    owner = await _owner(db)
+    mine = _aged(owner, "mine", salience=0.5)
+    theirs = _aged(owner, "theirs", namespace=TEAM, salience=0.5)
+    db.add_all([mine, theirs])
+    await db.commit()
+    _as_reader(monkeypatch, owner)
+    _serve(monkeypatch, _Dense([(theirs.id, 0.99), (mine.id, 0.50)]))
+
+    out = await hub_tools.search_memory("body")
+
+    assert [r["id"] for r in out["results"]] == [str(mine.id)]
+
+
+async def test_retriever_hydrate_drops_out_of_namespace_rows(db):
+    """``_hydrate`` is the recall's SQL authorization: a foreign-namespace id
+    in the candidate pool resolves to no row."""
+    owner = await _owner(db)
+    mine = _mem(owner, "mine", minutes=1)
+    theirs = _mem(owner, "theirs", namespace=TEAM, minutes=2)
+    db.add_all([mine, theirs])
+    await db.commit()
+
+    hydrated = await MemoryRetriever(db, owner)._hydrate([mine.id, theirs.id])
+
+    assert set(hydrated) == {str(mine.id)}
+
+
+async def test_recall_hands_the_dense_leg_the_namespace_explicitly(
+    db, monkeypatch, recall_seams
+):
+    """T3 carried this: ``search_memories`` fails closed on a missing namespace,
+    and the caller still passes the authorized one rather than trusting it."""
+    owner = await _owner(db)
+    row = _aged(owner, "mine", salience=0.5)
+    db.add(row)
+    await db.commit()
+    _as_reader(monkeypatch, owner)
+    seen: dict = {}
+
+    async def _store(_embedding, *, user_id, top_k=10, where=None, namespace=None):
+        seen["namespace"] = namespace
+        return [{"memory_id": str(row.id), "content": "stale", "score": 0.9}]
+
+    monkeypatch.setattr(rmod, "search_memories", _store)
+
+    out = await hub_tools.search_memory("body")
+
+    assert out["results"][0]["id"] == str(row.id)
+    assert seen["namespace"] == namespaces.PERSONAL
+
+
+async def test_context_fetch_gets_the_namespace_explicitly(
+    db, monkeypatch, recall_seams
+):
+    """The personal-context read is a namespaced read, passed explicitly."""
+    owner = await _owner(db)
+    seen: dict = {}
+
+    async def _context(_db, _user_id, *, namespace=None):
+        seen["namespace"] = namespace
+        return []
+
+    monkeypatch.setattr(rmod, "fetch_personal_context", _context)
+    _serve(monkeypatch, _Dense([]))
+
+    await MemoryRetriever(db, owner).recall("body")
+
+    assert seen["namespace"] == namespaces.PERSONAL
+
+
+async def test_the_lexical_leg_gets_the_namespace_explicitly(db, monkeypatch):
+    """The FTS leg's fail-closed default is never relied on either."""
+    owner = await _owner(db)
+    seen: dict = {}
+
+    def _search(_conn, _query, *, user_id, limit, namespace=None):
+        seen.update(namespace=namespace, limit=limit)
+        return []
+
+    monkeypatch.setattr(lexical_index, "is_available", lambda _conn: True)
+    monkeypatch.setattr(lexical_index, "search", _search)
+
+    out = await MemoryRetriever(db, owner)._lexical_leg("body", 5)
+
+    assert out == [] and seen["namespace"] == namespaces.PERSONAL
+
+
+async def test_mcp_sql_fallback_serves_only_the_callers_namespace(
+    db, monkeypatch, recall_seams
+):
+    """R23's SQL ordering is a namespaced read too: a barrier timeout must not
+    open the boundary."""
+    owner = await _owner(db)
+    team_row = _aged(owner, "team salient", namespace=TEAM, salience=0.99)
+    mine = _aged(owner, "mine", salience=0.20)
+    db.add_all([team_row, mine])
+    await db.commit()
+    _as_reader(monkeypatch, owner)
+
+    async def _timeout(**_kwargs):
+        raise IndexFreshnessTimeout("pending writes")
+
+    monkeypatch.setattr(rmod, "await_freshness", _timeout)
+    _serve(monkeypatch, _Dense([]))  # never reached: the barrier raises first
+    reset_fallback_counts()
+
+    out = await hub_tools.search_memory("body")
+
+    assert [r["id"] for r in out["results"]] == [str(mine.id)]
+    assert fallback_counts()[hub_tools.SQL_FALLBACK_PATH] == 1
+
+
+async def test_mcp_list_serves_only_the_callers_namespace(db, monkeypatch):
+    owner = await _owner(db)
+    mine = _mem(owner, "mine", minutes=1)
+    theirs = _mem(owner, "theirs", namespace=TEAM, minutes=2)
+    db.add_all([mine, theirs])
+    await db.commit()
+    _as_reader(monkeypatch, owner)
+
+    out = await hub_tools.list_recent(limit=10)
+
+    assert [r["id"] for r in out["results"]] == [str(mine.id)]
+
+
+async def test_mcp_get_refuses_a_row_outside_the_namespace(db, monkeypatch):
+    owner = await _owner(db)
+    theirs = _mem(owner, "theirs", namespace=TEAM)
+    db.add(theirs)
+    await db.commit()
+    _as_reader(monkeypatch, owner)
+
+    out = await hub_tools.get_memory(str(theirs.id))
+
+    assert out == {"error": "memory not found"}
+
+
+async def test_mcp_delete_refuses_a_row_outside_the_namespace(db, monkeypatch):
+    owner = await _owner(db)
+    theirs = _mem(owner, "theirs", namespace=TEAM)
+    db.add(theirs)
+    await db.commit()
+    _as_reader(monkeypatch, owner, scopes=frozenset({"memory:read", "memory:write"}))
+    erased: list = []
+
+    async def _erase(_db, user_id, ids, *, requested_by):
+        erased.append(list(ids))
+        raise AssertionError("the erasure path is not the boundary check")
+
+    monkeypatch.setattr(hub_tools, "erase_memories", _erase)
+
+    out = await hub_tools.delete_memory(memory_id=str(theirs.id))
+
+    assert out == {"error": "memory not found"}
+    assert erased == []
+    async with database.AsyncSessionLocal() as fresh:
+        assert await fresh.get(Memory, theirs.id) is not None
+
+
+async def test_mcp_correct_refuses_a_target_outside_the_namespace(db, monkeypatch):
+    owner = await _owner(db)
+    theirs = _mem(owner, "theirs", namespace=TEAM)
+    db.add(theirs)
+    await db.commit()
+    _as_reader(monkeypatch, owner, scopes=frozenset({"memory:read", "memory:write"}))
+
+    async def _no_index(_memory):
+        return False
+
+    monkeypatch.setattr(hub_tools, "index_new_memory", _no_index)
+
+    out = await hub_tools.correct_memory(memory_id=str(theirs.id), content="x")
+
+    assert out == {"error": "memory not found"}
+
+
+async def test_mcp_timeline_neighbours_stay_in_the_namespace(db, monkeypatch):
+    owner = await _owner(db)
+    before_mine = _mem(owner, "before mine", minutes=4)
+    anchor = _mem(owner, "anchor", minutes=2)
+    db.add_all([before_mine,
+                _mem(owner, "before team", namespace=TEAM, minutes=3),
+                anchor,
+                _mem(owner, "after team", namespace=TEAM, minutes=1)])
+    await db.commit()
+    _as_reader(monkeypatch, owner)
+
+    out = await hub_tools.timeline(memory_id=str(anchor.id), window=4)
+
+    assert [r["id"] for r in out["before"]] == [str(before_mine.id)]
+    assert out["after"] == []
+
+
+async def test_mcp_timeline_anchor_outside_the_namespace_refused(db, monkeypatch):
+    owner = await _owner(db)
+    theirs = _mem(owner, "theirs", namespace=TEAM, minutes=1)
+    db.add(theirs)
+    await db.commit()
+    _as_reader(monkeypatch, owner)
+
+    out = await hub_tools.timeline(memory_id=str(theirs.id))
+
+    assert out == {"error": "memory not found"}
+
+
+async def test_personal_context_excludes_other_namespace_rows(db):
+    owner = await _owner(db)
+    keeper = _mem(owner, "keeper", minutes=5)
+    db.add_all([keeper, _mem(owner, "theirs", namespace=TEAM, minutes=1)])
+    await db.commit()
+
+    out = await fetch_personal_context(db, owner)
+
+    assert [m.id for m in out] == [keeper.id]
+
+
+async def test_bump_salience_skips_rows_outside_the_namespace(db):
+    owner = await _owner(db)
+    theirs = _mem(owner, "theirs", namespace=TEAM)
+    db.add(theirs)
+    await db.commit()
+
+    updated = await bump_salience(db, owner, [theirs.id])
+
+    assert updated == 0
+    await db.refresh(theirs)
+    assert theirs.recall_count == 0 and theirs.salience == 0.5
+
+
+async def test_a_correction_never_reaches_another_namespace(db):
+    """The correction path's candidate read carries the boundary too (the 7th
+    file of this class, T4): a corrected fact supersedes/dirties rows of its OWN
+    namespace only — the decision is made over rows it may write."""
+    owner = await _owner(db)
+    stale = _mem(owner, "team fact", namespace=TEAM,
+                 meta={"cm_subject": "proj-x", "cm_attribute": "db",
+                       "cm_scope": "prod"})
+    db.add(stale)
+    await db.commit()
+
+    out = await resolve_correction(db, user_id=owner, title="DB", content="SQLite",
+                                   slot=Slot.of("proj-x", "db", "prod"))
+
+    assert out["status"] != "superseded"
+    assert out["superseded"] == []
+    await db.refresh(stale)
+    assert stale.extra_metadata.get(CM_SUPERSEDED_BY) is None
+
+
+async def test_the_derived_closure_is_namespaced(db):
+    """The erasure closure walks one namespace (the same 7th file, T4): a team
+    row deriving from an erased personal row is not collected — it belongs to
+    another boundary."""
+    owner = await _owner(db)
+    source = _mem(owner, "source", minutes=1)
+    mine = _mem(owner, "mine", meta={"cm_derived_from": [str(source.id)]}, minutes=2)
+    theirs = _mem(owner, "theirs", namespace=TEAM,
+                  meta={"cm_derived_from": [str(source.id)]}, minutes=3)
+    db.add_all([source, mine, theirs])
+    await db.commit()
+
+    out = await collect_derived_ids(db, owner, [source.id])
+
+    assert [str(mid) for mid in out] == [str(mine.id)]
+
+
+async def test_reindex_indexes_only_the_callers_namespace(db, monkeypatch):
+    owner = await _owner(db)
+    mine = _mem(owner, "mine", minutes=1)
+    theirs = _mem(owner, "theirs", namespace=TEAM, minutes=2)
+    db.add_all([mine, theirs])
+    await db.commit()
+    indexed: list[str] = []
+
+    def _capture(rows):
+        indexed.extend(str(m.id) for m in rows)
+        return len(rows)
+
+    monkeypatch.setattr(vector_store, "upsert_memories_sync", _capture)
+
+    summary = reindex_user_memories_sync(str(owner), only_missing=False)
+
+    assert set(indexed) == {str(mine.id)}
+    assert summary["scanned"] == 1
+
+
+async def test_admin_reindex_passes_the_namespace_explicitly(db, monkeypatch):
+    """The admin backfill hands the helper the owner's namespace rather than
+    trusting its default (P4a: ``personal``, the only one there is)."""
+    owner = await _owner(db)
+    admin_user = await db.get(User, owner)
+    seen: dict = {}
+
+    def _fake(user_id, only_missing=True, *, namespace=None):
+        seen.update(user_id=user_id, only_missing=only_missing, namespace=namespace)
+        return {"user_id": user_id, "namespace": namespace,
+                "only_missing": only_missing, "scanned": 0,
+                "already_indexed": 0, "reindexed": 0, "pages": 0}
+
+    monkeypatch.setattr(reindex_module, "reindex_user_memories_sync", _fake)
+
+    out = await admin_api.reindex_memories(
+        admin_api.ReindexRequest(user_id=owner), admin_user=admin_user, db=db
+    )
+
+    assert out.queued is True
+    assert seen["user_id"] == str(owner)
+    assert seen["namespace"] == namespaces.personal_namespace(owner)

@@ -109,7 +109,8 @@ class _Store:
         self.rows = list(rows)
         self.calls: list[int] = []
 
-    async def __call__(self, _embedding, *, user_id, top_k=10, where=None):
+    async def __call__(self, _embedding, *, user_id, top_k=10, where=None,
+                       namespace=None):
         self.calls.append(top_k)
         return [
             {"memory_id": str(memory_id), "content": "vector copy", "score": score}

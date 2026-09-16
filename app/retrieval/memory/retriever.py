@@ -56,9 +56,11 @@ from app.retrieval.memory.context import fetch_personal_context
 from app.retrieval.memory.correction import needs_rewrite as _needs_rewrite
 from app.retrieval.memory.correction import state_of as _state_of
 from app.retrieval.memory.freshness import await_freshness
+from app.retrieval.memory.namespaces import namespace_of, personal_namespace
 from app.retrieval.memory.query_rewriter import rewrite_query
 from app.retrieval.memory.scoring import entity_boost, time_decay_score
 from app.retrieval.memory.vector_store import search_memories
+from app.retrieval.memory.visibility import namespace_predicate
 from app.retrieval.vector_retriever import VectorUnavailableError
 from app.schemas.Orivory import (
     RECALL_TRACE_ZERO_KEYS,
@@ -90,6 +92,12 @@ class MemoryRetriever:
     ) -> None:
         self.db = db
         self.user_id = user_id
+        # The namespace every read of this recall is scoped to (P4a: the
+        # user's own, resolved through the authority — never a literal). Every
+        # index and SQL call below is handed this value EXPLICITLY: the store
+        # and the FTS leg both default to it fail-closed, and a reader must
+        # still say what it is reading (T3 carry).
+        self.namespace = personal_namespace(user_id)
         self.half_life_days = half_life_days
         self.entity_boost_per_match = entity_boost_per_match
         self.entity_boost_max = entity_boost_max
@@ -173,7 +181,9 @@ class MemoryRetriever:
         if include_personal_context:
             t_context = time.perf_counter()
             try:
-                context = await fetch_personal_context(self.db, self.user_id)
+                context = await fetch_personal_context(
+                    self.db, self.user_id, namespace=self.namespace
+                )
                 context = [
                     memory
                     for memory in context
@@ -246,6 +256,7 @@ class MemoryRetriever:
                 embedding,
                 user_id=str(self.user_id),
                 top_k=pool,
+                namespace=self.namespace,
             )
         except EmbeddingDimensionMismatch:
             # A contract mismatch is a readiness/data integrity failure in
@@ -375,7 +386,8 @@ class MemoryRetriever:
                 mem = hydrated.get(mid)
                 if mem is None:
                     continue
-                if _hidden(mem, include_superseded=include_superseded):
+                if _hidden(mem, include_superseded=include_superseded,
+                           namespace=self.namespace):
                     continue
                 authorized = dict(cand)
                 authorized["memory_id"] = mid
@@ -410,7 +422,8 @@ class MemoryRetriever:
             t_refill = time.perf_counter()
             try:
                 refill_rows = await search_memories(
-                    embedding, user_id=str(self.user_id), top_k=top_k * 4
+                    embedding, user_id=str(self.user_id), top_k=top_k * 4,
+                    namespace=self.namespace,
                 )
                 if self.hybrid and lexical_page is not None:
                     before = len(candidates)
@@ -428,7 +441,10 @@ class MemoryRetriever:
                     for cand in widened:
                         mid = str(cand.get("memory_id", ""))
                         mem = refetched.get(mid)
-                        if mem is None or _hidden(mem, include_superseded=include_superseded):
+                        if mem is None or _hidden(
+                            mem, include_superseded=include_superseded,
+                            namespace=self.namespace,
+                        ):
                             continue
                         authorized = dict(cand)
                         authorized["memory_id"] = mid
@@ -473,7 +489,10 @@ class MemoryRetriever:
                         for cand in fresh:
                             mid = str(cand["memory_id"])
                             mem = hydrated_refill.get(mid)
-                            if mem is None or _hidden(mem, include_superseded=include_superseded):
+                            if mem is None or _hidden(
+                                mem, include_superseded=include_superseded,
+                                namespace=self.namespace,
+                            ):
                                 continue
                             authorized = dict(cand)
                             authorized["memory_id"] = mid
@@ -560,7 +579,10 @@ class MemoryRetriever:
                 for cand in candidates:
                     mid = str(cand.get("memory_id", ""))
                     mem = refreshed.get(mid)
-                    if mem is None or _hidden(mem, include_superseded=include_superseded):
+                    if mem is None or _hidden(
+                        mem, include_superseded=include_superseded,
+                        namespace=self.namespace,
+                    ):
                         continue
                     current_cand = dict(cand)
                     current_cand["memory_id"] = mid
@@ -750,17 +772,27 @@ class MemoryRetriever:
             conn = session.connection()
             if not lexical_index.is_available(conn):
                 return None
-            return lexical_index.search(conn, query, user_id=self.user_id, limit=limit)
+            return lexical_index.search(
+                conn, query, user_id=self.user_id, limit=limit,
+                namespace=self.namespace,
+            )
 
         return await self.db.run_sync(_search)
 
     async def _hydrate(self, memory_ids: list[UUID]) -> dict[str, Memory]:
-        """Fetch Memory rows + entity_links in one query, keyed by id (str)."""
+        """Fetch Memory rows + entity_links in one query, keyed by id (str).
+
+        The tenant AND namespace are enforced in this statement: the pool
+        comes from the vector/FTS indexes, and SQL is what authorizes a byte
+        of text before any candidate reaches scoring or a remote reranker.
+        """
         if not memory_ids:
             return {}
         stmt = (
             select(Memory)
-            .where(Memory.id.in_(memory_ids), Memory.user_id == self.user_id)
+            .where(Memory.id.in_(memory_ids),
+                   Memory.user_id == self.user_id,
+                   namespace_predicate(self.namespace))
             .options(selectinload(Memory.entity_links).selectinload(MemoryEntity.entity))
         )
         rows = (await self.db.execute(stmt)).scalars().all()
@@ -817,14 +849,22 @@ class MemoryRetriever:
         return response
 
 
-def _hidden(memory: Memory, *, include_superseded: bool = False) -> bool:
+def _hidden(memory: Memory, *, include_superseded: bool = False,
+            namespace: str | None = None) -> bool:
     """Rows no serving path may return: dirty always, superseded unless asked.
 
     Superseded rows are history — the API path hides them unconditionally,
     while ``recall(include_superseded=True)`` keeps them rankable so the MCP
     seam can widen to them at hydration (ruling R11(p2)). Dirty rows are wrong
     data, not history: never eligible, on any surface.
+
+    ``namespace`` (when given) is the second authorization rule, checked on the
+    loaded row: the SQL hydration already filters, and this is the same
+    boundary spelled for a row already in hand, so a pool assembled from the
+    index cannot smuggle another namespace's row past a bug in that query.
     """
+    if namespace is not None and namespace_of(memory) != namespace:
+        return True
     state = _state_of(memory)
     return state == "dirty" or (state == "superseded" and not include_superseded)
 
