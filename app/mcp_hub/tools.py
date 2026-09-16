@@ -283,7 +283,7 @@ async def search_memory(query: str, limit: int = 8, include_history: bool = Fals
             # Defence in depth (the query above already filters dirty): this
             # mirror of state_of is the layer that also catches a hand-written
             # falsy marker. History widens to superseded, never to dirty.
-            rows_in_rank = [m for m in rows_in_rank if state_of(m) != "dirty"]
+            rows_in_rank = [m for m in rows_in_rank if state_of(m) not in ("dirty", "invalidated")]
             if not include_history:
                 rows_in_rank = [m for m in rows_in_rank if state_of(m) != "superseded"]
             results = [_memory_index_row(m) for m in rows_in_rank]
@@ -313,9 +313,8 @@ async def timeline(memory_id: str, window: int = 4) -> dict[str, Any]:
     The anchor is read by primary key (the caller asked for THAT id: theirs and
     in their namespace, answered "not found" otherwise — no existence oracle).
     The neighbours are a query, so their predicate is in the statement: same
-    tenant, same namespace, and never a dirty row — a stale derived row is
-    wrong data, not the history this tool exists to show. Superseded
-    neighbours stay, labelled.
+    tenant, same namespace; dirty-only rows stay hidden. Superseded and
+    invalidated neighbours stay, labelled as history, never current evidence.
     """
     principal = _current_principal()
     if principal is None:
@@ -346,7 +345,7 @@ async def timeline(memory_id: str, window: int = 4) -> dict[str, Any]:
                     .where(
                         Memory.user_id == principal.user_id,
                         boundary,
-                        not_dirty_predicate(),
+                        not_dirty_predicate(include_invalidated=True),
                         tuple_(Memory.captured_at, Memory.id) < tuple_(literal(anchor.captured_at), literal(anchor.id)),
                     )
                     .order_by(Memory.captured_at.desc(), Memory.id.desc())
@@ -363,7 +362,7 @@ async def timeline(memory_id: str, window: int = 4) -> dict[str, Any]:
                     .where(
                         Memory.user_id == principal.user_id,
                         boundary,
-                        not_dirty_predicate(),
+                        not_dirty_predicate(include_invalidated=True),
                         tuple_(Memory.captured_at, Memory.id) > tuple_(literal(anchor.captured_at), literal(anchor.id)),
                     )
                     .order_by(Memory.captured_at.asc(), Memory.id.asc())

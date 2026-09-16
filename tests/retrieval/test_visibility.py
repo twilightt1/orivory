@@ -7,7 +7,7 @@ whatever ``DATABASE_URL`` is ambient (pattern:
 
 The cross-check is the point: the SQL predicate and the SELECT-side state label
 must agree 1:1 with the Python authority ``state_of`` on fixture rows covering
-all four states, a two-key precedence row, and an empty ``extra_metadata``.
+all five states, a two-key precedence row, and an empty ``extra_metadata``.
 """
 from __future__ import annotations
 
@@ -42,6 +42,7 @@ from app.retrieval.memory import retriever as rmod
 from app.retrieval.memory.context import fetch_personal_context
 from app.retrieval.memory.correction import (
     CM_DERIVED_DIRTY,
+    CM_INVALIDATED,
     CM_NEEDS_CHECK,
     CM_SUPERSEDED_BY,
     Slot,
@@ -137,6 +138,7 @@ def _fixture_rows(owner) -> list[Memory]:
         _mem(owner, "ask-me", meta={CM_NEEDS_CHECK: True}),                       # needs-check
         _mem(owner, "both", meta={CM_SUPERSEDED_BY: "successor",
                                   CM_DERIVED_DIRTY: True, CM_NEEDS_CHECK: True}),
+        _mem(owner, "invalidated", meta={CM_INVALIDATED: True}),
     ]
 
 
@@ -208,8 +210,8 @@ async def test_sql_predicate_matches_state_of_on_fixtures(db):
     db.add_all(rows)
     await db.commit()
 
-    # The fixture really covers all four states (a new state cannot slip by).
-    assert {state_of(m) for m in rows} == {"current", "superseded", "dirty", "needs-check"}
+    # The fixture really covers all five states (a new state cannot slip by).
+    assert {state_of(m) for m in rows} == {"current", "superseded", "dirty", "needs-check", "invalidated"}
 
     selected = set((await db.execute(
         select(Memory.id).where(Memory.user_id == owner, current_memory_predicate())
@@ -217,7 +219,7 @@ async def test_sql_predicate_matches_state_of_on_fixtures(db):
 
     # Visible iff state_of is neither superseded nor dirty — needs-check rows
     # stay visible (labeled), superseded rows are history, dirty rows are wrong.
-    assert selected == {m.id for m in rows if state_of(m) not in ("superseded", "dirty")}
+    assert selected == {m.id for m in rows if state_of(m) not in ("superseded", "dirty", "invalidated")}
     assert rows[0].id in selected      # extra_metadata == {} reads current
     assert rows[5].id not in selected  # superseded outranks dirty
 

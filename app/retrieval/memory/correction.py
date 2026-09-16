@@ -4,12 +4,12 @@ from __future__ import annotations
 import re
 from datetime import UTC, datetime
 from typing import NamedTuple
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from sqlalchemy import select
 
 from app.models.memory import Memory
-from app.retrieval.memory.namespaces import personal_namespace
+from app.retrieval.memory.namespaces import namespace_of, personal_namespace
 from app.retrieval.memory.outbox import bump_revision, enqueue_upsert
 
 CM_ASSERTION = "cm_assertion"
@@ -23,8 +23,11 @@ CM_EVIDENCE_IDS = "cm_evidence_ids"
 CM_DERIVED_FROM = "cm_derived_from"
 CM_DERIVED_DIRTY = "cm_derived_dirty"
 CM_NEEDS_CHECK = "cm_needs_check"
+CM_INVALIDATED = "cm_invalidated"
+MEMORY_STATES = ("current", "superseded", "dirty", "needs-check", "invalidated")
 
 DEFAULT_SCOPE = "default"
+_MAX_CLOSURE_IDS = 5000
 
 # ponytail: pronoun list is heuristic; add words only when eval shows a miss.
 _PRONOUNS = frozenset({
@@ -88,11 +91,14 @@ def set_cm(memory, patch: dict) -> None:
 def state_of(memory) -> str:
     """One question for a memory's lifecycle state.
 
-    Precedence: superseded > dirty > needs-check > current. A superseded
+    Precedence: invalidated > superseded > dirty > needs-check > current.
+    Invalidation preserves provenance but forbids serving. A superseded
     memory stays "superseded" even if also dirty; dirty (stale derived
     view) outranks needs-check because it must not be served either way.
     """
     meta = get_cm(memory)
+    if meta.get(CM_INVALIDATED):
+        return "invalidated"
     if meta.get(CM_SUPERSEDED_BY):
         return "superseded"
     if meta.get(CM_DERIVED_DIRTY):
@@ -177,7 +183,7 @@ async def resolve_correction(db, *, user_id, title, content, tags=None,
         source_type="mcp_agent", source_ref=None, slot: Slot | None = None,
         assertion="fact", valid_from=None,
         evidence_ids=None, memory_id=None, summary=None) -> dict:
-    """Single creation path for add + correct. One commit, never raises.
+    """Single creation path for add + correct. One commit; incomplete closure raises.
 
     ``slot=None`` is a plain add (no identity, never supersedes).
 
@@ -196,12 +202,16 @@ async def resolve_correction(db, *, user_id, title, content, tags=None,
         select(Memory).where(Memory.user_id == user_id,
                              namespace_predicate(personal_namespace(user_id)))
     )).scalars().all()
-    cands = [m for m in rows if state_of(m) != "superseded"]
+    cands = [m for m in rows if state_of(m) not in ("superseded", "invalidated")]
 
     status, meta, exact = decide_correction(
         cands, slot=slot, assertion=assertion, valid_from=valid_from,
         memory_id=str(memory_id) if memory_id else None,
         evidence_ids=evidence_ids)
+
+    closure = _dependency_closure(rows, [m.id for m in exact]) if status == "superseded" else None
+    if closure is not None and closure.truncated:
+        raise DerivedClosureError("dependency closure truncated; refusing partial correction")
 
     now = datetime.now(UTC)
     new = Memory(id=uuid4(), user_id=user_id, title=title, content=content,
@@ -221,16 +231,78 @@ async def resolve_correction(db, *, user_id, title, content, tags=None,
             superseded.append(str(m.id))
         meta[CM_SUPERSEDES] = superseded[0] if len(superseded) == 1 else superseded
         new.extra_metadata = {**new.extra_metadata, CM_SUPERSEDES: meta[CM_SUPERSEDES]}
-        erased = set(superseded)
-        for m in cands:
+        for m in rows:
             if m in exact:
                 continue
-            if _depends_on(m, erased) and state_of(m) != "dirty":
+            if m.id in closure.visited and state_of(m) not in ("dirty", "invalidated", "superseded"):
                 set_cm(m, {CM_DERIVED_DIRTY: True})
                 dirtied.append(str(m.id))
     await db.commit()
     return {"status": status, "memory": new,
             "superseded": superseded, "dirtied": dirtied}
+
+
+class ClosureResult(NamedTuple):
+    """BFS ids including roots, completeness flag, and cycle-defense set.
+
+    No writes/commits: callers must refuse truncated results before mutating.
+    Roots must already be authorized by the caller; never accept client ids
+    without its ownership check.
+    """
+
+    affected: list[UUID]
+    truncated: bool
+    visited: set[UUID]
+
+
+def _dependency_closure(rows, root_ids, kinds=("parent", "derived")) -> ClosureResult:
+    # ponytail: scan metadata once per BFS level; add an adjacency index only
+    # when large/deep namespaces make this O(rows * depth) walk a bottleneck.
+    affected = list(dict.fromkeys(root_ids))
+    visited = set(affected)
+    frontier = set(affected)
+    while frontier:
+        if len(affected) > _MAX_CLOSURE_IDS:
+            return ClosureResult(affected, True, visited)
+        next_frontier = set()
+        ids = {str(mid) for mid in frontier}
+        for row in rows:
+            if row.id in visited:
+                continue
+            if (("parent" in kinds and row.parent_id in frontier)
+                    or ("derived" in kinds and _depends_on(row, ids))):
+                visited.add(row.id)
+                affected.append(row.id)
+                next_frontier.add(row.id)
+        frontier = next_frontier
+    return ClosureResult(affected, False, visited)
+
+
+async def collect_dependency_closure(db, root_ids, kinds=("parent", "derived")) -> ClosureResult:
+    """Parent + derived transitive closure within one authorized personal scope.
+
+    Infer scope from caller-authorized roots; refuse missing/mixed/other-
+    namespace roots. Every expansion uses the same namespace predicate.
+    Database errors propagate, never masquerading as an empty closure.
+    """
+    from app.retrieval.memory.visibility import namespace_predicate
+
+    if not set(kinds) <= {"parent", "derived"}:
+        raise ValueError("unknown dependency kind")
+    roots = list(dict.fromkeys(UUID(str(mid)) for mid in root_ids))
+    if not roots:
+        return ClosureResult([], False, set())
+    owner = None
+    for mid in roots:
+        row = await db.get(Memory, mid)
+        if (row is None or namespace_of(row) != personal_namespace(row.user_id)
+                or (owner is not None and row.user_id != owner)):
+            raise ValueError("dependency roots must share one owned personal namespace")
+        owner = row.user_id
+    rows = (await db.execute(select(Memory).where(
+        Memory.user_id == owner, namespace_predicate(personal_namespace(owner))
+    ))).scalars().all()
+    return _dependency_closure(rows, roots, kinds)
 
 
 class DerivedClosureError(RuntimeError):

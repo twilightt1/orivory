@@ -82,7 +82,7 @@ class MemoryResponse(BaseModel):
     # Lifecycle state, mirroring correction.state_of (spec §4.2): a superseded
     # row stays readable but never reads as current; dirty rows are not served
     # by list views at all.
-    state:       Literal["current", "superseded", "dirty", "needs-check"]
+    state:       Literal["current", "superseded", "dirty", "needs-check", "invalidated"]
     metadata:    dict
 
     model_config = ConfigDict(from_attributes=True)

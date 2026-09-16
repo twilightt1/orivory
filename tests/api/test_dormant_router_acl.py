@@ -56,14 +56,14 @@ INVENTORY = {
     "app/ingestion/pipeline.py": 1,
     "app/mcp_hub/tools.py": 8,
     "app/retrieval/memory/context.py": 3,
-    "app/retrieval/memory/correction.py": 3,
+    "app/retrieval/memory/correction.py": 4,
     "app/retrieval/memory/lexical_index.py": 1,
     "app/retrieval/memory/reindex.py": 1,
     "app/retrieval/memory/retriever.py": 1,
     "app/retrieval/memory/salience.py": 1,
     "app/services/demo_data_service.py": 1,
     "app/services/digest_service.py": 3,
-    "app/services/erasure_service.py": 4,
+    "app/services/erasure_service.py": 6,
     "app/services/import_service.py": 1,
 }
 
@@ -73,7 +73,7 @@ UNGUARDED_OK = {
     "app/ingestion/dispatcher.py": 1,
     "app/ingestion/document_memory.py": 2,
     "app/ingestion/pipeline.py": 1,
-    "app/services/erasure_service.py": 3,
+    "app/services/erasure_service.py": 5,
     "app/services/import_service.py": 1,
 }
 

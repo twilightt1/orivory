@@ -187,7 +187,7 @@ class MemoryRetriever:
                 context = [
                     memory
                     for memory in context
-                    if _state_of(memory) not in ("superseded", "dirty")
+                    if _state_of(memory) not in ("superseded", "dirty", "invalidated")
                 ]
             except Exception as e:
                 log.warning("fetch_personal_context failed", extra={"error": str(e)})
@@ -851,7 +851,7 @@ class MemoryRetriever:
 
 def _hidden(memory: Memory, *, include_superseded: bool = False,
             namespace: str | None = None) -> bool:
-    """Rows no serving path may return: dirty always, superseded unless asked.
+    """Recall hides dirty/invalidated always, superseded unless asked.
 
     Superseded rows are history — the API path hides them unconditionally,
     while ``recall(include_superseded=True)`` keeps them rankable so the MCP
@@ -866,7 +866,7 @@ def _hidden(memory: Memory, *, include_superseded: bool = False,
     if namespace is not None and namespace_of(memory) != namespace:
         return True
     state = _state_of(memory)
-    return state == "dirty" or (state == "superseded" and not include_superseded)
+    return state in ("dirty", "invalidated") or (state == "superseded" and not include_superseded)
 
 
 def _memory_response(memory: Memory) -> MemoryResponse:

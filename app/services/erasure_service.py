@@ -208,23 +208,19 @@ async def _cross_user_cascade_count(
 async def _cascaded_out_of_namespace_count(
     db: AsyncSession, memory_ids: list[uuid.UUID], *, user_id: uuid.UUID
 ) -> int:
-    """Rows the DB cascade will take that this walk never collected (F1).
+    """Count every cascade-only descendant, including below derived nodes (S5).
 
-    Two classes, both outside this walk's scope: another user's children (the
-    ``cross_user_children`` class, R29c) and children of this user's OTHER
-    namespaces — the class the walk's namespace predicate silently excluded.
-    The cascade scopes for neither: the row goes with its parent either way,
-    and its vector was never enumerable from this scope. Counted BEFORE the
-    delete, because past it the rows are gone and the residual is invisible.
+    The erasure union is unchanged (R36). Any row outside that union loses its
+    SQL row but has no vector delete intent, even when it shares the namespace.
+    Recursive UNION (not UNION ALL) terminates cycles and counts each id once.
+    This is deliberately an unscoped count, never a serving/ownership read.
     """
+    cascade = select(Memory.id).where(Memory.id.in_(memory_ids)).cte("cascade", recursive=True)
+    cascade = cascade.union(select(Memory.id).join(cascade, Memory.parent_id == cascade.c.id))
     return int((await db.execute(
         select(func.count(Memory.id)).where(
-            Memory.parent_id.in_(memory_ids),
+            Memory.id.in_(select(cascade.c.id)),
             Memory.id.not_in(memory_ids),
-            or_(
-                Memory.user_id != user_id,
-                Memory.namespace != personal_namespace(user_id),
-            ),
         )
     )).scalar_one())
 
