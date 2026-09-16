@@ -21,12 +21,20 @@ the statements whose read is DELIBERATELY unpredicated, each pinned by count:
 - ingestion / import write-path lookups key on the pair they own
   (``source_ref`` + owner, ``user_id`` + ``source_type`` + ``source_ref``): the
   row set is the write's own projection, not a read of the user's library;
-- the erasure residual COUNTS in ``erasure_service``: a surviving child row in
+- the erasure residual COUNTS in ``erasure_service`` — the pre-delete cascade
+  captures and the post-delete absence checks: a surviving child row in
   another namespace (or another user's) MUST still be counted — a namespace
-  predicate there would turn a residual into a clean-looking receipt.
+  predicate there would turn a residual into a clean-looking receipt, because
+  the rows it hunts are exactly the ones the walk's namespace cannot see.
 
 Primary-key surfaces (``db.get`` + an ownership check on the loaded row) cannot
 carry a predicate and are pinned behaviourally, not here.
+
+Ceiling of this fence: it judges only direct ``select(...)`` calls that NAME a
+memory model — ``sqlalchemy.select`` behind a module alias, a ``text()`` query,
+a model passed through a variable, ``update``/``delete`` writes and Python-side
+row checks (``db.get`` + ``_owned``) are all outside the scan: green here is
+not "every read is covered".
 """
 from __future__ import annotations
 
@@ -55,7 +63,7 @@ INVENTORY = {
     "app/retrieval/memory/salience.py": 1,
     "app/services/demo_data_service.py": 1,
     "app/services/digest_service.py": 3,
-    "app/services/erasure_service.py": 3,
+    "app/services/erasure_service.py": 4,
     "app/services/import_service.py": 1,
 }
 
@@ -65,7 +73,7 @@ UNGUARDED_OK = {
     "app/ingestion/dispatcher.py": 1,
     "app/ingestion/document_memory.py": 2,
     "app/ingestion/pipeline.py": 1,
-    "app/services/erasure_service.py": 2,
+    "app/services/erasure_service.py": 3,
     "app/services/import_service.py": 1,
 }
 

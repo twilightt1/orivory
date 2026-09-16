@@ -43,13 +43,27 @@ from app.database import get_db
 from app.middleware.response_cache import CacheInvalidation
 from app.models.memory import Memory
 from app.models.user import User
-from app.retrieval.memory.namespaces import personal_namespace
+from app.retrieval.memory.namespaces import namespace_of, personal_namespace
 from app.retrieval.memory.visibility import namespace_predicate
 from app.utils.dependencies import enforce_llm_quota, get_current_verified_user
 
 log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/discovery", tags=["discovery"])
+
+
+def _owned(memory: Memory | None, user: User) -> bool:
+    """May ``user`` read ``memory``? Theirs AND in their namespace.
+
+    The PK-surface spelling (a ``db.get`` cannot carry a predicate, so the
+    loaded row is checked): same shape as ``memories._owned`` /
+    ``tools._owned`` / ``erasure_service._owned``. A foreign row and a missing
+    one answer the same 404 — no existence oracle, and no excerpt of a row
+    outside the caller's namespace reaches an agent prompt or a response.
+    """
+    return (memory is not None
+            and memory.user_id == user.id
+            and namespace_of(memory) == personal_namespace(user.id))
 
 
 # ─── Schemas ──────────────────────────────────────────────────────────────────
@@ -277,14 +291,16 @@ async def create_session(
 
     Starts a guided discovery journey from a document.
     """
-    # Verify document exists
+    # Verify document exists — the caller's OWN row, in their namespace (P4a/T5,
+    # F2): a same-account row another namespace owns is not this surface's to
+    # serve, exactly like a missing one (the REST memories surface's answer).
     doc = await db.get(Memory, body.starting_doc_id)
-    if not doc or doc.user_id != current_user.id:
+    if not _owned(doc, current_user):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Document not found.")
 
     if body.target_doc_id:
         target = await db.get(Memory, body.target_doc_id)
-        if not target or target.user_id != current_user.id:
+        if not _owned(target, current_user):
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Target document not found.")
 
     # Create session
@@ -515,12 +531,15 @@ async def find_references(
     doc2_id: UUID = Query(description="Second document ID"),
 ) -> list[CrossReferenceResponse]:
     """Find cross-document references between two documents."""
+    # Both rows must be the caller's AND in their namespace (P4a/T5, F2): the
+    # titles/bodies below feed an analysis and come back as excerpts, so a row
+    # outside the namespace must be refused before it is ever read into one.
     doc1 = await db.get(Memory, doc1_id)
     doc2 = await db.get(Memory, doc2_id)
 
-    if not doc1 or doc1.user_id != current_user.id:
+    if not _owned(doc1, current_user):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "First document not found.")
-    if not doc2 or doc2.user_id != current_user.id:
+    if not _owned(doc2, current_user):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Second document not found.")
 
     doc1_dict = {

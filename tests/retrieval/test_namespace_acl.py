@@ -66,6 +66,39 @@ def _mem(owner: uuid.UUID, title: str, *, namespace: str = namespaces.PERSONAL,
     )
 
 
+def _discovery_api():
+    """The dormant ``discovery`` router, loaded despite its dropped agent module.
+
+    ``app/api/v1/discovery.py`` still imports ``app.agents.discovery_agent`` — a
+    module commit 997b9b4 deleted — so the router has been unimportable (and
+    therefore unmounted) since. Nothing here needs the agent: the ACL check
+    under test runs BEFORE any agent call, so a stub whose every name raises
+    keeps that honest — a mutated router that forgets the check fails on the
+    stub, not on an opaque error.
+    """
+    import importlib
+    import sys
+    import types
+
+    if "app.agents.discovery_agent" not in sys.modules:
+        try:
+            importlib.import_module("app.agents.discovery_agent")
+        except ModuleNotFoundError:
+            stub = types.ModuleType("app.agents.discovery_agent")
+
+            def _unreachable(*_args, **_kwargs):
+                raise AssertionError("the ACL path must not reach the (dropped) discovery agent")
+
+            for name in ("DiscoveryFlowType", "DiscoverySession", "DiscoveryStatus",
+                         "advance_session", "analyze_document_graph", "complete_session",
+                         "compute_graph_metrics", "create_discovery_session",
+                         "find_cross_references", "get_next_discovery_step",
+                         "synthesize_discovery"):
+                setattr(stub, name, _unreachable)
+            sys.modules["app.agents.discovery_agent"] = stub
+    return importlib.import_module("app.api.v1.discovery")
+
+
 @pytest_asyncio.fixture
 async def live(tmp_path, monkeypatch):
     """The private file + an auth-switching ASGI client over the real router."""
@@ -92,8 +125,10 @@ async def live(tmp_path, monkeypatch):
     # The dormant routers are UNMOUNTED on the slim app (see api/v1/router.py),
     # so the behavioural proof for them needs the mount that a re-enable would
     # install: same overrides, same real SQL, plus the routes themselves.
+    # ``discovery`` needs its dropped agent module stubbed first (see
+    # ``_discovery_api``); its PK reads are real router code either way.
     dormant_app = FastAPI()
-    for module in (demo_api, entities_api):
+    for module in (demo_api, entities_api, _discovery_api()):
         dormant_app.include_router(module.router, prefix="/api/v1")
     dormant_app.dependency_overrides[get_db] = _db_override
 
@@ -331,6 +366,49 @@ async def test_demo_status_counts_only_the_namespace(world):
         body = (await client.get("/api/v1/demo/status")).json()
 
     assert body == {"has_memories": False, "has_demo_data": False}
+
+
+async def test_discovery_session_refuses_a_document_outside_the_namespace(world):
+    """F2: ``discovery`` reads its starting/target documents by PK (``db.get``),
+    so the boundary lives on the loaded row — a same-account row of another
+    namespace gets the same 404 a missing id gets, never a created session."""
+    async with world.live.as_user(world.a, mounted=True) as client:
+        team_start = await client.post("/api/v1/discovery/sessions",
+                                       json={"starting_doc_id": str(world.a_team.id)})
+        tenant_start = await client.post("/api/v1/discovery/sessions",
+                                         json={"starting_doc_id": str(world.b_personal.id)})
+        team_target = await client.post("/api/v1/discovery/sessions",
+                                        json={"starting_doc_id": str(world.a_personal.id),
+                                              "target_doc_id": str(world.a_team.id)})
+        missing = await client.post("/api/v1/discovery/sessions",
+                                    json={"starting_doc_id": str(uuid.uuid4())})
+
+    assert (team_start.status_code, tenant_start.status_code,
+            team_target.status_code, missing.status_code) == (404, 404, 404, 404)
+    assert team_start.json() == missing.json(), "same body as a missing id — no existence oracle"
+    assert team_target.json()["detail"] == "Target document not found."
+
+
+async def test_discovery_references_refuse_a_document_outside_the_namespace(world):
+    """F2: ``find_references`` feeds both rows' title/summary/content through the
+    cross-reference analysis and returns excerpts — a row outside the namespace
+    must be refused before any of that content is read, and none of it may
+    appear in the refusal."""
+    async with world.live.as_user(world.a, mounted=True) as client:
+        first_team = await client.get("/api/v1/discovery/references",
+                                      params={"doc1_id": str(world.a_team.id),
+                                              "doc2_id": str(world.a_personal.id)})
+        second_team = await client.get("/api/v1/discovery/references",
+                                       params={"doc1_id": str(world.a_personal.id),
+                                               "doc2_id": str(world.a_team.id)})
+        tenant = await client.get("/api/v1/discovery/references",
+                                  params={"doc1_id": str(world.b_personal.id),
+                                          "doc2_id": str(world.a_personal.id)})
+
+    assert (first_team.status_code, second_team.status_code, tenant.status_code) == (404, 404, 404)
+    for response in (first_team, second_team):
+        assert "A team recent" not in response.text and "teamtag" not in response.text, (
+            "the refusal must not carry the row's title/content/tags into an excerpt")
 
 
 # ── pin: the namespace VALUE is never spelled as a literal ───────────────────

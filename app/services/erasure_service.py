@@ -43,19 +43,21 @@ if it raises, the exception propagates and no receipt exists.
 
 Ownership scope: the descendant BFS filters every frontier query to the
 erasing user's OWN namespace (P4a/T5, R35) — a same-account row another
-namespace owns is never collected, purged or verified by this walk. Cross-user
-children are still removed by the DB-level ON DELETE CASCADE when the parent
-row goes, but they are unknowable here — their vectors are not verifiable from
-the erasing user's scope. Root fix is parent ownership validation at memory
-creation (``create_memory``), so cross-user parenting cannot arise in the
-first place.
+namespace owns is never collected, purged or verified by this walk. Children
+the walk does not own (another user's, or this user's other namespaces) are
+still removed by the DB-level ON DELETE CASCADE when the parent row goes —
+counted as residuals before the delete, but never purgeable from this scope:
+their vectors are not verifiable here. Root fix is parent ownership validation
+at memory creation (``create_memory``), so cross-user parenting cannot arise in
+the first place.
 
-Two residual classes exist because the walk is scoped: rows another user
-parents onto an erased id (``cross_user_children``, R29c) and rows of the
-STORING user's other namespaces deriving from an erased id
-(``derived_out_of_namespace``, I3). Both are counted BEFORE the delete and
-recorded in ``db_residual``, so a receipt that left data behind can never read
-as a clean completion.
+Three residual classes exist because the walk is scoped: rows another user
+parents onto an erased id (``cross_user_children``, R29c), children of either
+class the DB cascade removes with their parent
+(``cascaded_out_of_namespace``, F1), and rows of the STORING user's other
+namespaces deriving from an erased id (``derived_out_of_namespace``, I3). All
+are counted BEFORE the delete and recorded in ``db_residual``, so a receipt
+that left data behind can never read as a clean completion.
 """
 from __future__ import annotations
 
@@ -153,15 +155,17 @@ async def _verify_absent(memory_ids: list[uuid.UUID]) -> set[str] | None:
 
 async def _db_residual_counts(
     db: AsyncSession, memory_ids: list[uuid.UUID], *, cross_user_children: int = 0,
-    derived_out_of_namespace: int = 0,
+    cascaded_out_of_namespace: int = 0, derived_out_of_namespace: int = 0,
 ) -> dict[str, int]:
     """Re-count cascade targets after deletion; anything > 0 is a residual.
 
-    ``cross_user_children`` and ``derived_out_of_namespace`` are passed in
-    because they can only be counted through the erasing scope's OWN view,
-    BEFORE the delete — see :func:`_cross_user_cascade_count`. The two counts
-    below are deliberately UNPREDICATED by namespace: they are absence checks
-    over everything the erase should have taken, so a row another namespace owns
+    ``cross_user_children``, ``cascaded_out_of_namespace`` and
+    ``derived_out_of_namespace`` are passed in because they can only be counted
+    through the erasing scope's OWN view, BEFORE the delete — see
+    :func:`_cross_user_cascade_count` and
+    :func:`_cascaded_out_of_namespace_count`. The two counts below are
+    deliberately UNPREDICATED by namespace: they are absence checks over
+    everything the erase should have taken, so a row another namespace owns
     still counts as a residual (a predicate here would read a leak as clean).
     """
     children = (await db.execute(
@@ -178,6 +182,7 @@ async def _db_residual_counts(
         "entity_links": int(entity_links),
         "source_links": int(source_links),
         "cross_user_children": int(cross_user_children),
+        "cascaded_out_of_namespace": int(cascaded_out_of_namespace),
         "derived_out_of_namespace": int(derived_out_of_namespace),
     }
 
@@ -196,6 +201,30 @@ async def _cross_user_cascade_count(
         select(func.count(Memory.id)).where(
             Memory.parent_id.in_(memory_ids),
             Memory.user_id != user_id,
+        )
+    )).scalar_one())
+
+
+async def _cascaded_out_of_namespace_count(
+    db: AsyncSession, memory_ids: list[uuid.UUID], *, user_id: uuid.UUID
+) -> int:
+    """Rows the DB cascade will take that this walk never collected (F1).
+
+    Two classes, both outside this walk's scope: another user's children (the
+    ``cross_user_children`` class, R29c) and children of this user's OTHER
+    namespaces — the class the walk's namespace predicate silently excluded.
+    The cascade scopes for neither: the row goes with its parent either way,
+    and its vector was never enumerable from this scope. Counted BEFORE the
+    delete, because past it the rows are gone and the residual is invisible.
+    """
+    return int((await db.execute(
+        select(func.count(Memory.id)).where(
+            Memory.parent_id.in_(memory_ids),
+            Memory.id.not_in(memory_ids),
+            or_(
+                Memory.user_id != user_id,
+                Memory.namespace != personal_namespace(user_id),
+            ),
         )
     )).scalar_one())
 
@@ -377,10 +406,13 @@ async def _erase_one(db: AsyncSession, user_id: uuid.UUID, memory_id: uuid.UUID)
                              revision=revisions.get(affected_id, 1))
 
     suppressed_source = await _suppress_forgotten_projection(db, user_id, row)
-    # Count the rows the DB cascade is about to remove for OTHER users (R29c):
-    # after the delete they are gone and their vectors were never enumerable
-    # from this scope — the receipt must still carry them as a residual.
+    # Count the rows the DB cascade is about to remove for OTHER users (R29c) —
+    # and for this user's OTHER namespaces (F1): after the delete they are gone
+    # and their vectors were never enumerable from this scope — the receipt
+    # must still carry them as a residual.
     cross_user_children = await _cross_user_cascade_count(db, affected, user_id=user_id)
+    cascaded_out_of_namespace = await _cascaded_out_of_namespace_count(
+        db, affected, user_id=user_id)
 
     # One DELETE for the whole closure: children and links go with it through
     # the DB-level ON DELETE CASCADE. The DB is also the only deleter that can
@@ -400,6 +432,7 @@ async def _erase_one(db: AsyncSession, user_id: uuid.UUID, memory_id: uuid.UUID)
     present = await _verify_absent(affected)
     db_residual = await _db_residual_counts(db, affected,
                                             cross_user_children=cross_user_children,
+                                            cascaded_out_of_namespace=cascaded_out_of_namespace,
                                             derived_out_of_namespace=derived_outside)
     if present:
         vector_state = VECTOR_STATE_RESIDUAL
@@ -675,6 +708,9 @@ async def _upgrade_receipt(db: AsyncSession, receipt: ErasureReceipt) -> bool:
             # residual and stays open instead of upgrading over live data.
             cross_user_children=int(
                 (target.get("db_residual") or {}).get("cross_user_children", 0)
+            ),
+            cascaded_out_of_namespace=int(
+                (target.get("db_residual") or {}).get("cascaded_out_of_namespace", 0)
             ),
             derived_out_of_namespace=int(
                 (target.get("db_residual") or {}).get("derived_out_of_namespace", 0)

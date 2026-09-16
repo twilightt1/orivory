@@ -307,12 +307,14 @@ async def test_erase_refuses_a_row_outside_the_namespace(db, no_chroma):
 
 
 async def test_the_descendant_walk_stays_inside_the_namespace(db, no_chroma):
-    """R35: the walk by ``parent_id`` carries the boundary too.
+    """R35/F1: the walk by ``parent_id`` carries the boundary — and the receipt
+    records what the DB cascade takes anyway.
 
     A child row in another namespace is never collected, purged or verified by
     this walk — its vector is not this scope's to delete (P4b walks per
-    namespace). The DB-level cascade may still take the row; the walk must not
-    claim it.
+    namespace). The FK cascade still removes the ROW with its parent, so the
+    receipt must carry that capture as a residual: measured on the real DB, not
+    on what the walk claims.
     """
     uid = await _owner(db)
     root = _memory(uid, "root")
@@ -327,6 +329,15 @@ async def test_the_descendant_walk_stays_inside_the_namespace(db, no_chroma):
     assert target["affected_memory_ids"] == [str(mine.id)]
     assert str(theirs.id) not in target["vectors_deleted"]
     assert str(theirs.id) not in target["affected_memory_ids"]
+
+    # The measured DB outcome: the cascade took the TEAM row with its parent —
+    # no delete intent, no vector purge, nothing this scope ever enumerated.
+    ids = await _memory_ids()
+    assert root.id not in ids and mine.id not in ids
+    assert theirs.id not in ids, "the FK cascade removes the row the walk refused to claim"
+    assert target["db_residual"]["cascaded_out_of_namespace"] == 1
+    assert receipt.status == "completed_with_residual", (
+        "a row the cascade took outside the namespace is residual data — never `completed`")
 
 
 async def test_a_derived_row_outside_the_namespace_is_recorded_as_residual(db, no_chroma):
