@@ -25,6 +25,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
@@ -432,3 +433,26 @@ def test_the_rest_surfaces_never_hardcode_the_personal_literal():
         assert "'personal'" not in source and '"personal"' not in source, (
             f"{path.relative_to(REPO)} spells the namespace instead of routing through "
             "namespaces.personal_namespace()")
+
+
+def test_namespace_predicate_refuses_a_missing_namespace():
+    """A predicate built from ``None``/empty must not compile, ever.
+
+    ``None`` compiles to ``memories.namespace IS NULL`` and ``''`` to
+    ``namespace = ''`` — predicates no caller means, and the migration CLI's
+    ``namespace=None`` means the WHOLE database, so a predicate handed that value
+    would read every row. Nobody in ``app/`` passes one today (every caller goes
+    through ``personal_namespace`` or a normalized ``ns``), which is exactly why
+    the refusal is pinned here: the same law ``qdrant_filter.build_filter`` has
+    always enforced, on the SQL side of the boundary.
+    """
+    from app.retrieval.memory.visibility import namespace_predicate
+
+    for missing in (None, "", "   "):
+        with pytest.raises(ValueError, match="namespace"):
+            namespace_predicate(missing)
+
+    # A padded value is the same boundary as the unpadded one — matched padded it
+    # would compare against nothing the rows carry (an empty read, no error).
+    padded = namespace_predicate(f" {namespaces.PERSONAL} ")
+    assert padded.compare(namespace_predicate(namespaces.PERSONAL))

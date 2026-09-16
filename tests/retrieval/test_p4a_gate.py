@@ -37,10 +37,13 @@ The §9 P4 row, bullet by bullet — one test each:
   payload) is deleted by its own delete intent, which deletes by POINT ID and
   never by a namespace-filtered selector → test 9;
 * §4.3's cache-key intent, answered HONESTLY: no cache read/write path is live
-  in P4a, so no namespace component is owed yet — and the pin goes red the day
-  one goes live without one → test 10;
+  in P4a, so no namespace component is owed yet — and the pin goes red the day a
+  directly-called producer or reader goes live without one (the scan's own
+  ceiling is stated at the test: a meta-programmed reference slips through)
+  → test 10;
 * the CI pin: the workflow runs this file, wires the P4a suites, keeps the
-  server-mode Qdrant parity run, and names no path that does not exist → test 11.
+  server-mode Qdrant parity run, names no path that does not exist, and cannot be
+  stood down by `--ignore`/`if:`/`continue-on-error` → test 11.
 
 The gate is FALLIBLE by mutation (recorded in the task report): dropping
 ``visibility.namespace_predicate``, the MCP ownership check, the reindex
@@ -740,16 +743,27 @@ async def test_r34_a_key_less_point_is_deleted_by_its_delete_intent(live):
 
 
 def _call_sites(functions: set[str]) -> dict[str, list[str]]:
+    """Direct calls and string LITERALS naming a seam, anywhere under ``app/``.
+
+    Two shapes, because one is not enough: a call by bare name or by attribute
+    (``rc.get_cached_chunks(...)``) AND any string constant that spells one of
+    the names — the ``getattr(rc, "get_cached_chunks")`` form the final review
+    reproduced, which a call-node-only scan never sees. The ceiling is in the
+    test's docstring; it is not "no cache exists".
+    """
     hits: dict[str, list[str]] = {}
     for path in sorted(APP.rglob("*.py")):
         if path.name in {"retrieval_cache.py", "response_cache.py"}:
             continue  # the definitions themselves
         tree = ast.parse(path.read_text())
         for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
+            if isinstance(node, ast.Call):
+                func = node.func
+                name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
+            elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+                name = next((seam for seam in functions if seam in node.value), None)
+            else:
                 continue
-            func = node.func
-            name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
             if name in functions:
                 hits.setdefault(name, []).append(f"{path.relative_to(REPO)}:{node.lineno}")
     return hits
@@ -762,8 +776,15 @@ def test_the_cache_key_question_is_answered_honestly():
     calls ``get_cached_chunks``/``set_cached_chunks`` or
     ``get_cached_response``/``set_cached_response``, so no key is ever built and
     the namespace component is NOT implemented in P4a (recorded as a P4b
-    residual, not faked here). The pin is fail-closed in the right direction: the
-    day a producer or a reader goes live, this test fails and says what is owed.
+    residual, not faked here).
+
+    The pin's ceiling, stated as a ceiling: it sees a DIRECT call (bare name or
+    attribute) and any string literal naming a seam — and nothing else. A
+    ``functools.partial``, an import alias (``import get_cached_chunks as gcc``),
+    a name assembled at runtime, or ``getattr(module, variable)`` slips through,
+    so green here reads "no direct call and no literal reference", never "no
+    cache exists". The day a directly-called producer or reader goes live this
+    test fails and says what §4.3 owes; a meta-programmed one it will not catch.
     """
     from app.middleware import response_cache
     from app.retrieval import retrieval_cache
@@ -818,8 +839,20 @@ def test_the_workflow_runs_this_gate_and_names_only_paths_that_exist():
 
     assert step["env"]["DATABASE_URL"].startswith("sqlite+aiosqlite:////tmp/"), (
         "the P4a step must pin its own disposable SQLite file, like P1a/P1b/P2/P3")
+    # The step's own kill-switches. `--ignore=<this file>` lands the gate on
+    # pytest's ignore list while the step still reports green (the final review
+    # reproduced 12 passed with exactly that edit); `continue-on-error`/`if:`
+    # neuter the whole step. A pin that only proves "the path is spelled" is
+    # blind to both.
+    assert "continue-on-error" not in step and "if" not in step, (
+        f"the {CI_STEP_NAME!r} step can be stood down without touching its run "
+        f"command: {sorted(step)}")
     for suite in P4_CI_SUITES:
         assert suite in run, f"{suite} is not wired into the {CI_STEP_NAME!r} step"
+    assert "--ignore" not in run, (
+        f"an --ignore in the {CI_STEP_NAME!r} step skips a suite it claims to run "
+        f"(pytest exits 0 with it ignored), so the step would read green with the "
+        f"gate never executed: {run!r}")
     all_runs = "\n".join(s.get("run", "") for job in workflow["jobs"].values() for s in job["steps"])
     for suite in P4_ERASURE_SUITES:
         assert suite in all_runs, f"{suite} is wired into no CI step at all"

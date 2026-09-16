@@ -36,8 +36,22 @@ def namespace_predicate(namespace: str):
     from client input, never a literal in a query), so a predicate cannot drift
     from the value the rows actually carry. Compose it with the lifecycle
     predicate: ``where(Memory.user_id == ..., namespace_predicate(ns), not_dirty_predicate())``.
+
+    ``None``/empty is REFUSED, like ``qdrant_filter.build_filter`` refuses it:
+    ``None`` would compile to ``namespace IS NULL`` and ``''`` to ``= ''`` —
+    predicates no caller means. ``None`` means the whole database in the
+    migration CLI's vocabulary, so compiling it into a WHERE clause would read
+    rows the caller never authorized. A padded value is normalized once
+    (``str(namespace).strip()``) to the spelling the rows carry, for the same
+    reason: matched verbatim it would match nothing, in silence.
     """
-    return Memory.namespace == namespace
+    if namespace is None or not str(namespace).strip():
+        raise ValueError(
+            "namespace_predicate needs a namespace: it is an authorization boundary — "
+            "None compiles to IS NULL (the CLI's whole-DB vocabulary), never to a "
+            "predicate a reader may run"
+        )
+    return Memory.namespace == str(namespace).strip()
 
 
 def _has(key: str):

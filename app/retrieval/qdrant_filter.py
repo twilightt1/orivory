@@ -52,13 +52,17 @@ def build_filter(
     the authenticated principal, never of the caller (a caller's ``where`` can
     name neither). A missing/empty value is refused here rather than widened
     into a filter that reads across the boundary — see :func:`_namespace_should`
-    for the one shape a namespace filter takes (R32(p4a)).
+    for the one shape a namespace filter takes (R32(p4a)). A padded value is
+    NORMALIZED once (``str(namespace).strip()``) to the spelling the payload
+    carries: matched verbatim, ``" personal "`` would build a filter that
+    matches nothing and returns an empty set with no error.
     """
     if namespace is None or not str(namespace).strip():
         raise ValueError(
             "memory filters need a namespace: it is an authorization boundary, "
             "like user_id — there is no unscoped form"
         )
+    namespace = str(namespace).strip()
     must: list[Any] = [_match("user_id", "$eq", user_id)]
     must_not: list[Any] = []
     # ANDed with `must` (Qdrant semantics): the cluster can only narrow what

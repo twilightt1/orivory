@@ -160,8 +160,17 @@ exactly as it did before the column existed.
   `namespaces.PERSONAL` / `personal_namespace(user_id)` — never from client
   input (ruling R33: the reindex request body and the migration CLI take no
   namespace from a caller). Every reader composes it into the SAME statement as
-  the row it protects (before any LIMIT/aggregate), and primary-key surfaces
-  (`db.get`) check the loaded row against the same value.
+  the row it protects (before any LIMIT/aggregate). The PK surfaces the mounted
+  REST router owns (`db.get` + the one `_owned` check) compare the loaded row
+  against the same value; three PK reads do NOT, and none of them takes an id
+  from a request: `app/graph/builder.py:60,145` (the graph write-back re-reads a
+  row the app itself just wrote — carried to P4b), `app/retrieval/memory/outbox.py:597`
+  (deliberate — the applier must read the row to write THAT row's namespace onto
+  its point, rulings R33/R34) and `scripts/migrate_qdrant.py:388-391`
+  (`correction_chains`, the migration CLI's whole-database inventory read).
+  `namespace_predicate` itself refuses `None`/empty, so the predicate side cannot
+  compile the CLI's "whole DB" value into a reader; the fence above does not scan
+  `db.get` at all.
 - **Qdrant payload, and the `is_empty` branch (R32).** The payload carries
   `namespace`, and the memory filter is
   `should[match(namespace), is_empty(namespace)]` for the `personal` query. The
@@ -234,13 +243,16 @@ Three known ceilings, all diagnostic — none of them changes a verdict:
 
 ### Migration CLI / export: `--namespace`
 
-`backfill` / `verify` (and `rollback_to_chroma.py`) read ONE namespace: the
-`--namespace` flag defaults to `personal` — the only namespace P4a can hold — so
-an operator's export never sweeps in rows the ACL would refuse to serve. The
-internal `namespace=None` escape hatch is a whole-database AUDIT read, not a
-serving path; when a second namespace gets its own points, that audit will see
-them as "orphans" (points with no row in the exported namespace) and block
-`verify`/`cutover` — P4b must revisit this before enabling sharing.
+`backfill` (and `rollback_to_chroma.py`) read ONE namespace: their `--namespace`
+flag defaults to `personal` — the only namespace P4a can hold — so an operator's
+export never sweeps in rows the ACL would refuse to serve. `verify` takes no
+`--namespace` flag at all: it audits the same default (`sql_rows`'s
+`namespace=PERSONAL`, `scripts/migrate_qdrant.py:410`), so a verify run cannot be
+scoped by a flag someone forgot to pass. The internal `namespace=None` escape
+hatch is a whole-database AUDIT read, not a serving path; when a second namespace
+gets its own points, that audit will see them as "orphans" (points with no row in
+the exported namespace) and block `verify`/`cutover` — P4b must revisit this
+before enabling sharing.
 
 ### Timeline neighbours hide dirty rows (behavior change)
 

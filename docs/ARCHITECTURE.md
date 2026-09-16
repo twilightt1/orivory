@@ -41,8 +41,13 @@ unifies them.
   owners' permissions: every reader/writer/admin/export composes
   `visibility.namespace_predicate(...)` — the ONE spelling, built from
   `namespaces.PERSONAL` / `personal_namespace(user_id)` — into the SAME SQL
-  statement as the row it protects (before any LIMIT or aggregate), and
-  primary-key reads (`db.get`) check the loaded row against the same value.
+  statement as the row it protects (before any LIMIT or aggregate). The REST
+  primary-key surfaces (`db.get` + the shared `_owned` check) compare the loaded
+  row against the same value; three PK reads do not, and none takes an id from a
+  request — the graph write-back (`app/graph/builder.py`), the outbox applier
+  (deliberate: it writes THAT row's namespace onto its point, R33/R34) and the
+  migration CLI's whole-database inventory read (`correction_chains`). The AST
+  fence scans `select(...)` statements and does not see `db.get` at all.
   Namespace is never derived from client input. **P4a ships personal-only:
   sharing is OFF**, `personal` is the only value that exists, and every pre-P4
   row was backfilled into it — a single-namespace deployment answers exactly as

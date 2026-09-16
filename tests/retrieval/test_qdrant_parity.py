@@ -652,6 +652,24 @@ def test_build_filter_refuses_a_missing_namespace(missing):
         build_filter("owner", namespace=missing)
 
 
+def test_build_filter_strips_a_padded_namespace():
+    """``' personal '`` IS the personal boundary — matched padded it matches nothing.
+
+    Rows carry the spelling ``namespaces.PERSONAL`` (the ladder's default), so a
+    padded input matched verbatim builds a filter that returns an empty set with
+    no error, while the docstring promises a refusal, never a silent empty. The
+    value is normalized once, before the match (and before the ``is_empty``
+    branch is decided — a padded ``personal`` must still accept a key-less point).
+    """
+    built = build_filter("owner", namespace=f" {namespaces.PERSONAL} ")
+
+    assert built.should == _r32_should(), (
+        "a padded personal namespace must still carry the key-less-point branch")
+    assert built.should[0].match.value == namespaces.PERSONAL, (
+        "the match value must be the spelling the rows carry, not the padded input")
+    assert [condition.key for condition in built.must] == ["user_id"]
+
+
 @pytest.mark.parametrize(
     "where, message",
     [
