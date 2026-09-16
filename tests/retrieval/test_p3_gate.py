@@ -52,9 +52,11 @@ this gate from CI (or narrowing its env) fails here instead of silently.
 from __future__ import annotations
 
 import asyncio
+import math
 import sqlite3
 import statistics
 import threading
+import time
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -74,13 +76,16 @@ from app.main import app
 from app.models.erasure_receipt import ErasureReceipt
 from app.models.index_outbox import IndexOutbox
 from app.models.memory import Memory
-from app.retrieval import vector_backend
+from app.retrieval import e5_local, vector_backend
+from app.retrieval import reranker as reranker_module
+from app.retrieval.embedder import embed_query as real_embed_query
+from app.retrieval.embedder import warmup_embedder
 from app.retrieval.embedding_fingerprint import generation_name
 from app.retrieval.memory import drain_loop, freshness, outbox, vector_store
 from app.retrieval.memory import retriever as retriever_module
 from app.retrieval.memory.outbox import IndexFreshnessTimeout
 from app.retrieval.memory.retriever import MemoryRetriever
-from app.schemas.Orivory import MemoryUpdate
+from app.schemas.Orivory import RECALL_TRACE_STAGE_KEYS, MemoryUpdate
 from app.services.erasure_service import erase_memories, reconcile_erasure_receipts
 from app.utils.dependencies import enforce_llm_quota, get_current_verified_user
 from tests.retrieval.test_drain_loop import _until
@@ -835,6 +840,112 @@ def test_the_runbook_states_the_multi_process_limit_truthfully():
     # cover — a blanket "cannot leave a stale point behind" is not the claim.
     assert "accepted residual" in lowered
     assert "third write" in lowered
+
+
+# ── 10. the signed latency budget (T3): p50 ≤ 60 ms, p95 ≤ 150 ms, warm ─────
+
+# §12.2 (user-signed 2026-09-15): "recall p95 ≤ 150 ms at fixture scale".
+# The p50 budget is the guard band: a fixture or a path that drifted shows
+# here long before it breaks the signed p95.
+#
+# Read the band honestly (F3): 60 ms sits just ABOVE the known
+# `EMBED_ORT_INTRA_OP_THREADS=1` regression (reviewer-measured ~53 ms p50
+# here vs 12.6 ms at the default), so it does NOT cover that knob — a pinned
+# intra-op=1 lands ~7 ms under the guard. What bites there is the C1 pin
+# (`tests/retrieval/test_event_loop_responsiveness.py` §3): the recall-alone
+# 50-intent drain blows the signed 2.0 s budget by mechanism (3.07 s).
+LATENCY_P50_MS = 60.0
+LATENCY_P95_MS = 150.0
+LATENCY_ITERATIONS = 30
+LATENCY_WARMUP_ITERATIONS = 3
+LATENCY_QUERY = "where did i walk at dusk"
+
+
+async def _stub_rewrite(query, context=None, **_kwargs):
+    """The LLM rewrite is an out-of-process call — never part of latency."""
+    return {"rewritten_query": query, "entities": [], "reasoning": None,
+            "_fallback_used": False}
+
+
+@pytest.mark.skipif(
+    not e5_local.arctic_files_cached(),
+    reason="arctic onnx cache missing — run local, do not download in CI",
+)
+async def test_the_signed_recall_latency_budget_holds_on_the_frozen_fixture(live, monkeypatch):
+    """The signed budget, asserted on the REAL recall path — warm, ≥30 runs.
+
+    Everything the request does is in the measurement: the P3 barrier, the SQL
+    context read, the real embedded-Qdrant search, hydration, eligibility, the
+    merged-pool re-validation after the rerank round (T2's doubled post-network
+    hydrate), scoring and serialization. Only the two out-of-process seams are
+    substituted — the LLM rewrite and the reranker TRANSPORT (a stub that keeps
+    the rows it is handed) — and the embedder is the REAL arctic session,
+    because the lite deployment embeds in-process and that cost is part of the
+    budget. It is warmed first, the way the T1 heartbeat test does: a cold
+    session is boot's cost, not a request's.
+
+    Three rows are seeded before measuring: the cutover fixture leaves alice
+    exactly ONE eligible memory point, and the rerank leg (it needs >1
+    candidate) is part of the path the budget covers.
+
+    It needs the cached arctic artifacts, so it carries the house guard
+    (R15): with a warm cache the signed assertion runs; on a cold cache it
+    skips cleanly instead of making CI download ~90 MB of ONNX.
+    """
+    for index in range(3):
+        created = await _create_memory(live.alice.id, f"latency fixture row {index}")
+        assert created.indexing == "ready", "the write-through did not index"
+    generation = generation_name("memory")
+    assert len(_scroll_ids(generation)) == 6  # the 3 cutover points + these 3
+
+    # The gate harness fakes the embedder for the fixture's deterministic
+    # vectors; this measurement restores the real one (see the docstring).
+    monkeypatch.setattr(retriever_module, "embed_query", real_embed_query)
+    monkeypatch.setattr(retriever_module, "rewrite_query", _stub_rewrite)
+    rerank_inputs: list[int] = []
+
+    async def _stub_rerank(_query, chunks, *, top_n=None):
+        rerank_inputs.append(len(chunks))
+        return [dict(chunk, rerank_score=1.0 - index / 100.0)
+                for index, chunk in enumerate(chunks)]
+
+    monkeypatch.setattr(reranker_module, "rerank", _stub_rerank)
+    await warmup_embedder()
+
+    latencies_ms: list[float] = []
+    for _ in range(LATENCY_WARMUP_ITERATIONS + LATENCY_ITERATIONS):
+        async with live.sessions() as db:
+            began = time.perf_counter()
+            response = await MemoryRetriever(
+                db, live.alice.id, semantic_rerank=True
+            ).recall(LATENCY_QUERY)
+            latencies_ms.append((time.perf_counter() - began) * 1000.0)
+
+    measured = sorted(latencies_ms[LATENCY_WARMUP_ITERATIONS:])
+    p50 = statistics.median(measured)
+    p95 = measured[math.ceil(0.95 * len(measured)) - 1]  # nearest-rank
+    print(
+        f"P2 signed recall latency (n={len(measured)}, real store + real embedder, "
+        f"stub reranker transport): p50={p50:.2f}ms p95={p95:.2f}ms "
+        f"max={measured[-1]:.2f}ms"
+    )
+    assert len(measured) >= 30, "the signed assertion needs ≥30 iterations"
+    assert p50 <= LATENCY_P50_MS, (p50, measured)
+    assert p95 <= LATENCY_P95_MS, (p95, measured)
+
+    # The measurement ran the whole path, not a short-circuit: the rerank leg
+    # really fired on every iteration (so its post-network re-hydrate is in the
+    # numbers), and the trace's counters state the run's real facts.
+    assert rerank_inputs == [4] * (LATENCY_WARMUP_ITERATIONS + LATENCY_ITERATIONS)
+    assert response.trace.counts == {
+        "dense": 4, "eligible": 4, "reranked": 4, "hydrated": 4, "returned": 4,
+    }
+    # F5: the declaration is a contract in BOTH directions — this run may only
+    # write `stage_ms` keys `RECALL_TRACE_STAGE_KEYS` declares (the C2 test in
+    # test_rerank_pool.py pins the set a fresh trace is BUILT with; this pins
+    # what the real path actually WRITES, so an undeclared extra cannot leak).
+    assert set(response.trace.stage_ms) <= set(RECALL_TRACE_STAGE_KEYS)
+    assert len(response.results) == 4
 
 
 # ── R30: the gate runs in CI, in the P1b/P3 step's discipline ───────────────

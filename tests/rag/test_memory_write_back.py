@@ -59,13 +59,15 @@ class TestSafeUpsert:
 
 class TestSafeEnqueueGraph:
     def test_never_raises_when_builder_fails(self, monkeypatch):
-        # Force the sync builder to raise; helper must swallow it.
+        # Force the sync builder to raise; the no-loop helper must swallow it.
         def boom(*a, **k):
             raise RuntimeError("graph store down")
 
         monkeypatch.setattr("app.graph.builder.build_memory_graph_sync", boom)
-        # Should not raise
+        # Called WITHOUT a running loop (R27(p2)): the helper runs the build
+        # inline — no task is scheduled and nothing raises.
         write_back.safe_enqueue_graph_build(uuid.uuid4())
+        assert not write_back._pending_graph_builds
 
     def test_calls_builder_sync(self, monkeypatch):
         import app.graph.builder as gb

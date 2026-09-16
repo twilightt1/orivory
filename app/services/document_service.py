@@ -1,6 +1,7 @@
 """Document service — scoped to conversation."""
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from uuid import UUID
@@ -64,7 +65,10 @@ async def upload_document(db: AsyncSession, conversation: Conversation, file: Up
     from app.retrieval.retrieval_cache import invalidate_query_cache
 
     await invalidate_query_cache(str(conversation.id))
-    process_document_sync(str(doc.id))
+    # The pipeline is synchronous and embeds the whole document's children in
+    # ONE call: run it off the loop (P2/T1) so the upload request's own event
+    # loop keeps serving while the model works.
+    await asyncio.to_thread(process_document_sync, str(doc.id))
 
     log.info("Document uploaded", extra={"doc_id": doc_id, "conversation_id": str(conversation.id)})
     return doc

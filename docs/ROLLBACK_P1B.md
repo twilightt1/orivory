@@ -1,8 +1,9 @@
 # Rolling a P1b install back to the pre-P1b stack
 
 **This escape hatch exists for ONE release** (spec §12). After that release the
-Qdrant path is the only path, this document and `scripts/rollback_to_chroma.py`
-are deleted, and the P1b-compatible restore is `verify --restore-drill` alone.
+Qdrant path is the only path, §1-§4 and `scripts/rollback_to_chroma.py` are
+deleted, and the P1b-compatible restore is `verify --restore-drill` alone. §6
+(P2 -> pre-P2) is the exception: see §5 for its removal condition.
 
 P1b cuts over by flipping the generation pointer: the SQLite database keeps
 serving, but the vectors moved to Qdrant and the local embedding contract went
@@ -197,10 +198,59 @@ written to. Both rules are enforced before a byte is copied (default target:
 
 ## 5. Removal condition
 
-Keep this escape hatch for **exactly one release**. Delete this document,
-`scripts/rollback_to_chroma.py`, `requirements-rollback.txt` and
+Keep this escape hatch for **exactly one release**. Delete §1-§4 (the Chroma
+rebuild), `scripts/rollback_to_chroma.py`, `requirements-rollback.txt` and
 `tests/migration/test_p1b_rollback.py` in the release after P1b (spec §12), and
 drop the retired store itself — the `LEGACY_CHROMA_PATH` directory
 (`Orivory_memories` + `rag_conv_*`) — once the window closes: nothing serves from
 it after `cutover`, so it is only disk at that point. From that release the only
 supported restore is `verify --restore-drill` plus a Qdrant snapshot restore.
+
+**§6 is NOT part of that deletion.** The P2 rollback recipe (drop the FTS5
+objects, re-stamp `user_version = 3`) has no other home and is the only
+documented way back from a v4 file to a pre-P2 binary — deleting it in the
+release after P1b would remove the recipe in exactly the release that ships P2.
+Before §1-§4 go, move §6 into
+[OPERATIONS_RUNBOOK.md](OPERATIONS_RUNBOOK.md) (and re-point this document's
+references to it).
+
+## 6. Rolling a P2 install back to a pre-P2 binary
+
+A P2 (lite) install runs SQLite `user_version = 4`: the v3 schema plus the P2
+lexical index — `memory_fts`, an FTS5 virtual table with its shadow tables, and
+the three `memories_fts_*` triggers that maintain it. **None of that is model
+metadata**: the virtual table is created by the ladder's own DDL, so the v4-only
+objects are exactly one virtual table (plus SQLite's shadow tables) and three
+triggers.
+
+A pre-P2 binary cannot open such a file: its ladder accepts `0..3` and refuses
+with `unsupported SQLite schema version 4; expected 3`. Going back to the P1b
+stack therefore needs the same two moves the rebuild makes for the pre-P1b
+stack (`user_version = 2`, §1) — **stamp the version the target ladder tops out
+at, and take the objects it cannot know about with it**:
+
+```bash
+# On a COPY, never on the live file. Verify with PRAGMA integrity_check after.
+sqlite3 /data/orivory.rollback-p2.db <<'SQL'
+DROP TRIGGER IF EXISTS memories_fts_ai;
+DROP TRIGGER IF EXISTS memories_fts_au;
+DROP TRIGGER IF EXISTS memories_fts_ad;
+DROP TABLE IF EXISTS memory_fts;     -- drops the FTS5 shadow tables too
+PRAGMA user_version = 3;             -- the P1b ladder's top
+SQL
+```
+
+- `user_version = 3` is what a P1b-era reader boots: its ladder stops there, and
+  the v2/v3 objects in the copy are the ones it built. `2` (the copy
+  `scripts/rollback_to_chroma.py` emits) is the pre-P1b binary's value — use
+  whatever the binary you are going back to understands, and nothing higher.
+- Drop the FTS objects rather than leaving them inert: the triggers fire on
+  **every** memory write, so an old binary would be writing into a table it does
+  not know and an SQLite build without FTS5 would fail the write outright.
+- Rolling forward again is a boot with a P2 binary: the ladder re-runs the
+  `v3 -> v4` step (the DDL is `IF NOT EXISTS`, the backfill is coverage-driven),
+  so the index comes back without a rebuild of the memories table.
+- If a full restore is acceptable instead, the ladder's own `.pre-p2.bak`
+  snapshot beside the database is the pre-P2 bytes — and, like `.pre-p1b.bak`,
+  restoring it silently drops every write made after it was taken.
+

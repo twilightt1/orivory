@@ -6,160 +6,261 @@ that exercise it.
 
 ---
 
-## 1. Hybrid retrieval (BM25 + dense + RRF)
+## 1. Hybrid retrieval (dense + FTS5 lexical + RRF) — opt-in, SQLite-only
 
-**Why.** BM25 excels at exact keyword / Vietnamese diacritic matches
-(e.g. `"API"`, `"rate limit"`). Dense retrieval excels at semantic
-paraphrases. Combining them via Reciprocal Rank Fusion gives the best
-of both.
+**Why.** A lexical leg excels at exact keywords, code identifiers and Vietnamese
+diacritics (`"ORIVORY-4417"`, `"hồ sơ dự án"` typed either way), where a local
+embedding model has no idea what the token *means*. Dense retrieval carries the
+semantic paraphrases. Fusing the two by Reciprocal Rank Fusion keeps both.
+
+**Status: ships OFF.** `RETRIEVAL_HYBRID_ENABLED=false` by default; only the
+T7 ablation artifact passing the signed non-inferiority gate
+(`eval/ablation_retrieval_p2.json`; no slice losing > 0.02 recall@5 vs
+dense-only, overall gain >= +0.02) may enable it, as a separate documented
+decision. On the frozen fixture the flag's arm measured **+0.1042 overall
+recall@5** with the entire gain in the `exact_id` slice — evidence at FIXTURE
+scale, with a stand-in reranker and index-global BM25 statistics, never a
+production claim (read the artifact's `limitations`).
 
 **Where.**
-- BM25: [`app/retrieval/bm25_retriever.py`](../app/retrieval/bm25_retriever.py)
-- Dense: [`app/retrieval/vector_store.py`](../app/retrieval/memory/vector_store.py)
-- RRF: [`app/retrieval/hybrid_retriever.py`](../app/retrieval/hybrid_retriever.py) (contains `reciprocal_rank_fusion` function)
+- Lexical leg (memory): [`app/retrieval/memory/lexical_index.py`](../app/retrieval/memory/lexical_index.py) — SQLite FTS5 (`memory_fts`, created by the schema ladder's v4 step; triggers maintain it in the writing transaction). SQLite-only by ruling R3: a Postgres deployment has NO lexical leg, and a vector outage there keeps the typed 503.
+- Dense leg: [`app/retrieval/memory/vector_store.py`](../app/retrieval/memory/vector_store.py)
+- Fusion: [`app/retrieval/hybrid_retriever.py`](../app/retrieval/hybrid_retriever.py) — `fuse_by_uuid` (UUID-keyed, zero-based ranks); the legacy `reciprocal_rank_fusion` dedupes by parent/content and is **not** used for memory.
+- The document/BM25 path ([`app/retrieval/bm25_retriever.py`](../app/retrieval/bm25_retriever.py), Redis parent cache) is a separate legacy leg, not the memory recall's.
 
-**Trade-off.** Slightly higher latency than dense-only (two retrievers +
-fusion), but ~30% recall improvement on Vietnamese technical terms
-(measured on the offline eval set).
+**Trade-off.** A second query per recall (the FTS5 page) plus a fusion pass —
+in-Python, and only paid when the flag is on. When the vector store is down the
+lexical leg answers ALONE (SQLite), which is the one case where the size of
+that cost is irrelevant.
 
-**Test.** `tests/rag/test_hybrid_retrieval.py::test_bm25_contributes_when_dense_fails`
+**Test.** [`tests/retrieval/test_hybrid_recall.py`](../tests/retrieval/test_hybrid_recall.py)
+(fusion order, UUID dedupe, the outage fallback, the OFF path),
+[`tests/retrieval/test_p2_ablation_contract.py`](../tests/retrieval/test_p2_ablation_contract.py)
+(the artifact's shape), and the §9 gate [`tests/retrieval/test_p2_gate.py`](../tests/retrieval/test_p2_gate.py).
 
 ---
 
 ## 2. Reciprocal Rank Fusion
 
 ```
-score(d) = Σ_i  1 / (k + rank_i(d))     # k = 60 (Cormack et al.)
+score(d) = Σ_i  1 / (k + rank_i(d) + 1)     # k = RETRIEVAL_RRF_K (default 60)
 ```
 
 **Why RRF instead of linear combination.** RRF needs no score
-calibration between retrievers (BM25 scores ≠ cosine scores). It also
-handles "the result only appears in one list" gracefully.
+calibration between retrievers (global BM25 and cosine are not comparable). It
+also handles "the result only appears in one list" gracefully.
 
-**Where.** [`app/retrieval/hybrid_retriever.py`](../app/retrieval/hybrid_retriever.py) (contains `reciprocal_rank_fusion` function)
+**Memory-specific rules.** Fusion is keyed by the canonical memory UUID
+(never content or `parent_id`: two memories with identical text stay two
+memories), ranks are ZERO-based, `k >= 1` is validated at config load, and the
+legs' own scores travel separately on each candidate — the fused order is the
+sum, never a bare cosine (a refill row appended with its raw cosine would
+outrank the whole fused head).
 
-**Test.** `tests/rag/test_rrf.py` — covers single-list inputs, equal rank, and
-overlapping docs.
+**Where.** [`app/retrieval/hybrid_retriever.py`](../app/retrieval/hybrid_retriever.py) — `fuse_by_uuid`.
+
+**Test.** [`tests/retrieval/test_hybrid_recall.py`](../tests/retrieval/test_hybrid_recall.py)
+covers single-list inputs, equal rank, the k seam, duplicate-text rows and the
+refill re-fusion.
 
 ---
 
-## 3. Parent-child chunking
+## 3. Parent-child chunking (the document path)
 
 ```
-[Parent (1024 tok)]     ← returned to the LLM for context
-   ├── [Child (256 tok)] ← embedded into the vector store
-   ├── [Child (256 tok)]
-   └── [Child (256 tok)]
+[Parent (~1500 chars)]  ← stored in DB + Redis, returned to the LLM as context
+   ├── [Child (~400 chars)] ← embedded into the vector store
+   ├── [Child (~400 chars)]
+   └── [Child (~400 chars)]
 ```
 
 **Why.** Small children → precise embedding (better recall).
 Large parents → readable context for the answer agent.
 
-**Where.** [`app/retrieval/hybrid_retriever.py`](../app/retrieval/hybrid_retriever.py)
+**Where.** [`app/utils/chunker.py`](../app/utils/chunker.py) —
+`build_parent_child_chunks` (`PARENT_SIZE` 1500 / `PARENT_OVERLAP` 150,
+`CHILD_SIZE` 400 / `CHILD_OVERLAP` 50): each child carries its `parent_id` in
+metadata and only children are embedded. Markdown/DOCX headings split first,
+a recursive character split is the fallback.
 
-**Trade-off.** 4-6× more storage, but the LLM's "answer quality" metrics
-improve noticeably because the answer agent has surrounding context for
-each child.
+**Trade-off.** Storage is duplicated by design — the parent is one row in
+`document_chunks` (plus the Redis cache, §8) and its children are the points
+in the vector store.
 
----
-
-## 4. Multi-query + HyDE + conversation rewrite
-
-Three query transformations run in parallel (`asyncio.gather`):
-
-1. **Conversation rewrite** — resolves pronouns using the last 3 turns
-2. **Multi-query** — 3 lexical variants of the question
-3. **HyDE** — generate a hypothetical answer, embed that instead of the question
-
-**Why.** Different retrievers respond to different query phrasings. Throwing
-3-5 reformulations at the retriever and fusing the results is a cheap win.
-
-**Trade-off.** LLM call for the router → +50-200 ms p50. HyDE is
-opt-in (gated by config) because not all domains benefit from it.
-
-**Test.** `tests/rag/test_query_transforms.py`
+**Test.** [`tests/rag/test_chunker.py`](../tests/rag/test_chunker.py).
 
 ---
 
-## 5. Cross-encoder reranking
+## 4. Query rewrite (recall) + HyDE (document path)
 
-A small cross-encoder reads `(query, chunk)` pairs and re-orders the top-K
-chunks. Cheaper than re-embedding the whole corpus, and the signal is much
-stronger than cosine similarity alone.
+Two transformations ship, and neither fans out into query variants:
 
-**Where.** [`app/retrieval/reranker.py`](../app/retrieval/reranker.py)
-(uses FlashRank by default)
+1. **Conversation rewrite — the recall path.** ONE LLM call
+   ([`app/retrieval/memory/query_rewriter.py`](../app/retrieval/memory/query_rewriter.py) —
+   `rewrite_query`) resolves pronouns, abbreviations and implicit references
+   against the user's recent + pinned memories, and returns a self-contained
+   query plus the entities it resolved. It is best-effort — any LLM error keeps
+   the original query (`_fallback_used` on the result) — and the recall path
+   SKIPS the call entirely for queries with no pronouns
+   ([`app/retrieval/memory/correction.py`](../app/retrieval/memory/correction.py) —
+   `needs_rewrite`, `rewrite_skipped` on the trace).
+2. **HyDE — the document path.** [`app/retrieval/hyde_agent.py`](../app/retrieval/hyde_agent.py)
+   generates hypothetical passages (Gao et al., arXiv 2309.08830), and
+   [`app/retrieval/vector_retriever.py`](../app/retrieval/vector_retriever.py) —
+   `search(..., hyde_text=...)` embeds the hypothetical text instead of the
+   query when handed one. `HYDE_ENABLED` (default true) gates the generator,
+   but no shipped caller passes `hyde_text`: the HyDE node belonged to the
+   LangGraph workflow (§6/§7).
 
-**Trade-off.** ~50-150 ms added latency. We compensate by
-reranking only the **top 20** of the 50 retrieved chunks.
+**Not implemented: "multi-query".** There is no code path that issues 3 lexical
+variants or fuses their results (`grep -r multi_query app/` finds nothing).
 
-**Benchmark.** See [`eval/benchmarks/reranker_benchmark.py`](../eval/README.md)
-for an NDCG/MRR harness.
+**Trade-off.** The rewrite adds one LLM call to recall; the pronoun fast-path
+keeps it off the common query. HyDE trades an LLM call for a denser query in
+the document path.
+
+**Test.** [`tests/test_hyde_agent.py`](../tests/test_hyde_agent.py) covers the
+HyDE generator; the rewriter is exercised through the recall suites, which
+patch its client seam (e.g. `_seams` in
+[`tests/retrieval/test_p2_gate.py`](../tests/retrieval/test_p2_gate.py)).
 
 ---
 
-## 6. LLM-as-judge hallucination detection
+## 5. Cross-encoder reranking (opt-in)
 
-After the answer agent runs, a second LLM call asks:
+A cross-encoder reads `(query, chunk)` pairs and re-orders the candidate pool.
+Cheaper than re-embedding the whole corpus, and the signal is much stronger
+than cosine similarity alone.
 
-> "Given the context and the question, is the answer grounded?
-> Does it actually answer the question? Cite a [Source N] marker?"
+**Status: opt-in per deployment** (`RETRIEVAL_SEMANTIC_RERANK=false` by
+default). It is an outbound call carrying memory text, which is why the
+pipeline SQL-authorizes and re-reads every candidate BEFORE the transport sees
+it (spec §7.5/§14: no pre-ACL outbound text).
 
-If `is_hallucination` is True, the graph re-enters the answer node with
-the same context but a stricter prompt hint — up to 3 times.
+**Where.** [`app/retrieval/reranker.py`](../app/retrieval/reranker.py) — the
+Jina rerank API (`jina-reranker-v2-base-multilingual`), one HTTP call bounded by
+`JINA_RERANKER_TIMEOUT_SECONDS` (default 10).
 
-**Where.** [`app/agents/hallucination_agent.py`](../app/agents/hallucination_agent.py)
-(used by [`app/agents/graph.py`](../app/agents/graph.py))
+**Semantics (P2).** The window is the retrieval pool
+`top_k x RETRIEVAL_RERANK_POOL_MULTIPLIER` (signed default 2.0);
+`JINA_RERANKER_TOP_N` (default 20) is only the per-call CAP on the transport's
+answer, and the reranked head is MERGED into dense order — the served count is
+`min(top_k, eligible)` and never shrinks because rerank ran. A timeout, a
+non-2xx or a malformed body is typed (`RerankUnavailable` /
+`RerankInvalidResponse`): the answer continues in dense order, counted as
+`retrieval.rerank_failed`. A `0.0` relevance is DATA, never absence.
 
-**Test.** `tests/rag/test_hallucination_retry.py`
+**Test.** [`tests/retrieval/test_rerank_pool.py`](../tests/retrieval/test_rerank_pool.py)
+(pool/top_k/merge/typed failures/zero score) and the §9 gate
+[`tests/retrieval/test_p2_gate.py`](../tests/retrieval/test_p2_gate.py)
+(over real stores). The ablation's rerank arm (`eval/ablation_retrieval_p2.py`)
+measures the STAGE with a local stand-in scorer, never Jina's quality.
 
 ---
 
-## 7. Self-correction loops (LangGraph)
+## 6. LLM-as-judge hallucination detection — removed with the LangGraph agents
 
-Two correction edges in the graph:
-- `grade_docs` returns `context_relevant=False` → re-retrieve
-- `grade_gen` returns `is_hallucination=True` → re-generate
+The `hallucination_agent` and the graph node that re-entered the answer node on
+a flagged answer are gone with the LangGraph chat workflow: `app/agents/` now
+holds only `app/agents/llm_client.py`, `app/agents/llm_parsing.py`,
+`app/agents/routing.py` and `app/agents/state.py`, and
+[`app/api/v1/chat.py`](../app/api/v1/chat.py) marks it removed
+(`rag_graph = None`; the endpoints that need the graph answer with an error).
+What survives:
 
-Each is bounded at 3 retries to prevent infinite loops.
+- the OFFLINE judge — [`eval/llm_judge.py`](../eval/llm_judge.py) scores
+  answers (faithfulness, relevancy, context precision) in eval runs;
+- [`app/services/quality_service.py`](../app/services/quality_service.py)
+  aggregates a recorded assistant `agent_trace`'s `hallucination`/`grounded`
+  verdict into the admin quality-trend metrics — but no shipped serving path
+  writes those keys today.
 
-**Where.** [`app/agents/graph.py`](../app/agents/graph.py) — see the `add_conditional_edges` calls.
+---
 
-**Metric.** "Correction rate" in the eval report measures how often
-retries actually fixed the issue.
+## 7. Self-correction loops — removed; the routing helpers remain
+
+The graph that wired `grade_docs` → re-retrieve and `grade_gen` → re-generate
+(each bounded at 3 retries) was removed with the LangGraph agents. The pure
+decision helpers it used survive in
+[`app/agents/routing.py`](../app/agents/routing.py) (`MAX_RETRIES = 3`,
+`route_after_grade_docs`, `route_after_grade_gen`, the retry /
+`record_*_retry_limit` edge names), and `AgentState`
+([`app/agents/state.py`](../app/agents/state.py)) still carries the fields —
+but nothing in the shipped app imports them.
+
+**Metric.** "Correction rate" (`self_correction_rate` in
+[`app/services/quality_service.py`](../app/services/quality_service.py)) is
+computed from recorded assistant `agent_trace` blobs, not from a live
+correction loop.
 
 ---
 
 ## 8. Parent-chunk cache (Redis)
 
-Successful parent retrievals are cached in Redis (`parent:<doc_id>:<chunk_id>`)
-for 2 hours. Hot docs become sub-millisecond to retrieve.
+The ingestion pipeline caches a document's parent chunks in Redis when it
+finishes ([`app/ingestion/pipeline.py`](../app/ingestion/pipeline.py) →
+[`app/retrieval/parent_store.py`](../app/retrieval/parent_store.py)): key
+`parent_chunk:{conversation_id}:{parent_id}`, TTL 7200 s. The read helpers
+(`get_parent`, `get_parents_batch`) serve from Redis, fall back to
+`document_chunks` and repopulate the cache, and `invalidate_conversation`
+drops a conversation's entries. In lite mode (`REDIS_URL` unset) the
+pipeline's synchronous write (`store_parents_sync`) is skipped, so reads go
+straight to the DB.
 
-**Where.** [`app/retrieval/retrieval_cache.py`](../app/retrieval/retrieval_cache.py)
+**Trade-off.** Redis becomes a hard dependency for the cached path in
+production; with no server configured, `get_redis()` hands out an in-memory
+stand-in ([`app/redis_client.py`](../app/redis_client.py)).
 
-**Trade-off.** Redis becomes a hard dependency in production. For local
-dev, the cache layer transparently falls back to a no-op.
+**Legacy.** [`app/retrieval/retrieval_cache.py`](../app/retrieval/retrieval_cache.py)
+holds a per-conversation query-result cache (`rag:query:conv:...`, TTL 300 s)
+whose get/set helpers have no call site in the shipped app — only the
+invalidation hooks run, when documents change. Nothing reads the parent cache
+back yet either: the BM25/document leg rebuilds from `document_chunks` and
+keys its per-process indexes off a Redis generation counter
+([`app/retrieval/bm25_retriever.py`](../app/retrieval/bm25_retriever.py)).
 
 ---
 
-## 9. Vietnamese-specific preprocessing
+## 9. Vietnamese handling
 
-- **NFC normalization** — `"café"` and `"café"` collapse to the same string
-- **Syllable segmentation** — `underthesea` (configurable)
-- **Stopword filter** — Vietnamese + English stopword lists
-- **Diacritic-safe BM25** — keep diacritics for the index (Vietnamese users
-  type with diacritics), strip only for the query (some keyboards lose them)
+- **Diacritic folding is the tokenizer's job.** `memory_fts` is created with
+  `unicode61 remove_diacritics 2`
+  ([`app/retrieval/memory/lexical_index.py`](../app/retrieval/memory/lexical_index.py)),
+  and the index and the query go through the SAME folding tokenizer: a query
+  typed WITH diacritics ("hồ sơ dự án") and one typed without them
+  ("ho so du an") match and rank the same rows — no query-side stripping
+  happens in Python.
+- **The rewrite is Vietnamese-friendly.** The rewriter's system prompt is
+  written for a Vietnamese second-brain
+  ([`app/retrieval/memory/query_rewriter.py`](../app/retrieval/memory/query_rewriter.py)),
+  and the pronoun heuristic that gates it is bilingual — "it/this/that" plus
+  "nó/chúng/đó" ([`app/retrieval/memory/correction.py`](../app/retrieval/memory/correction.py)).
+- **The dense leg is the configured embedder's.** `LOCAL_EMBED_MODEL="e5"` is
+  the multilingual, opt-in model; the default `arctic` is English-first, and
+  the dim guard refuses to mix the two on one store
+  ([`app/config.py`](../app/config.py)).
 
-**Where.** [`app/retrieval/hyde_agent.py`](../app/retrieval/hyde_agent.py)
+**Not in this repo:** NFC normalization, `underthesea` syllable segmentation
+and Vietnamese/English stopword lists — no such dependency and no such code
+path.
+
+**Test.** The §9 gate's slice test
+([`tests/retrieval/test_p2_gate.py`](../tests/retrieval/test_p2_gate.py) —
+`test_exact_id_vi_and_en_slices_rank_their_gold`) asserts the diacritic pair
+above, plus the exact-ID and English slices, over the real FTS5 leg.
 
 ---
 
 ## 10. Prompt management
 
-Agent prompts live as module-level constants inside each agent file
-(e.g. `GRADE_DOCS_PROMPT` and `QUERY_EXPANSION_PROMPT` in
-[`app/agents/crag_agent.py`](../app/agents/crag_agent.py)). The original
-versioned-prompt registry was removed as dead weight during the P4
-hardening pass; A/B experimentation now runs through the eval experiment
-sweeper (`scripts/eval_experiments.py` — see
-[EVALUATION_GUIDE.md](EVALUATION_GUIDE.md#prompt-ab-testing)).
+Prompts are module-level constants inside the module that uses them, not a
+registry: `REWRITER_SYSTEM`
+([`app/retrieval/memory/query_rewriter.py`](../app/retrieval/memory/query_rewriter.py)),
+`HYDE_GENERATION_PROMPT` / `HYDE_REFINEMENT_PROMPT`
+([`app/retrieval/hyde_agent.py`](../app/retrieval/hyde_agent.py)),
+`ENTITY_EXTRACTION_PROMPT` / `RELATION_EXTRACTION_PROMPT`
+([`app/graph/extraction.py`](../app/graph/extraction.py)) and `_SYSTEM_PROMPT`
+([`app/services/compression_service.py`](../app/services/compression_service.py)).
+There is no versioned-prompt registry and no A/B sweeper script in this repo —
+a prompt variant is a code change, and evaluating it is an eval run
+([EVALUATION_GUIDE.md](EVALUATION_GUIDE.md)).

@@ -14,6 +14,9 @@ Canonical path names (keep stable; dashboards alert on them):
   retrieval.vector_unavailable   vector store down, BM25-only answers
   retrieval.rerank_failed        Jina/reranker error, vector order kept
   retrieval.bm25_rebuild_failed  BM25 lazy rebuild failed, stale index used
+  mcp.search_sql_fallback        MCP search answered from the SQL ordering
+                                 (freshness barrier timed out / vector outage /
+                                 a degraded leg served empty — R25(p2))
   crag.grading_failed            Doc grading error, defaulted IRRELEVANT
   index.outbox_drain_failed      drain round raised; intents stay pending for the retry
 """

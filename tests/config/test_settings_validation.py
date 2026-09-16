@@ -96,6 +96,66 @@ def test_rejects_invalid_evaluator_failure_mode():
         _base_settings(EVALUATOR_FAILURE_MODE="unsafe")
 
 
+@pytest.mark.parametrize("rrf_k", [0, -1])
+def test_rejects_invalid_rrf_k(rrf_k):
+    """k <= 0 makes `1 / (k + rank + 1)` zero-divide at rank 0; the constant
+    is validated at load like the other typed knobs, and the vector-outage
+    fallback fuses with the hybrid flag OFF — an operator typo must be a boot
+    failure, not an unhandled 500."""
+    with pytest.raises(ValidationError, match="RETRIEVAL_RRF_K"):
+        _base_settings(RETRIEVAL_RRF_K=rrf_k)
+
+
+def test_accepts_rrf_k_at_the_boundary():
+    assert _base_settings(RETRIEVAL_RRF_K=1).RETRIEVAL_RRF_K == 1
+
+
+@pytest.mark.parametrize("workers", [0, -1])
+def test_rejects_invalid_embed_executor_workers(workers):
+    """A zero-width executor cannot embed at all — `ThreadPoolExecutor(0)`
+    raises at construction, deep inside whichever request triggers the first
+    embed. The typo must fail at load instead."""
+    with pytest.raises(ValidationError, match="EMBED_EXECUTOR_WORKERS"):
+        _base_settings(EMBED_EXECUTOR_WORKERS=workers)
+
+
+@pytest.mark.parametrize("threads", [-1, -8])
+def test_rejects_invalid_embed_ort_intra_op_threads(threads):
+    """0 is the signed default (ORT's own all-cores width); a negative width
+    is a typo, and ONNX Runtime refuses it far from config load."""
+    with pytest.raises(ValidationError, match="EMBED_ORT_INTRA_OP_THREADS"):
+        _base_settings(EMBED_ORT_INTRA_OP_THREADS=threads)
+
+
+def test_accepts_ort_intra_op_boundary_values():
+    assert _base_settings(EMBED_ORT_INTRA_OP_THREADS=0).EMBED_ORT_INTRA_OP_THREADS == 0
+    assert _base_settings(EMBED_ORT_INTRA_OP_THREADS=2).EMBED_ORT_INTRA_OP_THREADS == 2
+
+
+@pytest.mark.parametrize("cap", [0, -1])
+def test_rejects_invalid_reranker_cap(cap):
+    """The cap is the per-call `min(top_k, cap)`: a 0 cap asks the transport
+    for zero rows on every request — a typo, not a configuration."""
+    with pytest.raises(ValidationError, match="JINA_RERANKER_TOP_N"):
+        _base_settings(JINA_RERANKER_TOP_N=cap)
+
+
+@pytest.mark.parametrize("multiplier", [0, -1.0])
+def test_rejects_invalid_rerank_pool_multiplier(multiplier):
+    """The pool feeds the count invariant: a non-positive multiplier is a typo
+    that silently collapses the fetch, and the invariant would hide it."""
+    with pytest.raises(ValidationError, match="RETRIEVAL_RERANK_POOL_MULTIPLIER"):
+        _base_settings(RETRIEVAL_RERANK_POOL_MULTIPLIER=multiplier)
+
+
+@pytest.mark.parametrize("timeout", [0, -0.5])
+def test_rejects_invalid_reranker_timeout(timeout):
+    """A non-positive timeout turns every rerank call into a failure the
+    moment it is attempted; R11(p2) made it a bound, not a suggestion."""
+    with pytest.raises(ValidationError, match="JINA_RERANKER_TIMEOUT_SECONDS"):
+        _base_settings(JINA_RERANKER_TIMEOUT_SECONDS=timeout)
+
+
 def test_normalizes_evaluator_failure_mode():
     settings = _base_settings(EVALUATOR_FAILURE_MODE="FAIL_CLOSED")
 

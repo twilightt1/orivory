@@ -19,6 +19,15 @@ if config.config_file_name is not None:
 
 target_metadata = Base.metadata
 
+# Postgres gets NO FTS, and this is where that is decided. The P2 lexical index
+# (``app/retrieval/memory/lexical_index``) is an FTS5 virtual table: SQLite-only
+# DDL, deliberately absent from the metadata above, with no migration in this
+# directory. It is created by the SQLite ladder's own ``exec_driver_sql`` step
+# (``app.database._upgrade_v3_to_v4``), and on Postgres the lexical leg reports
+# itself unavailable — typed, never a silent "no matches" (ruling R3(p2)).
+# autogenerate must therefore never learn about it: a virtual table in the
+# metadata would make every Postgres migration try to CREATE TABLE it.
+
 
 def run_migrations_offline() -> None:
     url = config.get_main_option("sqlalchemy.url")

@@ -1,5 +1,8 @@
+import asyncio
+import functools
 import inspect
 import logging
+from concurrent.futures import ThreadPoolExecutor
 
 from openai import AsyncOpenAI, OpenAI
 
@@ -11,6 +14,47 @@ from app.retrieval.embedding_fingerprint import (
 )
 
 log = logging.getLogger(__name__)
+
+# ONE executor for every ASYNC embedding call (P2/T1). The local path is a
+# synchronous ONNX call: awaited inline from async code it stalls the loop for
+# the call's whole duration (a 50-document drain batch is ~674 ms, and the
+# freshness barrier runs that drain ON the recall request path). Bounded, not
+# the loop's default pool, so the parallel embeds stay accountable against
+# ORT's own thread count. The `*_sync` faces do NOT come through here: their
+# callers are already off-loop (celery/CLI/ingestion threads).
+#
+# Cancellation cannot reach inside a worker: cancelling a task parked on
+# `run_in_executor` (the barrier's timeout) frees the caller immediately, but
+# the ONNX call keeps its slot until it returns (~0.6 s for a 50-doc batch) —
+# so after a barrier timeout one of the two workers stays busy a little longer.
+_EMBED_EXECUTOR = ThreadPoolExecutor(
+    max_workers=max(1, settings.EMBED_EXECUTOR_WORKERS),
+    thread_name_prefix="orivory-embed",
+)
+
+
+async def _run_off_loop(fn, *args, **kwargs):
+    """Run a synchronous embedding call on the embed executor."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_EMBED_EXECUTOR, functools.partial(fn, *args, **kwargs))
+
+
+async def warmup_embedder() -> None:
+    """Build the local embedding session before anything is served (P2/T1).
+
+    A cold ``InferenceSession`` is 610-685 ms and even built inside a thread it
+    leaves C-level parse lag: the lifespan pays it once, before the boot drain,
+    instead of the first request paying it inside the measured path. API
+    backends have no local session to build. Best-effort by design — a missing
+    model download must not keep a booting app from serving (the first real
+    call pays it again and says why).
+    """
+    if not settings.USE_LOCAL_EMBEDDINGS:
+        return
+    try:
+        await _run_off_loop(_embed_with_local, ["warmup"])
+    except Exception as e:  # pragma: no cover - a download/network failure
+        log.warning("Local embedding warmup failed: %s", e)
 
 
 # Lazily-resolved module-level aliases.
@@ -560,7 +604,8 @@ async def embed_texts(texts: list[str]) -> list[list[float]]:
         return []
 
     if settings.USE_LOCAL_EMBEDDINGS:
-        return _embed_with_local(texts)
+        # Off the loop: `_embed_with_local` is a synchronous ONNX call.
+        return await _run_off_loop(_embed_with_local, texts)
     if settings.USE_JINA_EMBEDDINGS and settings.JINA_API_KEY:
         return await _embed_with_jina(texts)
     else:
@@ -569,7 +614,7 @@ async def embed_texts(texts: list[str]) -> list[list[float]]:
 
 async def embed_query(query: str) -> list[float]:
     if settings.USE_LOCAL_EMBEDDINGS:
-        return _embed_with_local([query], query=True)[0]
+        return (await _run_off_loop(_embed_with_local, [query], query=True))[0]
     return (await embed_texts([query]))[0]
 
 

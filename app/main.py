@@ -43,6 +43,20 @@ async def _drain_index_outbox_at_boot() -> None:
         log.warning("Index outbox boot drain failed", error=str(e))
 
 
+async def _warm_embedder_at_boot() -> None:
+    """Build the local embedding session before the drain and the API (P2/T1).
+
+    Both the boot drain and the first request embed, and a cold session is
+    610-685 ms (plus C-level parse lag even inside a thread): the lifespan pays
+    it while nothing is served yet. Best-effort — see ``warmup_embedder``.
+    """
+    if not settings.EMBED_WARMUP_ON_BOOT:
+        return
+    from app.retrieval.embedder import warmup_embedder
+
+    await warmup_embedder()
+
+
 def _requested_processes() -> int:
     """How many app processes the launcher asked for (1 = a single owner).
 
@@ -104,6 +118,9 @@ async def lifespan(app: FastAPI):
         log.info("SQLite schema bootstrapped")
     from app.retrieval.memory.drain_loop import start_drain_loop, stop_drain_loop
 
+    # The session is built BEFORE the boot drain: the drain embeds too, and a
+    # cold InferenceSession's 610-685 ms belongs to the boot, not to a request.
+    await _warm_embedder_at_boot()
     await _drain_index_outbox_at_boot()
     # Created INSIDE the try whose ``finally`` stops it: storage init can raise
     # a BaseException (a shutdown cancel), and one raised outside the try would

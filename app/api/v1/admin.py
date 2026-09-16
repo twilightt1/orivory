@@ -1,6 +1,7 @@
 """Admin endpoints."""
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
@@ -305,7 +306,9 @@ async def retry_document(
     await db.commit()
 
     from app.ingestion.pipeline import process_document_sync
-    process_document_sync(str(doc.id))
+    # Synchronous pipeline, one batched embed for the whole document: off the
+    # loop, exactly as document_service's upload path does it (P2/T1).
+    await asyncio.to_thread(process_document_sync, str(doc.id))
 
     return {"message": "Document queued for retry."}
 
@@ -482,7 +485,13 @@ async def reindex_memories(
     try:
         from app.retrieval.memory.reindex import reindex_user_memories_sync
 
-        summary = reindex_user_memories_sync(str(body.user_id), only_missing=body.only_missing)
+        # Synchronous reindex (batched embeds over a sync session): off the
+        # loop, so an admin-triggered backfill cannot stall every request (P2/T1).
+        summary = await asyncio.to_thread(
+            reindex_user_memories_sync,
+            str(body.user_id),
+            only_missing=body.only_missing,
+        )
         return ReindexResponse(
             queued=True,
             task_id=None,

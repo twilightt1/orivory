@@ -10,6 +10,14 @@ Design rules:
     product. Identity/scope denials return *before* any DB write.
   - Reads bump nothing (salience bumping stays in the chat pipeline); writes
     reuse ``index_new_memory`` so embedding + graph stay best-effort.
+  - ``search_memory`` ranks through the SHARED recall seam — the same
+    ``MemoryRetriever`` ordering the API serves, never a second ranking
+    implementation (ruling R22(p2)) — while keeping its own index-only payload.
+    The recall's typed readiness errors (freshness barrier timeout, vector
+    outage) degrade to the SQL ordering at this boundary instead of becoming a
+    5xx the MCP host cannot parse (ruling R23(p2)); so does a degraded leg
+    that would otherwise be served as a confident ``results: []`` (embed
+    outage, untyped store failure — ruling R25(p2)).
 """
 from __future__ import annotations
 
@@ -34,17 +42,24 @@ from app.mcp_hub.identity import (
 )
 from app.models.memory import Memory
 from app.models.memory_access_log import MemoryAccessLog
+from app.observability.fallbacks import count_fallback
 from app.retrieval.embedder import EmbeddingDimensionMismatch
 from app.retrieval.memory.correction import Slot, get_cm, resolve_correction, state_of
-from app.retrieval.memory.outbox import mark_done
+from app.retrieval.memory.outbox import IndexFreshnessTimeout, mark_done
+from app.retrieval.memory.retriever import MemoryRetriever
 from app.retrieval.memory.visibility import not_dirty_predicate
 from app.retrieval.memory.write_back import index_new_memory
+from app.retrieval.vector_retriever import VectorUnavailableError
 from app.services.erasure_service import erase_memories
 
 log = logging.getLogger(__name__)
 
 MAX_SEARCH_LIMIT = 20
 MAX_LIST_LIMIT = 100
+
+# R23(p2): the counter for "search could not rank semantically and answered
+# from the SQL ordering" — a rising rate means the recall path is failing.
+SQL_FALLBACK_PATH = "mcp.search_sql_fallback"
 
 IDENTITY_ERROR = {"error": "agent identity required"}
 READ_SCOPE_ERROR = {"error": "scope memory:read required"}
@@ -119,20 +134,20 @@ def _ledger_entry(
     )
 
 
-async def _recall_memory_ids(query: str, limit: int) -> list[tuple[UUID, float]]:
-    """Recall seam used by ``search_memory``.
+async def _sql_recall_ids(principal: AgentPrincipal, limit: int) -> list[tuple[UUID, float]]:
+    """The SQL ordering: salience desc, then captured_at desc.
 
-    MVP ranking is a plain SQL select — the user's memories ordered by
-    salience desc, then captured_at desc (``query`` is kept for seam
-    compatibility; semantic recall replaces this body later without touching
-    the tool bodies). Dirty rows are filtered before the LIMIT so they cannot
-    consume capped candidate slots; superseded rows stay eligible (history
-    widening happens at the hydration step). Tests monkeypatch this and return
-    ``[(memory_id, score), ...]`` pairs.
+    The pre-P2 body of the seam, kept as the R23(p2)/R25(p2) fallback when the
+    recall path cannot answer. Dirty rows are filtered before the LIMIT so they
+    cannot consume capped candidate slots; superseded rows stay eligible
+    (history widening happens at the hydration step).
+
+    The score half of each pair is the row's RAW salience, NOT the recall's
+    fused/decayed score — the two orderings' numbers live on different scales.
+    Only the ids (the ordering itself) are consumed downstream today, so the
+    mismatch is invisible; never start comparing these scores with the healthy
+    path's.
     """
-    principal = _current_principal()
-    if principal is None:
-        return []
     async with _session() as db:
         rows = (
             await db.execute(
@@ -145,6 +160,55 @@ async def _recall_memory_ids(query: str, limit: int) -> list[tuple[UUID, float]]
     return [(row.id, float(row.salience)) for row in rows]
 
 
+async def _recall_memory_ids(query: str, limit: int) -> list[tuple[UUID, float]]:
+    """Recall seam used by ``search_memory`` — the SHARED retriever ordering.
+
+    Ruling R22(p2): the ordering is ``MemoryRetriever.recall_ids`` — the same
+    pipeline (barrier, dense/hybrid/lexical, rerank, counters) the API serves,
+    through the deployment's own flags. MCP adds no ranking of its own.
+
+    Ruling R23(p2): the recall's typed readiness errors are caught HERE, at the
+    tool boundary, and the call answers from the SQL ordering instead — a tool
+    call must never become a 5xx the MCP host cannot parse (MCP had no barrier
+    before this wiring; it must not gain one's 503 semantics). Ruling R25(p2):
+    a DEGRADED leg that surfaces no error (embed outage, untyped store
+    failure) gets the same treatment when the order it produced is empty —
+    the seam's ``degraded_reason`` is the discriminator, never the empty list.
+    The embedding contract mismatch is NOT caught by any clause here: it is a
+    data-integrity failure and keeps raising its typed error, like every other
+    tool in this module.
+
+    Tests monkeypatch this function and return ``[(memory_id, score), ...]``
+    pairs.
+    """
+    principal = _current_principal()
+    if principal is None:
+        return []
+    try:
+        async with _session() as db:
+            recalled, degraded_reason = await MemoryRetriever(
+                db, principal.user_id
+            ).recall_ids(query, top_k=limit)
+    except (IndexFreshnessTimeout, VectorUnavailableError) as exc:
+        count_fallback(SQL_FALLBACK_PATH)
+        log.warning(
+            "MCP search answered from the SQL ordering: %s: %s",
+            type(exc).__name__, exc,
+        )
+        return await _sql_recall_ids(principal, limit)
+    if degraded_reason is not None and not recalled:
+        # R25(p2): the recall degraded a leg and served nothing — an
+        # infrastructure failure, not a no-match. The caller must not read that
+        # as "no memories matched": same escape as the typed errors above, same
+        # counter, one ledger row downstream. A NON-empty order from a
+        # partially degraded pipeline is the recall's answer and is served
+        # as-is (that is the ordering the API would serve).
+        count_fallback(SQL_FALLBACK_PATH)
+        log.warning("MCP search answered from the SQL ordering: %s", degraded_reason)
+        return await _sql_recall_ids(principal, limit)
+    return recalled
+
+
 async def search_memory(query: str, limit: int = 8, include_history: bool = False) -> dict[str, Any]:
     """Search the caller's memories — returns an INDEX, not full content.
 
@@ -152,7 +216,19 @@ async def search_memory(query: str, limit: int = 8, include_history: bool = Fals
     results carry ``id/title/salience/captured_at/snippet`` only. Review the
     index, then call ``get_memory`` on the few ids that matter (or
     ``timeline`` for context around one). Do NOT fetch details for every hit.
-    Requires the ``memory:read`` scope."""
+    Requires the ``memory:read`` scope.
+
+    Ranking is the shared recall's (ruling R22(p2)): the caller's tenant, the
+    same dense/hybrid/lexical semantics as the API, inherited from the
+    deployment's flags. That ranking runs with superseded rows ELIGIBLE
+    (``recall_ids`` passes ``include_superseded=True``) while this tool drops
+    them at hydration unless ``include_history`` is set — so a superseded row
+    can occupy one of the capped window's slots and leave fewer than ``limit``
+    current rows in the answer. With the recall path down (freshness barrier,
+    vector outage) or a leg degraded (embed outage, store failure), the answer
+    falls back to the SQL ordering instead of failing or reading as an empty
+    match (rulings R23(p2)/R25(p2)).
+    """
     principal = _current_principal()
     if principal is None:
         return IDENTITY_ERROR

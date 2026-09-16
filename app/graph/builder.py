@@ -87,6 +87,9 @@ async def build_memory_graph(
     relation_result = await extract_relations(memory, entities)
     relation_stats = await _persist_relations_async(db, memory, relation_result.relations, entity_by_key)
 
+    # R27(p2): merge the processed marker into a FRESH read — same reason as
+    # the sync face below (a concurrent supersede must not be clobbered).
+    await db.refresh(memory, ["extra_metadata"])
     _mark_processed(memory, entity_result, relation_result)
     await db.commit()
 
@@ -103,13 +106,42 @@ async def build_memory_graph(
     )
 
 
+def _run_extraction(coro):
+    """Drive one extraction coroutine to completion from sync code.
+
+    ``build_memory_graph_sync`` owns a sync ``Session``, so it drives the async
+    extraction with ``asyncio.run`` — which refuses to run inside a running
+    event loop. That refusal is the failure mode that kept memory graphs
+    silently empty on every loop-driven caller (the best-effort handler at the
+    call site swallowed the bare ``RuntimeError``; P2/T9): fail loudly, with the
+    fix in the message, and close the coroutine so nothing leaks a
+    never-awaited ``RuntimeWarning``.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+    coro.close()
+    raise RuntimeError(
+        "build_memory_graph_sync() cannot run on a running event loop: it "
+        "drives asyncio.run() internally. Offload it with asyncio.to_thread "
+        "(write_back.safe_enqueue_graph_build schedules it that way)."
+    )
+
+
 def build_memory_graph_sync(
     db: Session,
     memory_id: UUID | str,
     *,
     force: bool = False,
 ) -> GraphBuildResult:
-    """Synchronous builder used from Celery/CLI contexts."""
+    """Synchronous builder for off-loop callers.
+
+    Used from CLI/script contexts and from worker threads
+    (``write_back.safe_enqueue_graph_build`` schedules it there via
+    ``asyncio.to_thread`` when a loop is running, and calls it inline when
+    none is); never from a running event loop — see ``_run_extraction``.
+    """
     memory = db.get(Memory, memory_id)
     if memory is None:
         return GraphBuildResult(memory_id=str(memory_id), user_id=None, skipped=True, error="memory_not_found")
@@ -117,7 +149,7 @@ def build_memory_graph_sync(
     if _already_processed(memory) and not force:
         return GraphBuildResult(memory_id=str(memory.id), user_id=str(memory.user_id), skipped=True)
 
-    entity_result = asyncio.run(extract_entities(memory))
+    entity_result = _run_extraction(extract_entities(memory))
     entities = entity_result.entities
 
     created_entities = 0
@@ -137,9 +169,16 @@ def build_memory_graph_sync(
 
     db.flush()
 
-    relation_result = asyncio.run(extract_relations(memory, entities))
+    relation_result = _run_extraction(extract_relations(memory, entities))
     relation_stats = _persist_relations_sync(db, memory, relation_result.relations, entity_by_key)
 
+    # R27(p2): the write path no longer serializes this build against later
+    # writes to the SAME row, so the processed marker is merged into a FRESH
+    # read of the metadata: the snapshot loaded at extraction time would
+    # clobber a ``cm_*`` marker (a supersede) that landed while the extraction
+    # ran. Residual window = this SELECT->COMMIT span; a per-row lock is the
+    # upgrade if that ever matters.
+    db.refresh(memory, ["extra_metadata"])
     _mark_processed(memory, entity_result, relation_result)
     db.commit()
 

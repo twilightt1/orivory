@@ -144,6 +144,29 @@ class Settings(BaseSettings):
     EMBED_MODEL: str = "text-embedding-3-small"
     EMBED_DIMENSIONS: int = 1536
     EMBED_BATCH_SIZE: int = 64
+    # ── Bounded local execution (P2/T1) ──────────────────────────────────────
+    # Every ASYNC embedding call runs on ONE dedicated executor of this width
+    # (thread-name prefix `orivory-embed`): it keeps the synchronous ONNX call
+    # off the event loop — the 50-document drain batch the recall barrier runs
+    # on the request path was ~674 ms of unbroken loop stall — while a bound
+    # (not the loop's default pool) keeps ORT's own threads accountable. The
+    # `*_sync` faces stay caller-threaded: their callers are already off-loop.
+    EMBED_EXECUTOR_WORKERS: int = 2
+    # ONNX Runtime intra-op threads per embedding session (T1 report C1; ruling
+    # R8(p2)). 0 = ORT's own default (one thread per core) — the value that meets
+    # the signed budgets here: a 50-intent drain ~1.1 s inside the 2.0 s RYW
+    # budget, and the recall's own query embed well inside the p95 <= 150 ms.
+    # The loop-lag guarantee comes from the OFFLOAD, not from starving intra-op:
+    # at intra_op=1 every call is ~4x slower on an M-series box (54 ms vs 13 ms
+    # for one 864-char document) and that same drain took 3.07 s — past the
+    # signed RYW budget. Set it to 1 (or fewer) only to cap oversubscription on
+    # a small machine (EMBED_EXECUTOR_WORKERS=2 concurrent embeds, each free to
+    # use every core), and re-measure RYW + recall p95 for that deploy.
+    EMBED_ORT_INTRA_OP_THREADS: int = 0
+    # Build the local embedding session during the lifespan, BEFORE the boot
+    # drain and before anything is served: a cold InferenceSession is 610-685 ms
+    # and even inside a thread it leaves C-level parse lag.
+    EMBED_WARMUP_ON_BOOT: bool = True
 
 
     JINA_API_KEY: str = ""
@@ -154,7 +177,48 @@ class Settings(BaseSettings):
     # before salience/decay modifiers. Off by default — per-deployment.
     RETRIEVAL_SEMANTIC_RERANK: bool = False
     JINA_RERANKER_MODEL: str = "jina-reranker-v2-base-multilingual"
-    JINA_RERANKER_TOP_N: int = 5
+    # Per-call CAP on the reranker's own answer, never the rerank window: the
+    # per-call `top_n` is the request's own top_k clamped to this value
+    # (ruling R4(p2)). The REQUEST carries the whole candidate pool — up to
+    # `4 x top_k` after the one bounded refill — so this cap bounds only how
+    # much comes BACK, never what is sent. The returned result count does NOT
+    # depend on it — a rerank that answers with fewer rows than it was handed
+    # is merged back into dense order (`retriever.recall`), so raising it only
+    # widens the reranked HEAD of a large top_k. Ruling R13(p2): the default
+    # (20) covers the default `top_k=10` x RETRIEVAL_RERANK_POOL_MULTIPLIER=2.0
+    # window, so one served window is never half reranked and half dense x
+    # boost x decay. Serving a larger window, raise it to `top_k x pool
+    # multiplier`; it stays a cap, and the extra ranks cost only what the
+    # opt-in rerank flag spends.
+    JINA_RERANKER_TOP_N: int = 20
+    # Rerank pool: dense candidates fetched per requested result (ruling
+    # R4(p2), signed default 2.0). One pool feeds the eligibility filter, the
+    # reranker and scoring; a pool smaller than top_k cannot satisfy the count
+    # invariant, so the effective fetch is `max(top_k, ceil(top_k * this))`.
+    RETRIEVAL_RERANK_POOL_MULTIPLIER: float = 2.0
+    # Hybrid recall (P2/T5): when ON, recall runs the SQLite FTS5 lexical leg
+    # over the same query next to the dense one and fuses the two by RRF
+    # (app/retrieval/hybrid_retriever.fuse_by_uuid). Ships OFF — only the T7
+    # ablation artifact may flip it (ruling R2(p2)). The flag gates the
+    # LEXICAL leg only: with it OFF, no lexical query is issued and the trace
+    # carries no `lexical`/`fused` counters. That is NOT a claim that the OFF
+    # path is byte-identical to the pre-P2 recall — the same release changed
+    # the dense pool (3x -> 2x) and added the bounded refill for every
+    # request, flag or no flag. The vector-outage fallback to the lexical leg
+    # is NOT gated by this flag (ruling R19): it only ever replaces the typed
+    # 503.
+    RETRIEVAL_HYBRID_ENABLED: bool = False
+    # The RRF constant `sum(1 / (k + rank + 1))` over ZERO-BASED ranks (ruling
+    # R11b(p2)). 60 is both the spec's starting value and the old document
+    # helper's default; the fused pool is ordered by this sum, never by the
+    # legs' scores (dense cosine and global BM25 are not comparable). Validated
+    # at load (>= 1): a negative k zero-divides at rank 0, and the outage
+    # fallback reads it with the hybrid flag OFF.
+    RETRIEVAL_RRF_K: int = 60
+    # Bound on ONE rerank HTTP call (ruling R11(p2)): a hung transport must not
+    # hold the recall path for the client's own 30 s default. Overrunning it is
+    # a `RerankUnavailable` — dense order continues, counted.
+    JINA_RERANKER_TIMEOUT_SECONDS: float = 10.0
     # ── Embedding backend support matrix (frozen v1.1.0) ──
     #   jina  (USE_JINA_EMBEDDINGS=true + JINA_API_KEY): SUPPORTED default
     #           for full-stack. Matches the frozen benchmark baseline.
@@ -301,6 +365,30 @@ class Settings(BaseSettings):
             raise ValueError(
                 "EVALUATOR_FAILURE_MODE must be one of: warn_only, fail_open, fail_closed"
             )
+        if self.RETRIEVAL_RRF_K < 1:
+            # `1 / (k + rank + 1)` zero-divides at rank 0 for k = -1 — and the
+            # vector-outage fallback fuses with the flag OFF, so the typo would
+            # turn the typed 503 into an unhandled 500.
+            raise ValueError("RETRIEVAL_RRF_K must be >= 1")
+        # ── The P2 numeric knobs (T1/T2/T5): each one has a domain a typo can
+        # leave silently — a 0-width embed executor raises inside the first
+        # request, a negative ORT width fails far from load, a 0 cap asks the
+        # reranker transport for zero rows on every call, a non-positive pool
+        # multiplier collapses the fetch the count invariant lives on, and a
+        # non-positive timeout turns every rerank into a failure. Refuse at
+        # load (the EMBED_BATCH_SIZE/RRF_K precedent).
+        if self.EMBED_EXECUTOR_WORKERS < 1:
+            raise ValueError("EMBED_EXECUTOR_WORKERS must be >= 1")
+        if self.EMBED_ORT_INTRA_OP_THREADS < 0:
+            raise ValueError(
+                "EMBED_ORT_INTRA_OP_THREADS must be >= 0 (0 = ONNX Runtime's own default)"
+            )
+        if self.JINA_RERANKER_TOP_N < 1:
+            raise ValueError("JINA_RERANKER_TOP_N must be >= 1")
+        if self.RETRIEVAL_RERANK_POOL_MULTIPLIER <= 0:
+            raise ValueError("RETRIEVAL_RERANK_POOL_MULTIPLIER must be > 0")
+        if self.JINA_RERANKER_TIMEOUT_SECONDS <= 0:
+            raise ValueError("JINA_RERANKER_TIMEOUT_SECONDS must be > 0")
 
     def _validate_production_settings(self) -> None:
         self._require_strong_jwt_secret()

@@ -605,7 +605,7 @@ async def _recall(env, owner, query: str, *, rerank_input=None):
         return {"rewritten_query": query, "entities": [], "reasoning": None,
                 "_fallback_used": False}
 
-    async def _rerank(_query, chunks):
+    async def _rerank(_query, chunks, *, top_n=None):
         if rerank_input is not None:
             rerank_input.extend(chunk["memory_id"] for chunk in chunks)
         return chunks

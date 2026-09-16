@@ -1263,9 +1263,15 @@ When `temporal=true`, the system orders results by temporal relevance and annota
 }
 ```
 
-#### Enhanced Recall with Multi-Hop Reasoning (v2.0)
+#### Enhanced Recall with Multi-Hop Reasoning (v2.0) — not implemented
 
-When `multi_hop=true`, the system chains across multiple memories to answer complex questions that require connecting disparate pieces of knowledge.
+> **Not implemented in this release.** The shipped
+> `POST /api/v1/memories/recall` accepts only `query`, `top_k` and
+> `include_personal_context` (`RecallRequest`), and no response carries
+> `chains` or `insights`. The sketch below is a v2.0 design note, not a
+> buildable example.
+
+The v2.0 design: with `multi_hop=true`, the system chains across multiple memories to answer complex questions that require connecting disparate pieces of knowledge.
 
 **Request:**
 
@@ -1322,6 +1328,44 @@ When `multi_hop=true`, the system chains across multiple memories to answer comp
   "total_found": 8
 }
 ```
+
+#### Recall trace (the shipped shape)
+
+Every recall answers with a `trace`. It is a contract in both directions — the
+path may only write the keys declared here, so treat them as the shape to build
+dashboards and alerts on:
+
+- **`stage_ms`** — one entry per stage that RAN, plus the declared zero-valued
+  keys the schema always carries: `context`, `queue_wait`, `rewrite_ms`,
+  `embed_ms`, `embed_compute`, `search_ms`, `hydrate_ms`, `refill`, `lexical`,
+  `rerank`, `eligibility`, `score`, `serialization`, `total`. Every key starts at
+  `0.0` except **`refill`**, which appears only when the bounded refill really
+  ran — an absent `refill` means "not needed", never "ran in 0 ms".
+- **`counts`** — per-leg candidate counts, present only for the legs that ran:
+  `dense` (the pre-filter fetch), `refill` (rows the refill ADDED),
+  `eligible` (rows that entered scoring), `reranked` (the reranked head that
+  merged), `hydrated` (see below), `returned` (the served count), plus
+  `lexical` / `fused` on the hybrid path. An absent key means the leg did not
+  run; a `0` is a measured zero.
+- **`hydrated` is the size of the hydration map at scoring**, not the result
+  count. After a rerank round the pipeline re-reads the whole MERGED pool from
+  SQL, so `hydrated` may exceed `eligible` (and always ≥ `returned`). Read it as
+  "rows the SQL layer produced for scoring".
+- **`counts.dense == 0` is ambiguous.** It is the dense leg's page size when the
+  store answered (empty index, tenant with no points, or a filter that matched
+  nothing) AND it is what an untyped store failure leaves behind (the failed leg
+  logs `search_memories failed`, and the MCP seam surfaces it as a degraded
+  leg). Do not read a lone `0` as proof of an empty index — check the store's
+  health and the logs. The typed readiness failures do not end in a trace at
+  all: they answer `503` with `embedding_contract_mismatch`,
+  `vector_unavailable` or `index_freshness_timeout`.
+- **Vector outage (SQLite):** the answer comes from the FTS5 lexical leg —
+  `counts.lexical` is set, `dense` is ABSENT (the leg never answered), and the
+  `retrieval.vector_unavailable` fallback counter increments. On a deployment
+  without a lexical index (Postgres) the outage keeps its typed `503`.
+- **Hybrid recall** (`RETRIEVAL_HYBRID_ENABLED=true`, opt-in) adds
+  `counts.lexical` and `counts.fused` and fills `stage_ms.lexical`; the default
+  OFF path is dense-only and writes none of them.
 
 ---
 

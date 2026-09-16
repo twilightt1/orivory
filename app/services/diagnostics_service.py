@@ -39,6 +39,11 @@ def build_config_summary() -> dict[str, Any]:
         "embed_model": settings.EMBED_MODEL,
         "embed_dimensions": settings.EMBED_DIMENSIONS,
         "reranker_model": settings.JINA_RERANKER_MODEL,
+        # The per-call CAP on the reranker's own answer (`min(request top_k,
+        # this)`), NOT the rerank window. The window is the retrieval pool:
+        # `top_k x RETRIEVAL_RERANK_POOL_MULTIPLIER` (2.0 by default, so 20 for
+        # the default top_k=10 — which is why the cap defaults to 20).
+        # docs/OPERATIONS_RUNBOOK.md (P2 section) spells this out for operators.
         "reranker_top_n": settings.JINA_RERANKER_TOP_N,
         "rate_limit_per_minute": settings.RATE_LIMIT_PER_MINUTE,
         "rate_limit_per_day": settings.RATE_LIMIT_PER_DAY,

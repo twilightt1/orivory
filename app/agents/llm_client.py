@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import threading
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -152,14 +153,54 @@ def get_llm_client() -> AsyncOpenAI:
 # App-wide gate on concurrent provider calls. The RAG pipeline fans out
 # (router + rewriter + N parallel graders + answer), and free-tier models
 # reject bursts with 429 — serializing through a small semaphore trades a
-# little latency for a much higher success rate.
-_llm_semaphore: asyncio.Semaphore | None = None
+# little latency for a much higher success rate. Graph extraction waits on
+# this same gate (P2/T9 fix round 1): raw extraction used to call the
+# provider directly, outside the budget.
+class _SharedSemaphore:
+    """The app-wide gate; any event loop or thread may wait on it.
+
+    ``asyncio.Semaphore`` binds to the first loop that has to wait — every
+    other loop raises "bound to a different event loop", and a waiter parked
+    on the bound loop is never woken by a ``release()`` from another loop
+    (``call_soon`` does not wake a sleeping loop). The graph builder runs one
+    ``asyncio.run()`` loop per build in a worker thread, so that wait would
+    hang the thread and its request forever. A ``threading.Semaphore`` has no
+    loop affinity: the ``LLM_MAX_CONCURRENCY`` budget stays shared.
+    """
+
+    def __init__(self, value: int) -> None:
+        self._semaphore = threading.Semaphore(max(1, value))
+
+    async def __aenter__(self) -> _SharedSemaphore:
+        if not self._semaphore.acquire(blocking=False):
+            # Wait off the loop, in the same default executor asyncio.to_thread
+            # uses (never the ORT-sized embed executor).
+            permit = asyncio.get_running_loop().run_in_executor(None, self._semaphore.acquire)
+            try:
+                await asyncio.shield(permit)
+            except BaseException:
+                # A cancelled wait leaves its thread running, and that thread
+                # will take the permit: hand it back, or the gate bleeds slots
+                # until nothing can pass.
+                permit.add_done_callback(self._hand_back)
+                raise
+        return self
+
+    async def __aexit__(self, *_exc_info: Any) -> None:
+        self._semaphore.release()
+
+    def _hand_back(self, permit: asyncio.Future) -> None:
+        if not permit.cancelled() and permit.exception() is None:
+            self._semaphore.release()
 
 
-def _get_llm_semaphore() -> asyncio.Semaphore:
+_llm_semaphore: _SharedSemaphore | None = None
+
+
+def _get_llm_semaphore() -> _SharedSemaphore:
     global _llm_semaphore
     if _llm_semaphore is None:
-        _llm_semaphore = asyncio.Semaphore(max(1, settings.LLM_MAX_CONCURRENCY))
+        _llm_semaphore = _SharedSemaphore(settings.LLM_MAX_CONCURRENCY)
     return _llm_semaphore
 
 

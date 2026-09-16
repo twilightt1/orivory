@@ -242,13 +242,46 @@ class MemoryWithScore(MemoryResponse):
 RECALL_TRACE_STAGE_KEYS = (
     "context",
     "queue_wait",
+    "rewrite_ms",
+    "embed_ms",
     "embed_compute",
+    "search_ms",
+    "hydrate_ms",
+    "refill",
     "lexical",
     "rerank",
     "eligibility",
     "score",
     "serialization",
     "total",
+)
+
+# Every declared key except `refill` starts at 0.0 (P0 design: the reserved
+# keys stay diffable across runs even when their stage was skipped). `refill`
+# is written only when the bounded refill really ran (T2/R12) — a pre-filled
+# 0.0 would claim it ran in zero time, so an absent key is the honest
+# "not needed". The four `_ms` keys are the legacy names the path has always
+# written; declaring them here is what makes them versioned, not leaked extras.
+RECALL_TRACE_ZERO_KEYS = tuple(
+    key for key in RECALL_TRACE_STAGE_KEYS if key != "refill"
+)
+
+# The per-request candidate counters (spec §7.4): how many candidates each
+# pipeline leg produced. The trace carries ONLY the legs that ran — an absent
+# key means "this leg did not run", never a fabricated zero (`0` is a measured,
+# real zero). `lexical` and `fused` are reserved for the hybrid legs (P2/T5,
+# default OFF) and stay absent until then. Declared for the contract and the
+# tests that pin it: no runtime enforcement of the key set is implemented
+# beyond the writers themselves.
+RECALL_TRACE_COUNTER_KEYS = (
+    "dense",
+    "lexical",
+    "fused",
+    "refill",
+    "eligible",
+    "reranked",
+    "hydrated",
+    "returned",
 )
 
 
@@ -265,8 +298,12 @@ class RecallTrace(BaseModel):
     half_life_days:     float = 30.0
     rewrite_skipped:    bool = False
     stage_ms:           dict[str, float] = Field(
-        default_factory=lambda: dict.fromkeys(RECALL_TRACE_STAGE_KEYS, 0.0)
+        default_factory=lambda: dict.fromkeys(RECALL_TRACE_ZERO_KEYS, 0.0)
     )
+    # Candidate counts for the legs that ran (T3): the dense pre-filter fetch,
+    # what the bounded refill added, what entered scoring, the reranked head,
+    # the rows hydrated at scoring and the served count.
+    counts:             dict[str, int] = Field(default_factory=dict)
 
 
 class RecallResponse(BaseModel):

@@ -103,13 +103,35 @@ def ensure_files() -> tuple[Path, Path]:
     return model, tok
 
 
+def _session_options():
+    """ORT session options: the intra-op dial (P2/T1, ruling R8(p2)).
+
+    ORT's default is one intra-op thread per core; with every async embedding
+    call funneled through ONE bounded executor, the session's own thread count
+    is the remaining knob (``EMBED_ORT_INTRA_OP_THREADS``). The default 0 keeps
+    ORT's choice — the fast per-call setting the signed RYW/recall budgets are
+    measured at; a positive value caps oversubscription on a small machine at
+    ~4x per-call latency (T1 report C1). The value is a setting, never a
+    contract.
+    """
+    import onnxruntime as ort
+
+    from app.config import settings
+
+    options = ort.SessionOptions()
+    options.intra_op_num_threads = settings.EMBED_ORT_INTRA_OP_THREADS
+    return options
+
+
 def _session():
     global _sess
     if _sess is None:
         import onnxruntime as ort
 
         model, _ = ensure_files()
-        _sess = ort.InferenceSession(str(model), providers=["CPUExecutionProvider"])
+        _sess = ort.InferenceSession(
+            str(model), sess_options=_session_options(), providers=["CPUExecutionProvider"]
+        )
     return _sess
 
 
@@ -168,7 +190,9 @@ def _asession():
         import onnxruntime as ort
 
         model, _ = ensure_arctic_files()
-        _asess = ort.InferenceSession(str(model), providers=["CPUExecutionProvider"])
+        _asess = ort.InferenceSession(
+            str(model), sess_options=_session_options(), providers=["CPUExecutionProvider"]
+        )
     return _asess
 
 
