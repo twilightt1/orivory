@@ -19,6 +19,7 @@ and could drift out of sync.
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 from uuid import UUID
 
@@ -82,48 +83,100 @@ def _build_memory_graph_sync(memory_id: UUID | str) -> None:
         build_memory_graph_sync(db, str(memory_id))
 
 
-async def safe_enqueue_graph_build(memory_id: UUID | str) -> None:
-    """Build the knowledge graph for a memory, off the event loop.
+# Strong references to the builds scheduled on a running loop. The loop keeps
+# only weak references to tasks, so without this set a still-running build can
+# be garbage-collected mid-flight; the done callback removes it and is also the
+# one place a BACKGROUND failure is reported (an inline failure logs at its
+# call site).
+_pending_graph_builds: set[asyncio.Task] = set()
+
+_GRAPH_BUILD_FAILED = (
+    "Memory graph build failed for %s: the memory row is committed and "
+    "unaffected, its graph is not (best-effort)"
+)
+
+
+def _log_graph_build_failure(memory_id: UUID | str, failure: BaseException) -> None:
+    log.error(_GRAPH_BUILD_FAILED, memory_id, exc_info=failure,
+              extra={"memory_id": str(memory_id)})
+
+
+def _graph_build_done(task: asyncio.Task, memory_id: UUID | str) -> None:
+    """Drops the strong ref; reports a failed build loudly, never raises."""
+    _pending_graph_builds.discard(task)
+    if task.cancelled():
+        return
+    failure = task.exception()
+    if failure is not None:
+        _log_graph_build_failure(memory_id, failure)
+
+
+def safe_enqueue_graph_build(memory_id: UUID | str) -> None:
+    """Schedule the knowledge-graph build for a memory; never blocks the write.
 
     The builder is sync-by-design — it opens its own sync session and drives
     the extraction with ``asyncio.run`` — so it must NOT run on the event loop
-    every caller here lives on: ``asyncio.run`` raises there and the best-effort
-    handler below used to swallow the ``RuntimeError``, which is why the graph
-    stayed empty for every loop-driven write path (P2/T9). Hand it to a worker
-    thread (R1(p2): stdlib ``asyncio.to_thread``, never the ORT-sized embed
-    executor).
+    every caller here lives on: ``asyncio.run`` raises there and the
+    best-effort handler used to swallow the ``RuntimeError``, which is why the
+    graph stayed empty for every loop-driven write path (P2/T9). R27(p2): the
+    write path must not WAIT for it either — extraction is an LLM call, and
+    its latency belongs to the graph, not to the request that saved the row.
 
-    Never raises — the memory row is already committed; a failure is logged at
-    ERROR, the level an operator watches, instead of disappearing.
+    * a running loop (API / MCP / connector sync): the build is scheduled as a
+      background task running in a worker thread (stdlib
+      ``asyncio.to_thread``, never the ORT-sized embed executor) and this
+      function returns immediately. The task is held in
+      ``_pending_graph_builds`` and its done callback reports failures at
+      ERROR with the traceback — a build cut off by process exit is an
+      ACCEPTED best-effort loss: the memory row is committed and the graph can
+      be rebuilt;
+    * no running loop (CLI / script / worker thread): there is nothing to
+      schedule on, so the build runs HERE, synchronously — the shape every
+      non-loop caller has always had.
+
+    This is a plain function on purpose: a coroutine-free signature means a
+    caller cannot forget the ``await`` and silently drop the build.
+
+    Cost note (accepted): each build drives its own ``asyncio.run`` loop, so
+    ``get_llm_client()`` sees a different running loop every time and abandons
+    + rebuilds the shared HTTP client for it (``app.agents.llm_client`` — see
+    the abandonment comment there). At write frequency that is one discarded
+    client per written memory; the extraction itself still passes through the
+    shared ``LLM_MAX_CONCURRENCY`` gate.
     """
     try:
-        await asyncio.to_thread(_build_memory_graph_sync, memory_id)
-    except Exception:
-        log.exception(
-            "Memory graph build failed for %s: the memory row is committed and "
-            "unaffected, its graph is not (best-effort)",
-            memory_id,
-            extra={"memory_id": str(memory_id)},
-        )
+        asyncio.get_running_loop()
+    except RuntimeError:
+        try:
+            _build_memory_graph_sync(memory_id)
+        except Exception as exc:
+            _log_graph_build_failure(memory_id, exc)
+        return
+
+    task = asyncio.create_task(asyncio.to_thread(_build_memory_graph_sync, memory_id))
+    _pending_graph_builds.add(task)
+    task.add_done_callback(functools.partial(_graph_build_done, memory_id=memory_id))
 
 
 async def index_new_memory(memory: Memory) -> bool:
     """Run the full post-persist indexing pipeline for one memory.
 
     Caller must have already committed the row. Embeds through the async
-    embedder (off the loop, P2/T1) and enqueues graph extraction. Contract
-    mismatches propagate as typed integrity failures. Use this from any async
-    path that creates or updates a ``Memory``.
+    embedder (off the loop, P2/T1) and SCHEDULES graph extraction — the write
+    returns without waiting for the build (R27(p2)): extraction is an LLM call
+    and its latency must not ride the write path. Contract mismatches
+    propagate as typed integrity failures. Use this from any async path that
+    creates or updates a ``Memory``.
 
     Returns whether the vector write landed: ``False`` means the durable
     outbox intent enqueued with the row is now the only path to the index
     (``drain_pending``), which is what ``indexing="pending"`` reports.
     """
     indexed = await safe_upsert_to_index(memory)
-    # The build is sync-by-design and drives its own ``asyncio.run``: the helper
-    # offloads it to a worker thread (P2/T9), so the loop never runs it and a
-    # failure is loud instead of silent.
-    await safe_enqueue_graph_build(memory.id)
+    # Scheduled, never awaited (R27(p2)): on a running loop the helper hands the
+    # build to a background task and reports a failure loudly from its done
+    # callback; with no loop it runs the build inline.
+    safe_enqueue_graph_build(memory.id)
     return indexed
 
 

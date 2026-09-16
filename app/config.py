@@ -179,14 +179,17 @@ class Settings(BaseSettings):
     JINA_RERANKER_MODEL: str = "jina-reranker-v2-base-multilingual"
     # Per-call CAP on the reranker's own answer, never the rerank window: the
     # per-call `top_n` is the request's own top_k clamped to this value
-    # (ruling R4(p2)). The returned result count does NOT depend on it — a
-    # rerank that answers with fewer rows than it was handed is merged back
-    # into dense order (`retriever.recall`), so raising it only widens the
-    # reranked HEAD of a large top_k. Ruling R13(p2): the default (20) covers
-    # the default `top_k=10` x RETRIEVAL_RERANK_POOL_MULTIPLIER=2.0 window, so
-    # one served window is never half reranked and half dense x boost x decay.
-    # Serving a larger window, raise it to `top_k x pool multiplier`; it stays
-    # a cap, and the extra ranks cost only what the opt-in rerank flag spends.
+    # (ruling R4(p2)). The REQUEST carries the whole candidate pool — up to
+    # `4 x top_k` after the one bounded refill — so this cap bounds only how
+    # much comes BACK, never what is sent. The returned result count does NOT
+    # depend on it — a rerank that answers with fewer rows than it was handed
+    # is merged back into dense order (`retriever.recall`), so raising it only
+    # widens the reranked HEAD of a large top_k. Ruling R13(p2): the default
+    # (20) covers the default `top_k=10` x RETRIEVAL_RERANK_POOL_MULTIPLIER=2.0
+    # window, so one served window is never half reranked and half dense x
+    # boost x decay. Serving a larger window, raise it to `top_k x pool
+    # multiplier`; it stays a cap, and the extra ranks cost only what the
+    # opt-in rerank flag spends.
     JINA_RERANKER_TOP_N: int = 20
     # Rerank pool: dense candidates fetched per requested result (ruling
     # R4(p2), signed default 2.0). One pool feeds the eligibility filter, the
@@ -196,11 +199,14 @@ class Settings(BaseSettings):
     # Hybrid recall (P2/T5): when ON, recall runs the SQLite FTS5 lexical leg
     # over the same query next to the dense one and fuses the two by RRF
     # (app/retrieval/hybrid_retriever.fuse_by_uuid). Ships OFF — only the T7
-    # ablation artifact may flip it (ruling R2(p2)) — and the OFF path stays
-    # byte-equivalent to the dense-only recall: no lexical query is issued and
-    # the trace carries no `lexical`/`fused` counters. The vector-outage
-    # fallback to the lexical leg is NOT gated by this flag (ruling R19): it
-    # only ever replaces the typed 503.
+    # ablation artifact may flip it (ruling R2(p2)). The flag gates the
+    # LEXICAL leg only: with it OFF, no lexical query is issued and the trace
+    # carries no `lexical`/`fused` counters. That is NOT a claim that the OFF
+    # path is byte-identical to the pre-P2 recall — the same release changed
+    # the dense pool (3x -> 2x) and added the bounded refill for every
+    # request, flag or no flag. The vector-outage fallback to the lexical leg
+    # is NOT gated by this flag (ruling R19): it only ever replaces the typed
+    # 503.
     RETRIEVAL_HYBRID_ENABLED: bool = False
     # The RRF constant `sum(1 / (k + rank + 1))` over ZERO-BASED ranks (ruling
     # R11b(p2)). 60 is both the spec's starting value and the old document

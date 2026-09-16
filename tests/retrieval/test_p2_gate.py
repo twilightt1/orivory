@@ -46,6 +46,11 @@ example env files carry the shipped P2 retrieval defaults (CI copies
 and the trace may only carry DECLARED keys (the P3 gate's leaked-key pin,
 re-asserted on every trace this file builds — the API's serialized body
 included).
+
+Two further pins the final fix wave attached: the erasure path leaves no FTS5
+row behind (through the real ``erase_memories``), and the signed §12.2 RSS
+budget is MEASURED here (this process' peak RSS, stdlib ``resource``) instead
+of being claimed in the runbook only.
 """
 from __future__ import annotations
 
@@ -53,7 +58,9 @@ import ast
 import asyncio
 import json
 import math
+import resource
 import sqlite3
+import sys
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
@@ -555,6 +562,50 @@ async def test_the_loop_beats_while_ingest_and_recall_run_concurrently(live, mon
     assert p99 < P99_LAG_MS, ticker.summary()
 
 
+# ══ §12.2: the signed RSS budget (≤ 1 GB peak), measured, stdlib only ═══════
+
+RSS_LIMIT_BYTES = 1024 ** 3
+
+
+def _peak_rss_bytes() -> int:
+    """Peak RSS of this process, normalized to bytes.
+
+    ``resource`` is stdlib, so no dependency is added. ``ru_maxrss`` is in
+    BYTES on macOS (this repo's dev box) and in KiB on Linux (CI): a bare
+    comparison would read 1024x too small on Linux and never catch a blowout.
+    """
+    peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return peak if sys.platform == "darwin" else peak * 1024
+
+
+async def test_the_signed_rss_budget_holds_on_the_real_stack(live, monkeypatch):
+    """The §12.2 RSS budget, asserted instead of claimed: peak RSS ≤ 1 GB.
+
+    What dominates: the ONNX embedding session (the real arctic model, when its
+    cache is present — this test must NOT download ~90 MB in CI) and the
+    embedded Qdrant client, whose local mode keeps indexes resident. Both are
+    live here: the ``live`` fixture opens the real SQLite store and the store
+    client, and the session is warmed only when the cache is warm. The peak is
+    process-wide (``ru_maxrss`` never decreases), so it covers every path this
+    run exercised, not just this test.
+    """
+    holder = _seams(monkeypatch)
+    (row,) = await _seed(live, live.alice.id, ["rss budget probe token kappa"])
+    holder["vector"] = _vector_for("rss budget probe token kappa")
+    response = await _recall(live, live.alice.id, "kappa", top_k=5)
+    assert str(row.id) in _returned(response), "the store probe served nothing"
+
+    if e5_local.arctic_files_cached():
+        await warmup_embedder()  # the cold session build is the heavy allocation
+
+    peak = _peak_rss_bytes()
+    print(f"peak RSS: {peak / 1024 ** 2:.0f} MiB (signed budget "
+          f"{RSS_LIMIT_BYTES // 1024 ** 2} MiB)")
+    assert peak <= RSS_LIMIT_BYTES, (
+        f"peak RSS {peak / 1024 ** 2:.0f} MiB exceeds the signed 1 GB budget"
+    )
+
+
 # ══ §9: FTS insert/update/rollback/delete/rebuild parity + the rollback drill ═
 
 ROLLBACK_RECIPE = """
@@ -669,6 +720,41 @@ async def test_fts_parity_across_writes_rebuild_and_the_ladder_rollback(live, tm
         assert Path(f"{copy_path}.pre-p2.bak").is_file(), "the ladder's own milestone backup"
     finally:
         await engine.dispose()
+
+
+# ══ erasure leaves nothing of the memory in the lexical index ═══════════════
+
+
+async def test_erasure_leaves_no_fts_row_behind(live):
+    """The erased memory is gone from the FTS5 index, not just from ``memories``.
+
+    The erasure path deletes the rows in SQL, so the v4 delete trigger runs with
+    it: the index must hold no row for the erased memory, the lexical leg must
+    stop serving it, and ``coverage`` must see no orphan. ``erase_memories`` is
+    the real service over the real store (vectors and all) — the row deletion
+    is the claim, not the receipt's vector bookkeeping.
+    """
+    from app.services.erasure_service import erase_memories
+
+    (row,) = await _seed(live, live.alice.id, ["erasure pin token omega"])
+    assert [hit["memory_id"] for hit in _lexical_hits(live, "omega", live.alice.id)] == [
+        str(row.id)], "the fixture's own memory is not searchable — pin would be vacuous"
+
+    async with live.sessions() as db:
+        receipt = await erase_memories(db, live.alice.id, [row.id], requested_by="rest_api")
+    assert receipt.detail["targets"][0]["status"] == "deleted"
+
+    assert _lexical_hits(live, "omega", live.alice.id) == [], "the lexical leg still serves it"
+    # The raw FTS table, not the join: the join would hide a surviving row (the
+    # canonical row is gone), while the orphan is exactly what coverage counts.
+    with live.sync_engine.connect() as conn:
+        lingering = conn.exec_driver_sql(
+            "SELECT count(*) FROM memory_fts WHERE memory_fts MATCH 'omega'"
+        ).scalar_one()
+    assert lingering == 0, "the erased memory's FTS row survived the erasure"
+    after = _coverage(live)
+    assert after["orphan"] == 0 and after["missing"] == 0
+    assert after["indexed"] == after["canonical"]
 
 
 # ══ §9: duplicate text with different UUIDs is not merged ═══════════════════
@@ -977,6 +1063,10 @@ def test_ci_runs_the_p2_gate_suites_and_the_ablation():
         "tests/retrieval/test_embedding_fingerprint.py",
         "tests/retrieval/test_vector_degradation.py",
         "tests/retrieval/test_xs_parity.py",
+        # the v4 ladder / FTS5 module — v4 IS the P2 schema step, and the
+        # final fix wave found it wired into NO step (I3); it must not silently
+        # leave again.
+        "tests/lite/test_sqlite_schema_v4.py",
         "tests/observability",
     ):
         assert module in step["run"], f"{module} is not wired into the P2 step"

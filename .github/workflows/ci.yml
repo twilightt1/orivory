@@ -111,11 +111,15 @@ jobs:
           # observability suites that had no CI step of their own before P2,
           # and the event-loop heartbeat + ablation-contract modules carry
           # their own cold-cache guards (arctic onnx cache missing → skip).
+          # tests/lite/test_sqlite_schema_v4.py — the v4 ladder/FTS5 module —
+          # is wired here because v4 IS the P2 schema step; the P3 step covers
+          # the v3 ladder, not this one.
           DATABASE_URL: sqlite+aiosqlite:////tmp/p2_ci.db
         run: |
           python -m pytest --confcutdir=tests/retrieval tests/retrieval/test_p2_gate.py tests/retrieval/test_rerank_pool.py tests/retrieval/test_hybrid_recall.py -q
           python -m pytest --confcutdir=tests/retrieval tests/retrieval/test_event_loop_responsiveness.py tests/retrieval/test_p2_ablation_contract.py -q
           python -m pytest --confcutdir=tests/retrieval tests/retrieval/test_semantic_rerank.py tests/retrieval/test_p0_final_safety.py tests/retrieval/test_retriever_filters.py tests/retrieval/test_e5_local.py tests/retrieval/test_embedding_fingerprint.py tests/retrieval/test_vector_degradation.py tests/retrieval/test_xs_parity.py tests/retrieval/test_graph_build_offload.py -q
+          python -m pytest --confcutdir=tests/lite tests/lite/test_sqlite_schema_v4.py -q
           python -m pytest --confcutdir=tests/observability tests/observability -q
 
       - name: Run P1b mean-vs-CLS ablation (evidence artifact, never a gate)

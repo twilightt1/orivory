@@ -270,7 +270,9 @@ RECALL_TRACE_ZERO_KEYS = tuple(
 # pipeline leg produced. The trace carries ONLY the legs that ran — an absent
 # key means "this leg did not run", never a fabricated zero (`0` is a measured,
 # real zero). `lexical` and `fused` are reserved for the hybrid legs (P2/T5,
-# default OFF) and stay absent until then.
+# default OFF) and stay absent until then. Declared for the contract and the
+# tests that pin it: no runtime enforcement of the key set is implemented
+# beyond the writers themselves.
 RECALL_TRACE_COUNTER_KEYS = (
     "dense",
     "lexical",

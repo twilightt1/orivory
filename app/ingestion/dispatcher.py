@@ -146,9 +146,10 @@ class SourceSyncService:
                 # Indexed now: ack the intent this batch committed, so a boot
                 # drain does not re-embed it.
                 await mark_done(self.db, entity_id=memory.id, revision=memory.revision)
-            # Off the loop, on the loop's behalf (P2/T9): the helper hands the
-            # sync builder to a worker thread and never raises.
-            await safe_enqueue_graph_build(memory.id)
+            # Scheduled, never awaited (R27(p2)): on this loop the sync helper
+            # hands the build to a background task (a cut-off build is an
+            # accepted best-effort loss; failures log at ERROR) and never raises.
+            safe_enqueue_graph_build(memory.id)
 
     # ── internals ────────────────────────────────────────────────────────────
 

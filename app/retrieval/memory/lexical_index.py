@@ -113,6 +113,11 @@ class LexicalUnavailable(RuntimeError):
     gets one. The caller (recall's lexical leg / the vector-outage fallback)
     counts this and answers without the lexical leg — it must never be
     translated into an empty result set, which reads as "nothing matched".
+
+    Declared for callers and tests: no production raise site of its own, since
+    every serving path gates on :func:`is_available` / the dialect first — the
+    raise in :func:`search` / :func:`rebuild` is a contract guard, not a path
+    an operator can reach.
     """
 
 

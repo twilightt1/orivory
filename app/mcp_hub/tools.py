@@ -220,11 +220,14 @@ async def search_memory(query: str, limit: int = 8, include_history: bool = Fals
 
     Ranking is the shared recall's (ruling R22(p2)): the caller's tenant, the
     same dense/hybrid/lexical semantics as the API, inherited from the
-    deployment's flags. ``include_history`` widens to superseded rows here;
-    with the recall path down (freshness barrier, vector outage) or a leg
-    degraded (embed outage, store failure), the answer falls back to the SQL
-    ordering instead of failing or reading as an empty match (rulings
-    R23(p2)/R25(p2)).
+    deployment's flags. That ranking runs with superseded rows ELIGIBLE
+    (``recall_ids`` passes ``include_superseded=True``) while this tool drops
+    them at hydration unless ``include_history`` is set — so a superseded row
+    can occupy one of the capped window's slots and leave fewer than ``limit``
+    current rows in the answer. With the recall path down (freshness barrier,
+    vector outage) or a leg degraded (embed outage, store failure), the answer
+    falls back to the SQL ordering instead of failing or reading as an empty
+    match (rulings R23(p2)/R25(p2)).
     """
     principal = _current_principal()
     if principal is None:

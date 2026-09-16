@@ -87,6 +87,9 @@ async def build_memory_graph(
     relation_result = await extract_relations(memory, entities)
     relation_stats = await _persist_relations_async(db, memory, relation_result.relations, entity_by_key)
 
+    # R27(p2): merge the processed marker into a FRESH read — same reason as
+    # the sync face below (a concurrent supersede must not be clobbered).
+    await db.refresh(memory, ["extra_metadata"])
     _mark_processed(memory, entity_result, relation_result)
     await db.commit()
 
@@ -122,7 +125,7 @@ def _run_extraction(coro):
     raise RuntimeError(
         "build_memory_graph_sync() cannot run on a running event loop: it "
         "drives asyncio.run() internally. Offload it with asyncio.to_thread "
-        "(write_back.safe_enqueue_graph_build already does)."
+        "(write_back.safe_enqueue_graph_build schedules it that way)."
     )
 
 
@@ -135,8 +138,9 @@ def build_memory_graph_sync(
     """Synchronous builder for off-loop callers.
 
     Used from CLI/script contexts and from worker threads
-    (``write_back.safe_enqueue_graph_build`` hands it to ``asyncio.to_thread``);
-    never from a running event loop — see ``_run_extraction``.
+    (``write_back.safe_enqueue_graph_build`` schedules it there via
+    ``asyncio.to_thread`` when a loop is running, and calls it inline when
+    none is); never from a running event loop — see ``_run_extraction``.
     """
     memory = db.get(Memory, memory_id)
     if memory is None:
@@ -168,6 +172,13 @@ def build_memory_graph_sync(
     relation_result = _run_extraction(extract_relations(memory, entities))
     relation_stats = _persist_relations_sync(db, memory, relation_result.relations, entity_by_key)
 
+    # R27(p2): the write path no longer serializes this build against later
+    # writes to the SAME row, so the processed marker is merged into a FRESH
+    # read of the metadata: the snapshot loaded at extraction time would
+    # clobber a ``cm_*`` marker (a supersede) that landed while the extraction
+    # ran. Residual window = this SELECT->COMMIT span; a per-row lock is the
+    # upgrade if that ever matters.
+    db.refresh(memory, ["extra_metadata"])
     _mark_processed(memory, entity_result, relation_result)
     db.commit()
 

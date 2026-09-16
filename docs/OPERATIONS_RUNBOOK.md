@@ -266,11 +266,29 @@ curl -fsS -H "Authorization: Bearer $ADMIN_ACCESS_TOKEN" \
   index_freshness_timeout` is the accepted shape (ruling R9) — clients retry.
   Recall **p95 <= 150 ms** at fixture scale, asserted by the P3 gate
   (`tests/retrieval/test_p3_gate.py`, `LATENCY_P95_MS`) — the P2 gate asserts
-  the §9 retrieval row, not a latency budget. RSS
-  <= 1 GB is measured, not gated (a P5 item). The embed executor
-  (`EMBED_EXECUTOR_WORKERS`, default 2) is the loop-lag lever; ORT's
+  the §9 retrieval row, not a latency budget. RSS **<= 1 GB** is asserted as
+  the P2 gate process' peak RSS, stdlib only
+  (`tests/retrieval/test_p2_gate.py`, `resource.getrusage`), where the real
+  embedding session + the embedded Qdrant dominate the number. The embed
+  executor (`EMBED_EXECUTOR_WORKERS`, default 2) is the loop-lag lever; ORT's
   `EMBED_ORT_INTRA_OP_THREADS` is the oversubscription dial (0 = ORT default,
   set 1 only to cap a small machine — and re-measure, it costs ~4x).
+  **The p95 and the 2.0 s RYW tests are asserted only where the arctic ONNX
+  cache is warm and are SKIPPED cold** (the suite refuses to download ~90 MB in
+  CI), so the committed evidence for those numbers is a LOCAL run — the
+  artifact and the task reports, not a CI green.
+- **The shared LLM gate parks its waiters in the loop's default executor.**
+  `llm_client._SharedSemaphore` (the `LLM_MAX_CONCURRENCY` budget) waits with
+  `run_in_executor(None, ...)` — the same default pool `asyncio.to_thread`
+  uses for uploads, reindex and the graph builds. The pool holds
+  `min(32, cpu_count + 4)` threads: on a 16-core box that is ~17+ contended
+  waits (pool size minus the permits in flight) before unrelated `to_thread`
+  work queues behind them. A dedicated wait-executor is the upgrade if that
+  ceiling is ever reached; today the budget (`LLM_MAX_CONCURRENCY`, default 3)
+  stays far below it. Known latent issue, deliberately NOT fixed here:
+  `llm_client.complete()` re-acquires the same gate for its
+  structured-outputs retry while still holding it (line 286 -> 304), so a
+  saturated budget can deadlock the callers that all need the second permit.
 
 ### The lexical index, erasure and disk
 

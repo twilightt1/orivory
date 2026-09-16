@@ -142,16 +142,12 @@ The exit code propagates; pull request is blocked on regression.
 
 ## Prompt A/B testing
 
-```bash
-# 1. Register a new variant (edit app/agents/prompts/versions.py)
-# 2. Run a sweep
-.venv/Scripts/python scripts/eval_experiments.py \
-    --experiment router_compare \
-    --variants router_v1,router_v2
-```
-
-Output: `eval/experiments/router_compare_comparison.md` with
-side-by-side metrics.
+Not implemented in this release: there is no versioned-prompt registry
+(`app/agents/prompts/versions.py`) and no `scripts/eval_experiments.py`
+sweeper in this repo. Prompts are module-level constants inside the module that
+uses them — there is no registry and no A/B script
+(see [RAG_TECHNIQUES.md](RAG_TECHNIQUES.md) §10). A prompt variant is a code
+change, and evaluating it is an eval run (above).
 
 ## Benchmarks (memory hub)
 

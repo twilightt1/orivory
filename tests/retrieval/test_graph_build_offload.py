@@ -18,6 +18,14 @@ the LLM provider (``app.graph.extraction._get_client`` — it raises in the
 graph-build tests, so extraction takes its offline fallback, and it counts
 in-flight creates in the concurrency test) and the embed leg (T1 owns that one,
 with the real embedder, in ``test_event_loop_responsiveness.py``).
+
+R27(p2) took the last ``await`` off the write path: ``safe_enqueue_graph_build``
+is a plain function now — on a running loop it SCHEDULES the build as a
+background task (``asyncio.to_thread`` held in a strong-ref set, failures
+reported by the done callback), so the write returns immediately; with no loop
+it still runs the build inline. ``_settle_graph_builds`` below is how a test
+waits for those background builds; a build cut off at process exit is an
+accepted best-effort loss.
 """
 from __future__ import annotations
 
@@ -115,12 +123,25 @@ def _graph_state(memory_id) -> tuple[dict, int, int, int]:
         return dict(row.extra_metadata or {}), len(entities), len(links), len(relations)
 
 
+async def _settle_graph_builds() -> None:
+    """Wait for every graph build the write paths scheduled on THIS loop.
+
+    The write path no longer awaits the build (R27(p2)), so a test that asserts
+    on graph state must drain the helper's own strong-ref set first — exactly
+    the tasks the production loop would be running.
+    """
+    while write_back._pending_graph_builds:
+        await asyncio.gather(*tuple(write_back._pending_graph_builds),
+                             return_exceptions=True)
+
+
 async def test_api_and_mcp_write_path_builds_the_graph_off_the_loop(store):
     """The API/MCP path (``index_new_memory``): graph built, and not on the loop."""
     _user_id, memory_id = await _seed_memory(store)
     async with store.sessions() as db:
         memory = await db.get(Memory, memory_id)
         assert await write_back.index_new_memory(memory) is True  # embed leg landed
+    await _settle_graph_builds()
 
     metadata, entities, links, relations = _graph_state(memory_id)
     assert metadata.get("graph_extracted_at"), "graph build never ran on the API/MCP path"
@@ -139,6 +160,7 @@ async def test_connector_sync_write_path_builds_the_graph(store):
     async with store.sessions() as db:
         service = SourceSyncService(db)
         await service._index_memories([str(memory_id)], user_id=user_id)
+    await _settle_graph_builds()
 
     metadata, entities, links, relations = _graph_state(memory_id)
     assert metadata.get("graph_extracted_at"), "graph build never ran on the sync path"
@@ -164,8 +186,59 @@ async def test_the_sync_builder_refuses_a_running_loop_with_the_fix(store):
     assert not leaks, f"the refused coroutine was never awaited: {leaks}"
 
 
+async def test_the_write_returns_while_a_slow_build_is_still_in_flight(store, monkeypatch):
+    """R27(p2): the write path never waits for the extraction.
+
+    The fake build blocks on an Event this test controls, so the assertion is
+    not "the write was fast" but "the build was STILL RUNNING when the write
+    returned" — the exact shape a slow (free-tier) provider produces.
+    """
+    _user_id, memory_id = await _seed_memory(store)
+    started, release, finished = threading.Event(), threading.Event(), threading.Event()
+
+    def _slow_build(_db, _memory_id):
+        started.set()
+        release.wait(5)
+        finished.set()
+
+    monkeypatch.setattr("app.graph.builder.build_memory_graph_sync", _slow_build)
+
+    async with store.sessions() as db:
+        memory = await db.get(Memory, memory_id)
+        assert await write_back.index_new_memory(memory) is True
+
+    assert not finished.is_set(), "the write path waited for the graph build"
+    assert await asyncio.to_thread(started.wait, 5), "the build never started"
+    release.set()
+    await _settle_graph_builds()
+    assert finished.is_set(), "the released build never landed"
+
+
+async def test_no_loop_context_runs_the_build_inline(store):
+    """R27(p2): without a running loop (CLI / script / worker) nothing is scheduled.
+
+    A worker thread has no loop to schedule on, so the helper keeps its
+    historical synchronous shape: when the thread returns, the graph is built
+    and nothing is left pending.
+    """
+    _user_id, memory_id = await _seed_memory(store)
+
+    await asyncio.to_thread(write_back.safe_enqueue_graph_build, memory_id)
+
+    assert not write_back._pending_graph_builds, (
+        "the no-loop path scheduled a task instead of running the build"
+    )
+    metadata, entities, links, relations = _graph_state(memory_id)
+    assert metadata.get("graph_extracted_at"), "the inline build never ran"
+    assert entities >= 1 and links >= 1 and relations >= 1
+
+
 async def test_graph_failure_is_loud_and_never_fails_the_write(store, monkeypatch, caplog):
-    """A failed graph build keeps the write alive and reaches the operator."""
+    """A failed background graph build keeps the write alive and reaches the operator.
+
+    The write path does not await the build (R27(p2)), so the ERROR must come
+    from the task's own done callback — and it must carry the traceback.
+    """
     _user_id, memory_id = await _seed_memory(store)
 
     def boom(*_args, **_kwargs):
@@ -176,6 +249,7 @@ async def test_graph_failure_is_loud_and_never_fails_the_write(store, monkeypatc
         memory = await db.get(Memory, memory_id)
         with caplog.at_level(logging.ERROR, logger="app.retrieval.memory.write_back"):
             assert await write_back.index_new_memory(memory) is True  # never fails the write
+            await _settle_graph_builds()
 
     loud = [
         record for record in caplog.records
@@ -190,13 +264,13 @@ async def test_graph_failure_is_loud_and_never_fails_the_write(store, monkeypatc
 async def test_concurrent_syncs_never_exceed_the_llm_concurrency_limit(store, monkeypatch):
     """N>limit memories synced at once: the shared gate caps the provider burst.
 
-    The connector-sync path awaits one full extraction per synced memory inside
-    ``POST /sources/{id}/sync``, and extraction used to call
+    The connector-sync path SCHEDULES one full extraction per synced memory
+    (the write no longer awaits it, R27(p2)) and extraction used to call
     ``chat.completions.create`` outside ``LLM_MAX_CONCURRENCY`` entirely
     (P2/T9 fix round 1, I1: the gate only wrapped ``complete()`` /
     ``complete_stream()``). The write path is exercised for real; the only fake
     is the provider, and its counting create must never see more calls in
-    flight than the gate allows.
+    flight than the gate allows — background scheduling must not burst it.
     """
     limit = 2
     monkeypatch.setattr(settings, "LLM_MAX_CONCURRENCY", limit)
@@ -240,6 +314,9 @@ async def test_concurrent_syncs_never_exceed_the_llm_concurrency_limit(store, mo
             await SourceSyncService(db)._index_memories([str(memory_id)], user_id=user_id)
 
     await asyncio.gather(*(_sync(user_id, memory_id) for user_id, memory_id in seeds))
+    # The writes no longer await the builds (R27(p2)): drain the scheduled
+    # tasks so the peak/landing assertions describe the completed work.
+    await _settle_graph_builds()
 
     assert state["peak"] <= limit, (
         f"extraction burst the provider: {state['peak']} concurrent creates "

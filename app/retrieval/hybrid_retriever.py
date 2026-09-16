@@ -5,11 +5,11 @@ from collections import defaultdict
 def reciprocal_rank_fusion(result_lists: list[list[dict]], k: int = 60) -> list[dict]:
     """Fuse ranked result lists with Reciprocal Rank Fusion.
 
-    Document-path helper, kept for its callers and as the RRF reference: it
-    dedupes by ``parent_id`` or an md5 of the content. That rule is FORBIDDEN
-    for memory retrieval (§7.4 / ruling R11b(p2)) — two memory facts can carry
-    the same text and are distinct — which is why memory recall fuses through
-    :func:`fuse_by_uuid` instead of this function.
+    Document-path reference; no shipped caller in this release, and kept as the
+    RRF reference: it dedupes by ``parent_id`` or an md5 of the content. That
+    rule is FORBIDDEN for memory retrieval (§7.4 / ruling R11b(p2)) — two
+    memory facts can carry the same text and are distinct — which is why
+    memory recall fuses through :func:`fuse_by_uuid` instead of this function.
 
     Each fused doc carries a stable ``id`` (parent id, or a content hash when
     the retriever provides no parent) so downstream consumers (CRAG grading,

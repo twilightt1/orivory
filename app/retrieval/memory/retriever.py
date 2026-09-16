@@ -330,8 +330,16 @@ class MemoryRetriever:
             else:
                 if lexical_rows is None:
                     # No FTS on this deployment (R3(p2)): the leg never ran,
-                    # so it writes no counter and no stage ms (C3).
-                    log.info("hybrid recall without a lexical index — dense-only")
+                    # so it writes no counter and no stage ms (C3). WARNING,
+                    # not INFO: the flag is ON and this deployment silently
+                    # serves dense-only for every recall — deliberate, but an
+                    # operator must be able to see the no-op without raising
+                    # the log level.
+                    log.warning(
+                        "hybrid recall without a lexical index (FTS5 is "
+                        "SQLite-only) — dense-only answers; "
+                        "RETRIEVAL_HYBRID_ENABLED is a no-op here"
+                    )
                 else:
                     stage_ms["lexical"] = (time.perf_counter() - t_lexical) * 1000.0
                     counts["lexical"] = len(lexical_rows)
