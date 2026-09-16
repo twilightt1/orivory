@@ -69,7 +69,7 @@ from app.retrieval.embedding_fingerprint import (
     ARCTIC_CLS_FINGERPRINT,
     generation_name,
 )
-from app.retrieval.memory import freshness, outbox, vector_store
+from app.retrieval.memory import freshness, namespaces, outbox, vector_store
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CLI_PATH = REPO_ROOT / "scripts" / "migrate_qdrant.py"
@@ -560,7 +560,8 @@ async def test_tenant_injection_is_refused_and_cannot_reach_another_owner(live):
 
     # (a) search: a where-clause that names the tenant is REFUSED outright.
     with pytest.raises(ValueError, match="authenticated principal"):
-        build_filter(str(live.alice.id), {"user_id": str(live.bob.id)})
+        build_filter(str(live.alice.id), {"user_id": str(live.bob.id)},
+                     namespace=namespaces.PERSONAL)
     with pytest.raises(ValueError, match="authenticated principal"):
         await vector_store.search_memories(
             _vector_for("bob current"), user_id=str(live.alice.id), top_k=5,

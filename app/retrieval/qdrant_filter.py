@@ -7,9 +7,17 @@ ONE place the tenant clause is built: it is always ``must[0]``, and a caller's
 the one-operator-per-field rule and the error types match the Chroma-era
 ``_build_user_filter`` the API grew around — only the native shape changed.
 
+The memory family carries a SECOND boundary beside the tenant: the namespace
+(``build_filter``'s required ``namespace``). It is the only place that shape is
+spelled (ruling R32(p4a)): ``should[match(namespace)]`` — plus
+``is_empty(namespace)`` when the namespace asked for is ``personal``, because a
+point written before the payload key existed IS personal (a bare ``must`` match
+would empty recall until every point was rewritten). Being a top-level
+``should`` it is ANDed with ``must``, so it can only narrow.
+
 The chunk family (one collection per generation, payload-filtered) gets its own
 builder beside it (ruling R14): tenant first, conversation AND — never a
-collection per conversation.
+collection per conversation. Chunks have no namespace in P4a.
 
 A value that is not an operator object means ``$eq``; ``$ne``/``$nin`` are
 exclusions, so they land in ``must_not`` (a point whose field is absent never
@@ -22,6 +30,8 @@ from typing import Any
 
 from qdrant_client import models as qm
 
+from app.retrieval.memory.namespaces import PERSONAL
+
 # The payload fields a caller may filter on. ``user_id`` is deliberately
 # absent: it belongs to the authenticated principal, not to the caller.
 ALLOWED_FIELDS = frozenset({"source_type", "captured_at", "salience", "pinned", "tags"})
@@ -33,12 +43,29 @@ _RANGE_OPERATORS = frozenset({"$gt", "$gte", "$lt", "$lte"})
 _EXCLUSIONS = frozenset({"$ne", "$nin"})
 
 
-def build_filter(user_id: str, where: dict[str, Any] | None = None) -> qm.Filter:
-    """The immutable tenant clause AND the caller's validated filters."""
+def build_filter(
+    user_id: str, where: dict[str, Any] | None = None, *, namespace: str
+) -> qm.Filter:
+    """The immutable tenant clause, the namespace boundary, the caller's filters.
+
+    ``namespace`` is REQUIRED, exactly like the tenant: both are boundaries of
+    the authenticated principal, never of the caller (a caller's ``where`` can
+    name neither). A missing/empty value is refused here rather than widened
+    into a filter that reads across the boundary — see :func:`_namespace_should`
+    for the one shape a namespace filter takes (R32(p4a)).
+    """
+    if namespace is None or not str(namespace).strip():
+        raise ValueError(
+            "memory filters need a namespace: it is an authorization boundary, "
+            "like user_id — there is no unscoped form"
+        )
     must: list[Any] = [_match("user_id", "$eq", user_id)]
     must_not: list[Any] = []
+    # ANDed with `must` (Qdrant semantics): the cluster can only narrow what
+    # the tenant clause allows, never widen it.
+    should = _namespace_should(namespace)
     if where is None:
-        return qm.Filter(must=must)
+        return qm.Filter(must=must, should=should)
     if not isinstance(where, dict):
         raise ValueError("memory filters must be an object")
 
@@ -50,7 +77,26 @@ def build_filter(user_id: str, where: dict[str, Any] | None = None) -> qm.Filter
         operator, operand = _operator(key, value)
         bucket = must_not if operator in _EXCLUSIONS else must
         bucket.append(_condition(key, operator, operand))
-    return qm.Filter(must=must, must_not=must_not or None)
+    return qm.Filter(must=must, should=should, must_not=must_not or None)
+
+
+def _namespace_should(namespace: str) -> list[Any]:
+    """``namespace == ns`` OR (for ``personal``) the key is ABSENT — R32(p4a).
+
+    A point written before P4a carries no ``namespace`` key and IS ``personal``:
+    the P4a ladder backfilled the SQL column, but vectors are not reindexed here
+    (the next write of a point adds the key), so a bare ``must`` match would
+    silently empty recall. ``IsEmptyCondition`` is that "absent means personal"
+    branch — and it is the spelling of ONE namespace, so it only joins a query
+    for that namespace: any other namespace must not inherit pre-P4 points it
+    does not own. (P4b deletes the branch outright when sharing lands, because
+    from then on a missing key is UNKNOWN, and unknown must not read as
+    personal — that would be the leak, not the fix.)
+    """
+    conditions: list[Any] = [_match("namespace", "$eq", namespace)]
+    if namespace == PERSONAL:
+        conditions.append(qm.IsEmptyCondition(is_empty=qm.PayloadField(key="namespace")))
+    return conditions
 
 
 def build_chunk_filter(

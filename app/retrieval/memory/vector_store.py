@@ -2,9 +2,11 @@
 
 One PHYSICAL collection per generation, named by the ``index_generations``
 manifest — the cutover is a pointer flip, never a data copy — with a
-``user_id`` payload filter inside it: that filter is the security boundary, so
-the tenant clause is built once, in :mod:`app.retrieval.qdrant_filter`, and a
-caller's ``where`` can never widen it.
+``user_id`` + ``namespace`` payload filter inside it: those filters are the
+security boundary, so the tenant and namespace clauses are built once, in
+:mod:`app.retrieval.qdrant_filter`, and a caller's ``where`` can never widen
+them. The payload carries the same ``namespace`` key beside ``user_id`` (R32:
+a point that predates the key is ``personal``).
 
 Every operation verifies the generation's contract before it touches data
 (:func:`app.retrieval.embedder.check_generation_contract`): the collection's
@@ -37,6 +39,7 @@ from app.retrieval.embedding_fingerprint import (
     current_fingerprint,
     fingerprint_generation,
 )
+from app.retrieval.memory.namespaces import namespace_of, personal_namespace
 from app.retrieval.qdrant_filter import build_filter
 from app.retrieval.vector_retriever import VectorUnavailableError
 
@@ -82,6 +85,15 @@ def _memory_to_metadata(memory: Memory, *, embedding_dim: int | None = None) -> 
     does not match, which is exactly "unknown"), and the payload never carries
     a null for a consumer to re-interpret. The user's ``extra_metadata`` is
     deliberately not copied into the index payload.
+
+    ``namespace`` is the second authorization boundary beside ``user_id`` and
+    always present: it comes from the ROW being written, through
+    ``namespaces.namespace_of`` (the one spelling), never from a caller. That
+    helper reads the attribute off the loaded row and treats a FALSY value
+    (``None`` — a detached, never-flushed object — or ``''``) as ``personal``:
+    the column is NOT NULL with a ``personal`` server default, so a value read
+    back from SQL is never falsy; the branch exists for pre-P4/detached objects
+    only, and R32(p4a) makes the same call for a point that predates the key.
     """
     # Local import: correction -> outbox -> this module is a real cycle.
     from app.retrieval.memory.correction import state_of
@@ -92,6 +104,7 @@ def _memory_to_metadata(memory: Memory, *, embedding_dim: int | None = None) -> 
         "kind": KIND_MEMORY,
         "user_id": str(memory.user_id),
         "memory_id": str(memory.id),
+        "namespace": namespace_of(memory),
         # Derived from the ONE lifecycle authority (correction.state_of, the
         # Python rule app.retrieval.memory.visibility mirrors in SQL): a
         # dirty/superseded row must be identifiable from the payload itself.
@@ -395,16 +408,24 @@ async def search_memories(
     user_id: str,
     top_k: int = 10,
     where: dict[str, Any] | None = None,
+    namespace: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Vector search restricted to a single user.
+    """Vector search restricted to a single user AND one namespace.
 
     Returns a list of dicts, best first:
         {memory_id, content, score, metadata, rank, source="vector"}
 
     ``score`` is the cosine SIMILARITY the store reports (never ``1 - dist``),
     and the list is sorted by ``(-score, memory_id)`` so equal scores have a
-    stable, reproducible order. The tenant clause is applied by the store's
-    own filter builder; ``where`` can only narrow it.
+    stable, reproducible order. The tenant and namespace boundaries are applied
+    by the store's own filter builder; ``where`` can only narrow them.
+
+    ``namespace`` defaults to the caller's OWN namespace via
+    ``namespaces.personal_namespace`` — the P4a truth (one namespace, and a
+    user's rows live in it), resolved through the authority rather than a
+    literal here. A caller that knows the authorized namespace passes it
+    explicitly; the default only ever narrows to the caller's own, so a missing
+    argument can never widen a read.
 
     Raises :class:`VectorUnavailableError` when the generation cannot be
     acquired, or when the ``count``/``query`` calls themselves fail — a vector
@@ -412,7 +433,9 @@ async def search_memories(
     :class:`EmbeddingDimensionMismatch` on a contract mismatch. Only a
     genuinely empty generation (or a query matching nothing) yields ``[]``.
     """
-    user_filter = build_filter(user_id, where)
+    if namespace is None:
+        namespace = personal_namespace(user_id)
+    user_filter = build_filter(user_id, where, namespace=namespace)
     try:
         # The read path opens the generation at the CONTRACT dim (the active
         # fingerprint), never the query's: a wrong-dim query must fail the

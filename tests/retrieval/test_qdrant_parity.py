@@ -43,13 +43,16 @@ from app.retrieval.embedding_fingerprint import (
     canonical_fingerprint,
     fingerprint_generation,
 )
-from app.retrieval.memory import correction, outbox, vector_store
+from app.retrieval.memory import correction, namespaces, outbox, vector_store
 from app.retrieval.qdrant_filter import build_filter
 
 DIM = 8
 GEN_DB = "parity.sqlite"
 OTHER_GENERATION = "orivory_memories__othergen"
 COLLECTION_NAME_FALLBACK = vector_store.COLLECTION_NAME
+# The second namespace P4b will bring: never derivable from client input in P4a,
+# so the tests that need a row outside the caller's namespace seed it directly.
+TEAM = "team"
 # The embedding contract this suite pins (the ambient settings must not decide
 # it: the same tests have to hold on a 384-dim lite install and a 1536-dim
 # OpenAI one).
@@ -237,6 +240,9 @@ def _memory(owner_id: uuid.UUID, *, content: str = "body", **overrides) -> Memor
         "indexed_at": datetime(2026, 1, 1, 12, 0, tzinfo=UTC),
         "revision": 1,
         "extra_metadata": {},
+        # Stamped explicitly, like the API's writer — never leaning on the
+        # column's server default (see tests/retrieval/test_namespace_acl.py).
+        "namespace": namespaces.PERSONAL,
     }
     values.update(overrides)
     return Memory(**values)
@@ -278,6 +284,7 @@ async def test_upsert_writes_the_memory_payload_contract(env, owner):
     assert payload["kind"] == "memory"
     assert payload["user_id"] == str(memory.user_id)
     assert payload["memory_id"] == str(memory.id)
+    assert payload["namespace"] == namespaces.PERSONAL
     assert payload["orivory_memory_revision"] == 7
     assert payload["orivory_embed_fingerprint"] == canonical
     assert payload["orivory_embed_generation"] == fingerprint_generation(canonical)
@@ -316,6 +323,110 @@ async def test_visibility_state_labels_every_state(env, owner):
     # The vector payload is written, never read back as a source of truth: the
     # store still returns the document text it wrote.
     assert (await _payload(current.id))["content"] == "Title: Note\ncurrent"
+
+
+# ── namespace: the payload, both legs and the drain (P4a) ───────────────────
+
+
+async def test_two_namespaces_one_text_are_two_facts(env, owner):
+    """Same tenant, same text, two namespaces: neither read sees the other.
+
+    Identical text means identical vectors, so nothing but the namespace clause
+    can tell the two points apart — and the payloads say which is which.
+    """
+    personal = _memory(owner, content="same body")
+    team = _memory(owner, content="same body", namespace=TEAM)
+    await _store(env, [personal, team])
+    vector_store.upsert_memories_sync([personal, team])
+
+    query = _vector_for(vector_store._memory_to_document(personal))
+    mine = await vector_store.search_memories(query, user_id=str(owner), top_k=10)
+    theirs = await vector_store.search_memories(
+        query, user_id=str(owner), top_k=10, namespace=TEAM
+    )
+
+    assert [hit["memory_id"] for hit in mine] == [str(personal.id)]
+    assert [hit["memory_id"] for hit in theirs] == [str(team.id)]
+    assert (await _payload(personal.id))["namespace"] == namespaces.PERSONAL
+    assert (await _payload(team.id))["namespace"] == TEAM
+
+
+async def test_r32_a_point_without_the_namespace_key_is_personal(env, owner):
+    """R32(p4a): the three cases, on real points.
+
+    ``personal`` is recalled; ``team`` is not; a point written BEFORE the key
+    existed is recalled as personal — a bare ``must`` match on ``namespace``
+    would have made every pre-P4 install answer with an empty recall until a
+    full reindex (the payload key is added by the next write, not by a backfill).
+    """
+    personal = _memory(owner, content="modern")
+    team = _memory(owner, content="team fact", namespace=TEAM)
+    legacy = _memory(owner, content="legacy")  # its POINT predates the key
+    await _store(env, [personal, team, legacy])
+    vector_store.upsert_memories_sync([personal, team])
+
+    client = vector_backend.get_sync_client()
+    client.upsert(
+        collection_name=await _active_name(),
+        points=[
+            qm.PointStruct(
+                id=str(legacy.id),
+                vector=_vector_for(vector_store._memory_to_document(legacy)),
+                # A P0/P1a payload verbatim: no `namespace` key at all.
+                payload={"kind": "memory", "user_id": str(owner), "memory_id": str(legacy.id)},
+            )
+        ],
+    )
+    assert "namespace" not in await _payload(legacy.id), "the fixture must stay key-less"
+
+    query = _vector_for(vector_store._memory_to_document(personal))
+    mine = await vector_store.search_memories(query, user_id=str(owner), top_k=10)
+    theirs = await vector_store.search_memories(
+        query, user_id=str(owner), top_k=10, namespace=TEAM
+    )
+
+    assert {hit["memory_id"] for hit in mine} == {str(personal.id), str(legacy.id)}
+    assert [hit["memory_id"] for hit in theirs] == [str(team.id)]
+
+
+async def test_the_drain_lands_the_rows_own_namespace(env, owner):
+    """The applier re-reads the row, so the payload carries THAT row's namespace.
+
+    Nothing namespace-shaped rides the intent (``_upsert_values`` parks no second
+    copy of an authorization boundary on the record): the row is re-read at apply
+    time and the payload is written from it, so a point this path writes never
+    needs R32's "missing key means personal" branch. A delete intent takes its
+    own point and leaves the other namespace's point alone.
+    """
+    personal = _memory(owner, content="drained body")
+    team = _memory(owner, content="drained body", namespace=TEAM)
+    await _store(env, [personal, team])
+    async with env() as db:
+        for memory in (await db.execute(select(Memory))).scalars().all():
+            outbox.bump_revision(memory)  # the bump and the intent, one commit
+            await outbox.enqueue_upsert(db, memory)
+        await db.commit()
+
+    assert await outbox.drain_pending() == {
+        "claimed": 2, "applied": 2, "skipped": 0, "blocked": 0, "failed": 0
+    }
+    assert (await _payload(personal.id))["namespace"] == namespaces.PERSONAL
+    assert (await _payload(team.id))["namespace"] == TEAM
+
+    query = _vector_for(vector_store._memory_to_document(personal))
+    hits = await vector_store.search_memories(query, user_id=str(owner), top_k=10)
+    assert [hit["memory_id"] for hit in hits] == [str(personal.id)]
+
+    async with env() as db:
+        row = await db.get(Memory, team.id)
+        await outbox.enqueue_delete(
+            db, entity_id=row.id.hex, tenant_id=row.user_id.hex,
+            revision=outbox.bump_revision(row),
+        )
+        await db.commit()
+    assert (await outbox.drain_pending())["applied"] == 1
+    assert await vector_store.get_memory_ids_present([str(team.id)]) == set()
+    assert await vector_store.get_memory_ids_present([str(personal.id)]) == {str(personal.id)}
 
 
 # ── recall parity against a numpy reference ─────────────────────────────────
@@ -473,32 +584,72 @@ async def test_filters_never_widen_the_tenant_clause(env, owner):
 
 def test_build_filter_is_tenant_first_and_allowlisted():
     tenant = qm.FieldCondition(key="user_id", match=qm.MatchValue(value="owner"))
-    built = build_filter("owner", {"source_type": {"$eq": "manual_note"}})
+    built = build_filter("owner", {"source_type": {"$eq": "manual_note"}}, namespace=namespaces.PERSONAL)
     assert built.must[0] == tenant
     assert built.must[1] == qm.FieldCondition(
         key="source_type", match=qm.MatchValue(value="manual_note")
     )
 
-    # No where at all: just the tenant clause.
-    bare = build_filter("owner", None)
+    # No where at all: the tenant clause plus the namespace boundary.
+    bare = build_filter("owner", None, namespace=namespaces.PERSONAL)
     assert bare.must == [tenant] and not bare.must_not
-    assert build_filter("owner", {}) == bare
+    assert bare.should == _r32_should(), "the namespace clause rides in `should`, always"
+    assert build_filter("owner", {}, namespace=namespaces.PERSONAL) == bare
 
     # $ne/$nin cannot be expressed as an include: they land in must_not.
-    exclude = build_filter("owner", {"tags": {"$nin": ["spam"]}})
+    exclude = build_filter("owner", {"tags": {"$nin": ["spam"]}}, namespace=namespaces.PERSONAL)
     assert exclude.must == [tenant]
     assert exclude.must_not == [qm.FieldCondition(key="tags", match=qm.MatchAny(any=["spam"]))]
 
     # Ranges: numeric for salience, datetime for captured_at.
-    numeric = build_filter("owner", {"salience": {"$gte": 0.5}})
+    numeric = build_filter("owner", {"salience": {"$gte": 0.5}}, namespace=namespaces.PERSONAL)
     assert numeric.must[1] == qm.FieldCondition(key="salience", range=qm.Range(gte=0.5))
     moment = datetime(2026, 1, 1, tzinfo=UTC)
-    stamp = build_filter("owner", {"captured_at": {"$gte": moment.isoformat()}})
+    stamp = build_filter(
+        "owner", {"captured_at": {"$gte": moment.isoformat()}}, namespace=namespaces.PERSONAL
+    )
     assert stamp.must[1] == qm.FieldCondition(key="captured_at", range=qm.DatetimeRange(gte=moment))
 
     # $contains is list membership for tags (Qdrant matches any element).
-    contains = build_filter("owner", {"tags": {"$contains": "alpha"}})
+    contains = build_filter("owner", {"tags": {"$contains": "alpha"}}, namespace=namespaces.PERSONAL)
     assert contains.must[1] == qm.FieldCondition(key="tags", match=qm.MatchValue(value="alpha"))
+
+
+def _r32_should(value: str = namespaces.PERSONAL) -> list:
+    """The R32(p4a) namespace clause, spelled out here on purpose.
+
+    ``namespace == value`` OR — when the value IS ``personal`` — the key is
+    ABSENT, because a point written before P4a is personal. A test that asked
+    the production code for its own shape would pin nothing, so the shape is
+    written twice: here and in ``qdrant_filter``.
+    """
+    conditions: list = [qm.FieldCondition(key="namespace", match=qm.MatchValue(value=value))]
+    if value == namespaces.PERSONAL:
+        conditions.append(qm.IsEmptyCondition(is_empty=qm.PayloadField(key="namespace")))
+    return conditions
+
+
+def test_build_filter_namespace_is_the_r32_should_clause():
+    """A bare `must` match on `namespace` would empty recall on a pre-P4 install."""
+    built = build_filter("owner", namespace=namespaces.PERSONAL)
+    assert built.should == _r32_should()
+    assert [condition.key for condition in built.must] == ["user_id"], (
+        "the namespace is never a bare must match: it must accept a key-less point"
+    )
+
+    # "Absent means personal" is the spelling of ONE namespace: any other
+    # namespace must not inherit the pre-P4 points it does not own.
+    other = build_filter("owner", {"tags": {"$eq": "alpha"}}, namespace=TEAM)
+    assert other.should == _r32_should(TEAM)
+    assert len(other.should) == 1 and other.should[0].key == "namespace"
+    assert [condition.key for condition in other.must] == ["user_id", "tags"]
+
+
+@pytest.mark.parametrize("missing", [None, "", "   "])
+def test_build_filter_refuses_a_missing_namespace(missing):
+    """Same law as the tenant: a filter without a namespace is refused, not widened."""
+    with pytest.raises(ValueError, match="namespace"):
+        build_filter("owner", namespace=missing)
 
 
 @pytest.mark.parametrize(
@@ -516,12 +667,12 @@ def test_build_filter_is_tenant_first_and_allowlisted():
 )
 def test_build_filter_rejects_unknown_key_or_operator(where, message):
     with pytest.raises(ValueError, match=message):
-        build_filter("owner", where)
+        build_filter("owner", where, namespace=namespaces.PERSONAL)
 
 
 def test_build_filter_rejects_non_object_where():
     with pytest.raises(ValueError, match="object"):
-        build_filter("owner", ["not", "a", "dict"])
+        build_filter("owner", ["not", "a", "dict"], namespace=namespaces.PERSONAL)
 
 
 # ── contract guard ──────────────────────────────────────────────────────────
@@ -702,6 +853,7 @@ def test_payload_indexes_are_created_in_server_mode(monkeypatch):
 
     assert client.created == [
         ("user_id", qm.PayloadSchemaType.KEYWORD),
+        ("namespace", qm.PayloadSchemaType.KEYWORD),
         ("tags", qm.PayloadSchemaType.KEYWORD),
         ("pinned", qm.PayloadSchemaType.BOOL),
         ("salience", qm.PayloadSchemaType.FLOAT),
@@ -722,7 +874,7 @@ def test_payload_indexes_are_only_added_once(monkeypatch):
 
     vector_backend.ensure_collection("memory", OTHER_GENERATION, dim=DIM)
 
-    assert [name for name, _ in client.created] == ["pinned", "salience", "captured_at"]
+    assert [name for name, _ in client.created] == ["namespace", "pinned", "salience", "captured_at"]
 
 
 def test_the_chunk_kind_has_its_own_payload_indexes(monkeypatch):

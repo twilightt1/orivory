@@ -43,13 +43,16 @@ from app.models.user import User
 from app.observability.fallbacks import fallback_counts, reset_fallback_counts
 from app.retrieval import reranker as reranker_module
 from app.retrieval.hybrid_retriever import fuse_by_uuid
-from app.retrieval.memory import lexical_index
+from app.retrieval.memory import lexical_index, namespaces
 from app.retrieval.memory import retriever as rmod
 from app.retrieval.memory.retriever import MemoryRetriever
 from app.retrieval.vector_retriever import VectorUnavailableError
 
 TENANT_A = uuid.UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
 TENANT_B = uuid.UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
+# The second namespace P4b will bring (P4a spells only `personal`): seeded
+# directly, never derivable from an API call in this phase.
+TEAM = "team"
 
 # One shared capture time, ten years back: EVERY row decays to the same floor
 # (0.1) and carries the same salience, so the served score is `rrf x 0.1` for
@@ -80,7 +83,7 @@ SUPERSEDED = uuid.UUID("00000000-0000-0000-0000-000000000004")
 CURRENT = uuid.UUID("ffffffff-ffff-ffff-ffff-ffffffffffff")
 
 
-def _mem(memory_id, user_id, content, *, superseded=False):
+def _mem(memory_id, user_id, content, *, superseded=False, namespace=namespaces.PERSONAL):
     meta: dict = {}
     if superseded:
         meta["cm_superseded_by"] = str(uuid.uuid4())
@@ -88,7 +91,7 @@ def _mem(memory_id, user_id, content, *, superseded=False):
         id=memory_id, user_id=user_id, title=None, content=content, tags=[],
         salience=0.5, pinned=False, source_type="manual_note", recall_count=0,
         captured_at=CAPTURED, indexed_at=CAPTURED, updated_at=CAPTURED,
-        extra_metadata=meta,
+        extra_metadata=meta, namespace=namespace,
     )
 
 
@@ -534,3 +537,57 @@ class TestHybridRecall:
         assert "lexical" not in response.trace.counts
         assert "fused" not in response.trace.counts
         assert response.trace.stage_ms["lexical"] == 0.0
+
+
+# ── the lexical leg's namespace boundary (P4a/T3) ───────────────────────────
+
+
+async def _lexical(factory, **kwargs):
+    """Run ONE real lexical search on the temp-file FTS index."""
+    async with factory() as session:
+        return await session.run_sync(
+            lambda db: lexical_index.search(db.connection(), QUERY, **kwargs)
+        )
+
+
+class TestLexicalNamespace:
+    """Same text, two namespaces, one tenant: the FTS join reads
+    ``memories.namespace``, so this leg is scoped exactly like the dense one.
+
+    A row the leg must not return is worse here than a missing one: the
+    retriever hydrates whatever the leg hands back, so an unscoped leg is how
+    another namespace's text reaches a caller.
+    """
+
+    async def test_the_lexical_leg_reads_the_namespace_from_the_join(self, recall_db):
+        """Every row carries the SAME text, so only the namespace clause can
+        separate them (BM25 ties; the id is the tie-break, not the boundary)."""
+        _, factory = recall_db
+        await _seed(factory,
+                    _mem(A1, TENANT_A, MATCHING),                       # personal
+                    _mem(A2, TENANT_A, MATCHING, namespace=TEAM),       # same tenant
+                    _mem(B1, TENANT_B, MATCHING))                       # other tenant
+
+        mine = await _lexical(factory, user_id=TENANT_A, limit=10)
+        theirs = await _lexical(factory, user_id=TENANT_A, limit=10, namespace=TEAM)
+        foreign = await _lexical(factory, user_id=TENANT_B, limit=10)
+
+        assert [row["memory_id"] for row in mine] == [str(A1)]
+        assert [row["memory_id"] for row in theirs] == [str(A2)]
+        assert [row["memory_id"] for row in foreign] == [str(B1)]
+
+    async def test_recall_never_serves_another_namespaces_row(
+        self, offline_env, recall_db, monkeypatch
+    ):
+        """The dense leg answers nothing, so the lexical leg is the only source —
+        and the row it may not serve is exactly the one it would otherwise win."""
+        _, factory = recall_db
+        await _seed(factory,
+                    _mem(A1, TENANT_A, MATCHING),
+                    _mem(A2, TENANT_A, MATCHING, namespace=TEAM))
+        store = _Store([])
+
+        response = await _recall(factory, monkeypatch, store, top_k=3, hybrid=True)
+
+        assert [result.id for result in response.results] == [A1]
+        assert response.trace.counts["lexical"] == 1
