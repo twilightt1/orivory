@@ -49,8 +49,9 @@ included).
 
 Two further pins the final fix wave attached: the erasure path leaves no FTS5
 row behind (through the real ``erase_memories``), and the signed §12.2 RSS
-budget is MEASURED here (this process' peak RSS, stdlib ``resource``) instead
-of being claimed in the runbook only.
+budget is MEASURED here in a FRESH SUBPROCESS that boots the real stack alone
+(R30): an in-process peak is contaminated by whatever the suite loaded before
+it, which is exactly what made the first version of this pin load-dependent.
 """
 from __future__ import annotations
 
@@ -58,9 +59,11 @@ import ast
 import asyncio
 import json
 import math
-import resource
+import os
 import sqlite3
+import subprocess
 import sys
+import textwrap
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
@@ -562,45 +565,142 @@ async def test_the_loop_beats_while_ingest_and_recall_run_concurrently(live, mon
     assert p99 < P99_LAG_MS, ticker.summary()
 
 
-# ══ §12.2: the signed RSS budget (≤ 1 GB peak), measured, stdlib only ═══════
+# ══ §12.2: the signed RSS budget (≤ 1 GB peak), measured in a fresh child ═══
 
 RSS_LIMIT_BYTES = 1024 ** 3
+RSS_PROBE_TIMEOUT_SECONDS = 120
+
+# R30: the budget is measured in a FRESH interpreter that boots the real stack
+# alone — the same settings, an embedded Qdrant on a temp folder, the real
+# arctic embedder (warm cache only; this never downloads) and one real
+# upsert/search. An in-process ``ru_maxrss`` was contaminated by everything the
+# suite had already loaded before this test, so the pin failed on load order
+# and not on the service. Stdlib only: ``subprocess`` + ``sys.executable`` +
+# ``resource``. The child exits non-zero and says so on any internal error, so
+# a broken probe FAILS here instead of passing an unmeasured budget.
+RSS_PROBE_CHILD = '''
+import asyncio
+import os
+import resource
+import sys
+import traceback
+import uuid
 
 
-def _peak_rss_bytes() -> int:
-    """Peak RSS of this process, normalized to bytes.
-
-    ``resource`` is stdlib, so no dependency is added. ``ru_maxrss`` is in
-    BYTES on macOS (this repo's dev box) and in KiB on Linux (CI): a bare
-    comparison would read 1024x too small on Linux and never catch a blowout.
-    """
+def peak_rss_bytes() -> int:
+    """``ru_maxrss`` is BYTES on macOS (the dev box) and KiB on Linux (CI)."""
     peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     return peak if sys.platform == "darwin" else peak * 1024
 
 
-async def test_the_signed_rss_budget_holds_on_the_real_stack(live, monkeypatch):
-    """The §12.2 RSS budget, asserted instead of claimed: peak RSS ≤ 1 GB.
+async def main() -> None:
+    for name in ("DATABASE_URL", "QDRANT_LOCAL_PATH", "QDRANT_MODE"):
+        if not os.environ.get(name):
+            raise RuntimeError(f"{name} must be set by the parent test")
 
-    What dominates: the ONNX embedding session (the real arctic model, when its
-    cache is present — this test must NOT download ~90 MB in CI) and the
-    embedded Qdrant client, whose local mode keeps indexes resident. Both are
-    live here: the ``live`` fixture opens the real SQLite store and the store
-    client, and the session is warmed only when the cache is warm. The peak is
-    process-wide (``ru_maxrss`` never decreases), so it covers every path this
-    run exercised, not just this test.
+    import app.main  # noqa: F401 — the app's whole import surface
+    from app import database
+    from app.models.memory import Memory
+    from app.models.user import User
+    from app.retrieval import e5_local, vector_backend
+    from app.retrieval.embedder import embed_query, warmup_embedder
+    from app.retrieval.memory import vector_store
+
+    database.engine.echo = False  # a dev ambient must not drown the stdout
+
+    if not e5_local.arctic_files_cached():
+        raise RuntimeError("arctic onnx cache cold — the probe never downloads")
+
+    await warmup_embedder()  # the boot warmup: the ONNX session, the heavy alloc
+    await database.bootstrap_sqlite()  # the real ladder, on the fresh temp file
+
+    async with database.AsyncSessionLocal() as db:
+        user = User(id=uuid.uuid4(), email="rss-probe@gate.invalid", hashed_password="x",
+                    display_name="RSS probe", is_verified=True, is_active=True)
+        db.add(user)
+        await db.flush()
+        row = Memory(id=uuid.uuid4(), user_id=user.id, content="rss probe token kappa", tags=[])
+        db.add(row)
+        await db.commit()
+
+    await vector_store.upsert_memory(row)  # real embed -> embedded Qdrant collection
+    hits = await vector_store.search_memories(
+        await embed_query("rss probe token kappa"), user_id=str(user.id), top_k=5
+    )
+    if [hit["memory_id"] for hit in hits] != [str(row.id)]:
+        raise RuntimeError(f"the store probe served nothing: {hits}")
+
+    ballast_mib = int(os.environ.get("RSS_PROBE_BALLAST_MIB") or "0")
+    if ballast_mib:  # R30 fallibility hook: a leaking stack must be caught here
+        _ballast = "x" * (ballast_mib * 1024 * 1024)
+        print(f"BALLAST_MIB={ballast_mib}")
+
+    await vector_backend.close_clients()
+    await database.engine.dispose()
+
+    print(f"PEAK_RSS_BYTES={peak_rss_bytes()}")
+    print(f"PEAK_RSS_MIB={peak_rss_bytes() / 1024 ** 2:.1f}")
+
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except Exception:
+        traceback.print_exc()
+        print("RSS-PROBE-FAILED", file=sys.stderr)
+        raise SystemExit(1) from None
+'''
+
+RSS_PROBE_MARKER = "PEAK_RSS_BYTES="
+
+
+@pytest.mark.skipif(
+    not e5_local.arctic_files_cached(),
+    reason="arctic onnx cache missing — run local, do not download in CI",
+)
+def test_the_signed_rss_budget_holds_on_the_real_stack(tmp_path):
+    """The §12.2 RSS budget, asserted on a FRESH boot of the real stack (R30).
+
+    What dominates: the ONNX embedding session (the real arctic model — the
+    cache must be warm, this test never downloads ~90 MB) and the embedded
+    Qdrant client, whose local mode keeps indexes resident. Both are live in
+    the child: the real settings, a throwaway SQLite file, a throwaway Qdrant
+    folder, the boot warmup and one real upsert/search. The child prints its
+    own ``ru_maxrss`` peak and this test asserts the signed ≤ 1 GB on it — a
+    value nothing the suite ran earlier can inflate.
     """
-    holder = _seams(monkeypatch)
-    (row,) = await _seed(live, live.alice.id, ["rss budget probe token kappa"])
-    holder["vector"] = _vector_for("rss budget probe token kappa")
-    response = await _recall(live, live.alice.id, "kappa", top_k=5)
-    assert str(row.id) in _returned(response), "the store probe served nothing"
-
-    if e5_local.arctic_files_cached():
-        await warmup_embedder()  # the cold session build is the heavy allocation
-
-    peak = _peak_rss_bytes()
-    print(f"peak RSS: {peak / 1024 ** 2:.0f} MiB (signed budget "
-          f"{RSS_LIMIT_BYTES // 1024 ** 2} MiB)")
+    script = tmp_path / "rss_probe_child.py"
+    script.write_text(textwrap.dedent(RSS_PROBE_CHILD))
+    qdrant_dir = tmp_path / "rss-qdrant"
+    qdrant_dir.mkdir()
+    environment = {
+        **os.environ,
+        "DATABASE_URL": f"sqlite+aiosqlite:///{tmp_path / 'rss-probe.db'}",
+        "QDRANT_MODE": "local",
+        "QDRANT_LOCAL_PATH": str(qdrant_dir),
+        "USE_LOCAL_EMBEDDINGS": "true",
+        "LOCAL_EMBED_MODEL": "arctic",
+        "PYTHONPATH": str(REPO_ROOT),
+    }
+    result = subprocess.run(
+        [sys.executable, str(script)], capture_output=True, text=True,
+        env=environment, cwd=str(REPO_ROOT), timeout=RSS_PROBE_TIMEOUT_SECONDS,
+    )
+    assert result.returncode == 0, (
+        f"the RSS probe subprocess failed (exit {result.returncode}):\n"
+        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    markers = [line for line in result.stdout.splitlines()
+               if line.startswith(RSS_PROBE_MARKER)]
+    assert markers, (
+        "the probe printed no peak-RSS marker — a silent subprocess must never "
+        f"pass as an unmeasured budget:\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    raw = markers[-1].split("=", 1)[1].strip()
+    assert raw.isdigit(), f"unparseable {RSS_PROBE_MARKER} marker: {raw!r}"
+    peak = int(raw)
+    print(f"peak RSS (fresh subprocess): {peak / 1024 ** 2:.0f} MiB "
+          f"(signed budget {RSS_LIMIT_BYTES // 1024 ** 2} MiB)")
     assert peak <= RSS_LIMIT_BYTES, (
         f"peak RSS {peak / 1024 ** 2:.0f} MiB exceeds the signed 1 GB budget"
     )
