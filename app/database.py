@@ -24,8 +24,11 @@ IS_SQLITE = settings.DATABASE_URL.startswith("sqlite")
 # v4 = the P2 FTS5 memory index + its triggers (DDL: a virtual table, which can
 # never come from model metadata — the ladder creates it with exec_driver_sql),
 # v5 = the P4a namespace column + its (namespace, user_id) index (DDL; the
-# backfill IS the column default, so every pre-existing row is 'personal').
-SQLITE_SCHEMA_VERSION = 5
+# backfill IS the column default, so every pre-existing row is 'personal'),
+# v6 = the P4b suppression-ledger columns (DDL: namespace + content_hash on
+# memory_suppressions, both NULLABLE and never backfilled — NULL is the honest
+# "unknown" for a row that predates the hash being computed at upload time).
+SQLITE_SCHEMA_VERSION = 6
 
 # Objects added by the v1 -> v2 ladder; excluded from the v1 shape check.
 V2_TABLES = ("index_outbox", "index_generations", "memory_suppressions")
@@ -326,6 +329,36 @@ def _upgrade_v4_to_v5(sync_conn) -> None:
     )
 
 
+def _upgrade_v5_to_v6(sync_conn) -> None:
+    """v5 -> v6: ``memory_suppressions.namespace`` + ``content_hash``.
+
+    Runs ONCE, on the version transition, and on a fresh install too (which has
+    nothing to back up). Both columns are NULLABLE with no default: a
+    pre-existing suppression row has neither value, and NULL is the honest
+    "unknown" — the content hash is computed at UPLOAD time by the P4b/T4
+    guards, never backfilled here (R38).
+
+    The DDL mirrors the model: ``String(32)`` / ``String(64)`` render as
+    ``VARCHAR(32)`` / ``VARCHAR(64)``, the exact types ``create_all`` installs,
+    so an upgraded file and a fresh one are indistinguishable
+    (``tests/lite`` compares their ``PRAGMA table_info``).
+
+    Idempotent: a crash between the DDL and the version stamp re-enters with
+    the columns already present, and SQLite has no ``ADD COLUMN IF NOT EXISTS``
+    — hence the per-column inspect. A later boot never re-runs the step.
+    """
+    insp = sa_inspect(sync_conn)
+    have = {col["name"] for col in insp.get_columns("memory_suppressions")}
+    if "namespace" not in have:
+        sync_conn.exec_driver_sql(
+            "ALTER TABLE memory_suppressions ADD COLUMN namespace VARCHAR(32)"
+        )
+    if "content_hash" not in have:
+        sync_conn.exec_driver_sql(
+            "ALTER TABLE memory_suppressions ADD COLUMN content_hash VARCHAR(64)"
+        )
+
+
 def _conn_sqlite_path(conn) -> str:
     """File path of the SQLite database behind an engine/connection."""
     path = conn.engine.url.database
@@ -352,7 +385,9 @@ def upgrade_sqlite_schema(conn) -> None:
     every later pointer move), then v3 -> v4 (the P2 FTS5 memory index + its
     triggers, also ONCE — a restart never rebuilds an index an operator
     repaired), then v4 -> v5 (the P4a namespace column + its index, ONCE — the
-    column default backfills every existing row with ``'personal'``).
+    column default backfills every existing row with ``'personal'``), then
+    v5 -> v6 (the P4b ledger columns on ``memory_suppressions``, ONCE — nullable
+    and never backfilled: NULL is the honest value for a row that predates them).
     Divergence fails closed — ``create_all`` is never used as an
     existing-schema migration mechanism.
     """
@@ -362,7 +397,12 @@ def upgrade_sqlite_schema(conn) -> None:
     version = int(conn.execute(text("PRAGMA user_version")).scalar_one())
     tables = set(sa_inspect(conn).get_table_names())
     fresh_install = version == 0 and not tables
-    if version not in (0, 1, 2, 3, 4, SQLITE_SCHEMA_VERSION):
+    # Every version below the terminal, plus the terminal itself: a file NEWER
+    # than this binary's vocabulary is a refusal, never a repair. Spelled from
+    # the constant — a pinned constant (the gate's stand-in for an older
+    # binary) must narrow the vocabulary exactly like a real older binary did,
+    # which a literal list would silently stop doing at the next bump.
+    if version not in (*range(SQLITE_SCHEMA_VERSION), SQLITE_SCHEMA_VERSION):
         raise RuntimeError(
             f"unsupported SQLite schema version {version}; expected {SQLITE_SCHEMA_VERSION}"
         )
@@ -416,6 +456,17 @@ def upgrade_sqlite_schema(conn) -> None:
         # The v4 -> v5 DDL step, ONCE, on the transition; a fresh install runs it
         # too, so every v5 install carries the column the ACL predicates read.
         _upgrade_v4_to_v5(conn)
+    if version in (0, 1, 2, 3, 4, 5):
+        # P4b milestone backup: its OWN name, taken where the ladder stands now
+        # (v5, pre-suppression-columns). The earlier files are snapshots of
+        # EARLIER states — nothing to inherit, so no rename — and are never
+        # overwritten. A fresh install has nothing to back up.
+        if tables:
+            _backup_before_ddl(path, suffix="pre-p4b")
+        # The v5 -> v6 DDL step, ONCE, on the transition; a fresh install runs
+        # it too, so every v6 install carries the ledger columns (nullable —
+        # NULL is the honest value for a row that predates them).
+        _upgrade_v5_to_v6(conn)
     conn.execute(text(f"PRAGMA user_version = {SQLITE_SCHEMA_VERSION}"))
     integrity = conn.exec_driver_sql("PRAGMA integrity_check").fetchone()
     if integrity is None or integrity[0] != "ok":

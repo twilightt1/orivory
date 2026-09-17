@@ -1021,7 +1021,7 @@ async def test_admin_reindex_passes_the_namespace_explicitly(db, monkeypatch):
 async def test_mcp_forget_refuses_a_row_outside_the_namespace(db, monkeypatch):
     """R35: ``forget_memory`` is namespace-bounded like get/list/search.
 
-    Reviewer's reproduce: a same-account row in ``team`` was erased by a
+    Reviewer's reproduce: a same-account row in ``team`` was forgotten by a
     ``memory:write`` agent while every other tool answered "not found" for it.
     It is skipped here, and the row, its children and its vector stay put.
     """
@@ -1030,58 +1030,48 @@ async def test_mcp_forget_refuses_a_row_outside_the_namespace(db, monkeypatch):
     db.add(theirs)
     await db.commit()
 
-    async def _no_purge(_memory_id):
-        return True
-
-    async def _absent(_memory_ids):
-        return set()
-
     # The tool boundary is pinned on its own: the id must never REACH the
-    # erasure service. The service refuses the row too (defence in depth), so a
+    # forget service. The service refuses the row too (defence in depth), so a
     # pin that only looks at the outcome cannot see this guard — it would stay
     # green with the tool's pre-read deleted.
     reached: list[list[str]] = []
-    real_erase = hub_tools.erase_memories
+    real_forget = hub_tools.soft_forget
 
     async def _spy(db_, user_id, memory_ids, *, requested_by):
         reached.append([str(m) for m in memory_ids])
-        return await real_erase(db_, user_id, memory_ids, requested_by=requested_by)
+        return await real_forget(db_, user_id, memory_ids, requested_by=requested_by)
 
-    monkeypatch.setattr("app.services.erasure_service.safe_delete_from_index", _no_purge)
-    monkeypatch.setattr("app.services.erasure_service._vector_present_ids", _absent)
-    monkeypatch.setattr(hub_tools, "erase_memories", _spy)
+    monkeypatch.setattr(hub_tools, "soft_forget", _spy)
     _as_reader(monkeypatch, owner, frozenset({"memory:write"}))
 
     out = await hub_tools.forget_memory(memory_ids=[str(theirs.id)])
 
-    assert reached == [[]], "the id outside the namespace never reaches the erasure service"
-    assert out["erased"] == 0 and out["skipped"] == 1
+    assert reached == [[]], "the id outside the namespace never reaches the forget service"
+    assert out["invalidated"] == 0 and out["skipped"] == 1
     async with database.AsyncSessionLocal() as session:
-        assert await session.get(Memory, theirs.id) is not None, "cross-namespace erase (R35)"
+        row = await session.get(Memory, theirs.id)
+        assert row is not None and state_of(row) == "current", "cross-namespace forget (R35)"
 
 
-async def test_mcp_forget_still_erases_the_callers_own_row(db, monkeypatch):
-    """The same call on the caller's own namespace is unchanged (P4a)."""
+async def test_mcp_forget_still_invalidates_the_callers_own_row(db, monkeypatch):
+    """The same call on the caller's own namespace is the SOFT forget (P4b).
+
+    The row is kept (provenance survives) and leaves serving; no vector is
+    purged here (R37: the payload refresh rides the outbox).
+    """
     owner = await _owner(db)
     mine = _mem(owner, "mine")
     db.add(mine)
     await db.commit()
 
-    async def _no_purge(_memory_id):
-        return True
-
-    async def _absent(_memory_ids):
-        return set()
-
-    monkeypatch.setattr("app.services.erasure_service.safe_delete_from_index", _no_purge)
-    monkeypatch.setattr("app.services.erasure_service._vector_present_ids", _absent)
     _as_reader(monkeypatch, owner, frozenset({"memory:write"}))
-
     out = await hub_tools.forget_memory(memory_ids=[str(mine.id)])
 
-    assert out["erased"] == 1 and out["skipped"] == 0
+    assert out["invalidated"] == 1 and out["skipped"] == 0
     async with database.AsyncSessionLocal() as session:
-        assert await session.get(Memory, mine.id) is None
+        row = await session.get(Memory, mine.id)
+        assert row is not None, "soft forget keeps the row"
+        assert state_of(row) == "invalidated"
 
 
 async def test_the_sql_fallback_order_is_namespaced(db, monkeypatch):

@@ -51,7 +51,7 @@ from app.retrieval.memory.retriever import MemoryRetriever
 from app.retrieval.memory.visibility import namespace_predicate, not_dirty_predicate
 from app.retrieval.memory.write_back import index_new_memory
 from app.retrieval.vector_retriever import VectorUnavailableError
-from app.services.erasure_service import erase_memories
+from app.services.erasure_service import erase_memories, soft_forget
 
 log = logging.getLogger(__name__)
 
@@ -560,14 +560,17 @@ async def delete_memory(memory_id: str) -> dict[str, Any]:
 
 
 async def forget_memory(memory_ids: list[str]) -> dict[str, Any]:
-    """Erase memories + every derived artifact, with a verification receipt.
+    """Forget memories: invalidate them and pin their sources against re-import.
 
-    Requires ``memory:write``. Ids that are not the caller's — another tenant's,
-    or one of the caller's OWN rows outside their namespace — are resolved out
-    before the erasure service sees them (R35) and reported as ``skipped``:
-    the same answer a missing id gets, so there is never an existence leak.
-    Every authorized call appends one ``mcp_forget`` ledger row pointing at the
-    receipt; the receipt carries the per-target cascade + verification detail.
+    Soft by design (§12/§5.4): the rows, their provenance and their evidence
+    stay; what goes is serving (``invalidated``) and the right to come back (a
+    suppression row per affected source). Requires ``memory:write``. Ids that
+    are not the caller's — another tenant's, or one of the caller's OWN rows
+    outside their namespace — are resolved out before the forget service sees
+    them (R35) and reported as ``skipped``: the same answer a missing id gets,
+    so there is never an existence leak. Every authorized call appends one
+    ``mcp_forget`` ledger row pointing at the receipt, which carries the
+    per-target closure and the serving-off verification detail.
     """
     principal = _current_principal()
     if principal is None:
@@ -585,9 +588,9 @@ async def forget_memory(memory_ids: list[str]) -> dict[str, Any]:
     if not valid:
         return {"error": "invalid memory id"}
     async with _session() as db:
-        # The boundary FIRST: the erasure walk is a read of ``memories`` like
+        # The boundary FIRST: the forget walk is a read of ``memories`` like
         # every other surface, so an id outside the caller's namespace is never
-        # handed to it (and never counted as erased).
+        # handed to it (and never counted as forgotten).
         allowed = set((await db.execute(
             select(Memory.id).where(
                 Memory.id.in_(valid),
@@ -597,8 +600,8 @@ async def forget_memory(memory_ids: list[str]) -> dict[str, Any]:
         )).scalars().all())
         in_namespace = [m for m in valid if m in allowed]
         skipped = len(valid) - len(in_namespace)
-        receipt = await erase_memories(db, principal.user_id, in_namespace,
-                                       requested_by=f"agent:{principal.name}")
+        receipt = await soft_forget(db, principal.user_id, in_namespace,
+                                    requested_by=f"agent:{principal.name}")
         summary = receipt.detail.get("summary", {})
         skipped += summary.get("skipped", 0)
         db.add(
@@ -608,7 +611,7 @@ async def forget_memory(memory_ids: list[str]) -> dict[str, Any]:
                 detail={
                     "receipt_id": str(receipt.id),
                     "requested": [str(m) for m in valid],
-                    "erased": summary.get("erased", 0),
+                    "invalidated": summary.get("invalidated", 0),
                     "skipped": skipped,
                 },
             )
@@ -617,7 +620,8 @@ async def forget_memory(memory_ids: list[str]) -> dict[str, Any]:
     return {
         "receipt_id": str(receipt.id),
         "status": receipt.status,
-        "erased": summary.get("erased", 0),
+        "invalidated": summary.get("invalidated", 0),
+        "suppressed": summary.get("suppressed", 0),
         "skipped": skipped,
         "invalid": invalid,
     }

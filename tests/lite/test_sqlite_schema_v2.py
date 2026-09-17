@@ -3,7 +3,8 @@
 Real SQLite files, no mocks: a synthetic v1 install (full v1 schema,
 ``user_version`` 0 or 1) is migrated by ``bootstrap_sqlite`` and the result is
 re-read from the file — schema, backfilled data, pre-DDL backup, generation
-rows. The ladder's terminal stamp is v5 (the P4a namespace column, which owns its
+rows. The ladder's terminal stamp is v6 (the P4b suppression-ledger columns,
+which own their own ``.pre-p4b.bak``; the v5 P4a namespace column, which owns its
 own ``.pre-p4.bak``; the v3 P1b data step, which writes the two real generation
 rows INACTIVE on an upgrade — the old pointer keeps serving until
 ``migrate_qdrant.py cutover`` flips it — and renames the milestone backup; and
@@ -139,7 +140,7 @@ async def test_v1_install_is_upgraded_to_v2_and_backed_up(v1_db):
         fk_violations = (await conn.execute(text("PRAGMA foreign_key_check"))).all()
         integrity = (await conn.execute(text("PRAGMA integrity_check"))).scalar_one()
 
-    assert version == 5
+    assert version == 6
     assert V2_TABLES <= tables
     assert [tuple(row) for row in memories] == [("v1 memory text", 1)]  # existing rows: revision 1
     assert [tuple(row) for row in chunks] == [("v1 chunk text", 1)]
@@ -192,7 +193,7 @@ async def test_unversioned_v1_shape_is_adopted_then_upgraded(tmp_path, monkeypat
         async with eng.connect() as conn:
             version, tables = await _schema(conn)
             memories = (await conn.execute(text("SELECT content, revision, namespace FROM memories"))).all()
-        assert version == 5
+        assert version == 6
         assert V2_TABLES <= tables
         assert [tuple(row) for row in memories] == [("v1 memory text", 1, "personal")], (
             "the v5 step backfills the adopted install's rows with the personal namespace")
@@ -252,7 +253,7 @@ async def test_bootstrap_is_idempotent_and_writes_the_two_real_generation_rows(t
             version, tables = await _schema(conn)
             generations = (await conn.execute(text(
                 "SELECT kind, generation, fingerprint, is_active FROM index_generations"))).all()
-        assert version == database.SQLITE_SCHEMA_VERSION == 5
+        assert version == database.SQLITE_SCHEMA_VERSION == 6
         assert V2_TABLES <= tables
         assert {(r[0], r[1]) for r in generations} == {
             ("memory", generation_name("memory")), ("chunk", generation_name("chunk"))}
@@ -319,7 +320,7 @@ async def test_interrupted_upgrade_resumes_and_keeps_the_existing_backup(v1_db):
     async with eng.connect() as conn:
         version, tables = await _schema(conn)
     milestone = tmp_path / "v1.sqlite.pre-p1b.bak"
-    assert version == 5
+    assert version == 6
     assert V2_TABLES <= tables
     assert list(Path(tmp_path).glob("*.pre-p1b.bak")) == [milestone], (
         "the interrupted run's backup must be reused, not replaced"

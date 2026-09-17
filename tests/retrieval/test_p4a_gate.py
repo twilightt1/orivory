@@ -303,7 +303,7 @@ async def test_writers_refuse_another_namespace_and_another_users_row(namespaced
     assert mcp_delete == {"error": "memory not found"}
     assert mcp_correct == {"error": "memory not found"}, (
         "correcting is a write: a row outside the namespace is the same not-found")
-    assert mcp_forget["erased"] == 0
+    assert mcp_forget["invalidated"] == 0
     assert mcp_forget["skipped"] == 2, "an id outside the namespace is the same not-found as a missing one"
 
     async with namespaced.sessions() as db:
@@ -672,21 +672,21 @@ async def test_a_milestone_snapshot_is_not_promised_clean(_ladder_install):
 async def test_an_unknown_schema_version_fails_closed_and_leaves_the_file_untouched(env):
     """A version this binary does not know is a refusal, not a repair.
 
-    A v6 file means a NEWER binary's data: the ladder must not boot it, must not
+    A v7 file means a NEWER binary's data: the ladder must not boot it, must not
     stamp it back, and must not leave a milestone snapshot behind while
     inspecting it. The file's status quo is the whole assertion.
     """
     await database.bootstrap_sqlite()
-    assert _version(env.db_path) == 5
+    assert _version(env.db_path) == 6
 
-    _write(env.db_path, "PRAGMA user_version = 6")
+    _write(env.db_path, "PRAGMA user_version = 7")
     stat_before = (env.db_path.stat().st_size, env.db_path.stat().st_mtime_ns)
     sidecars_before = _sidecars(env.tmp_path)
 
-    with pytest.raises(RuntimeError, match=r"unsupported SQLite schema version 6; expected 5"):
+    with pytest.raises(RuntimeError, match=r"unsupported SQLite schema version 7; expected 6"):
         await database.bootstrap_sqlite()
 
-    assert _version(env.db_path) == 6, "the refusal changed the stamp"
+    assert _version(env.db_path) == 7, "the refusal changed the stamp"
     assert (env.db_path.stat().st_size, env.db_path.stat().st_mtime_ns) == stat_before
     assert _sidecars(env.tmp_path) == sidecars_before
 
@@ -883,5 +883,5 @@ def test_the_workflow_runs_this_gate_and_names_only_paths_that_exist():
 
 def test_the_gate_pins_the_version_and_the_namespace_spelling():
     """A silent drift in either constant would leave these bullets checking nothing."""
-    assert database.SQLITE_SCHEMA_VERSION == 5, "the gate's v5 bullets are written for v5"
+    assert database.SQLITE_SCHEMA_VERSION == 6, "the gate's ladder bullets are written for the terminal stamp"
     assert namespaces.PERSONAL == PERSONAL == "personal"

@@ -77,17 +77,22 @@ from app.models.index_outbox import IndexOutbox
 from app.models.memory import Memory
 from app.models.source import MemorySource
 from app.retrieval.memory.correction import (
+    CM_INVALIDATED,
     DerivedClosureError,
+    collect_dependency_closure,
     collect_derived_ids,
     collect_derived_ids_outside_namespace,
+    set_cm,
 )
 from app.retrieval.memory.namespaces import namespace_of, personal_namespace
 from app.retrieval.memory.outbox import (
     KIND_MEMORY,
     OPERATION_DELETE,
+    bump_revision,
     enqueue_delete,
+    enqueue_upsert,
 )
-from app.retrieval.memory.visibility import namespace_predicate
+from app.retrieval.memory.visibility import namespace_predicate, not_dirty_predicate
 from app.retrieval.memory.write_back import safe_delete_from_index
 
 log = logging.getLogger(__name__)
@@ -573,6 +578,187 @@ async def list_receipts(
     return list(rows), total
 
 
+# ── soft forget (P4b/T3): invalidate + suppress, keep provenance ────────────
+
+SOFT_FORGET_STATUS_INVALIDATED = "invalidated"
+
+
+async def _serving_memory_ids(
+    db: AsyncSession, memory_ids: list[uuid.UUID]
+) -> set[uuid.UUID] | None:
+    """Which of ``memory_ids`` a serving surface would still return.
+
+    Verification seam (monkeypatched in tests, like ``_vector_present_ids``):
+    the ONE rule every serving surface applies is ``not_dirty_predicate()``.
+    ``None`` = the readback failed — an unknown that is never reported as
+    ``completed`` (spec §5.4). Callers catch around the call and roll the
+    poisoned transaction back before writing the receipt.
+    """
+    return set((await db.execute(
+        select(Memory.id).where(Memory.id.in_(memory_ids), not_dirty_predicate())
+    )).scalars().all())
+
+
+async def _soft_forget_one(
+    db: AsyncSession, user_id: uuid.UUID, memory_id: uuid.UUID
+) -> dict[str, Any]:
+    """Invalidate ONE owned memory and its closure; return its receipt entry.
+
+    One commit per target, like the hard path: the invalidated rows, their
+    suppression rows and their payload-refresh intents land together or not at
+    all. A truncated closure is REFUSED before any write — a partial closure
+    cannot be half-forgotten (the hard path refuses a partial erase the same
+    way, so neither path can report a closure it never saw).
+    """
+    row = await db.get(Memory, memory_id)
+    if row is None or not _owned(row, user_id):
+        return {"memory_id": str(memory_id), "status": NOT_FOUND_OR_FOREIGN}
+
+    closure = await collect_dependency_closure(db, [memory_id])
+    if closure.truncated:
+        log.error("Closure for memory %s is truncated; refusing the forget", memory_id,
+                  extra={"memory_id": str(memory_id)})
+        return {
+            "memory_id": str(memory_id),
+            "status": "error",
+            "error": "closure exceeds _MAX_CLOSURE_IDS; refusing a partial forget",
+            "truncated": True,
+            "closure_size": len(closure.affected),
+        }
+
+    invalidated: list[uuid.UUID] = []
+    suppressed: list[str] = []
+    for affected_id in closure.affected:
+        target = await db.get(Memory, affected_id)
+        if target is None or not _owned(target, user_id):
+            continue  # the closure is scoped by construction; belt and braces
+        set_cm(target, {CM_INVALIDATED: True})
+        # R37: the state must REACH the vector payload. The bump makes this a
+        # real write and the durable upsert carries it to the applier, which
+        # re-reads the row — so the payload's visibility_state reads
+        # `invalidated`. No vector is purged here (reconciliation repair owns
+        # that, R34).
+        bump_revision(target)
+        await enqueue_upsert(db, target)
+        invalidated.append(affected_id)
+        if target.source_ref:
+            # Universal (R38): every affected source identity is pinned, not
+            # only the root projection — including refs that are not
+            # `file_upload` documents. content_hash stays NULL until an upload
+            # computes one (never backfilled).
+            await suppress_source_async(db, user_id=user_id, source_ref=target.source_ref,
+                                        reason="forgotten", namespace=namespace_of(target))
+            suppressed.append(target.source_ref)
+    await db.commit()
+    return {
+        "memory_id": str(memory_id),
+        "status": SOFT_FORGET_STATUS_INVALIDATED,
+        "affected_memory_ids": [str(i) for i in closure.affected],
+        "suppressed_sources": sorted(set(suppressed)),
+        "payload_refresh_enqueued": len(invalidated),
+    }
+
+
+async def soft_forget(
+    db: AsyncSession,
+    user_id: uuid.UUID,
+    memory_ids: list[uuid.UUID],
+    *,
+    requested_by: str,
+) -> ErasureReceipt:
+    """Forget memories softly: invalidate the closure, suppress every source (§12).
+
+    The user-facing "forget" is soft and provenance-preserving:
+
+    - the rows STAY (title/content/tags/provenance/evidence untouched) and are
+      marked ``invalidated`` — so no serving surface returns them again;
+    - every affected ``source_ref`` — the whole closure, not only the root
+      projection — gets a ``MemorySuppression`` row, so a re-import cannot
+      resurrect what was forgotten (R38; the guards that READ the ledger are
+      Task 4);
+    - every invalidated row gets ``bump_revision`` + a durable ``enqueue_upsert``
+      in the same commit (R37): the point is not purged here, its payload is
+      refreshed to ``visibility_state=invalidated`` by the drain;
+    - the receipt reports ``completed`` ONLY after a serving-off readback
+      (``not_dirty_predicate()`` says the rows left serving). Leftovers →
+      ``completed_with_residual``; an unreadable check → ``completed_unverified``
+      — never a faked ``completed``.
+
+    Best-effort per target like the hard path: one failing target never aborts
+    the others, and the receipt commit stays the only unrecorded failure mode.
+    """
+    unique_ids = list(dict.fromkeys(memory_ids))
+    targets: list[dict[str, Any]] = []
+    for mid in unique_ids:
+        try:
+            targets.append(await _soft_forget_one(db, user_id, mid))
+        except Exception as exc:  # best-effort: record + continue
+            log.exception("Soft forget failed for memory %s", mid, extra={"memory_id": str(mid)})
+            await db.rollback()
+            targets.append({"memory_id": str(mid), "status": "error", "error": str(exc)})
+
+    invalidated = [t for t in targets if t["status"] == SOFT_FORGET_STATUS_INVALIDATED]
+    affected = [uuid.UUID(str(value)) for t in invalidated
+                for value in t.get("affected_memory_ids") or []]
+    residual: set[uuid.UUID] | None = None
+    if affected:
+        try:
+            residual = await _serving_memory_ids(db, affected)
+        except Exception as exc:
+            # An unreadable check is UNKNOWN, never a clean completion (§5.4).
+            # The failed read leaves the session unusable (PendingRollbackError
+            # on the next statement), so roll back before the receipt commit —
+            # an unknown check must not take the receipt down with it.
+            log.warning("Serving readback failed: %s", exc,
+                        extra={"memory_ids": [str(m) for m in affected]})
+            await db.rollback()
+            residual = None
+    residual_ids = sorted(str(m) for m in residual or set())
+
+    any_errors = any(t["status"] == "error" for t in targets)
+    if any_errors:
+        status = ERASURE_STATUS_ERRORS
+    elif residual is None:
+        status = ERASURE_STATUS_UNVERIFIED
+    elif residual_ids:
+        status = ERASURE_STATUS_RESIDUAL
+    else:
+        status = ERASURE_STATUS_COMPLETED
+
+    detail: dict[str, Any] = {
+        "requested_by": requested_by,
+        "mode": "soft",
+        "targets": targets,
+        "summary": {
+            "requested": len(unique_ids),
+            "invalidated": len(invalidated),
+            "skipped": len(unique_ids) - len(invalidated),
+            "errors": sum(1 for t in targets if t["status"] == "error"),
+            "suppressed": sum(len(t.get("suppressed_sources") or []) for t in invalidated),
+            "payload_refresh_enqueued": sum(int(t.get("payload_refresh_enqueued") or 0)
+                                            for t in invalidated),
+            "serving_residual": len(residual_ids),
+        },
+        "serving_residual": residual_ids,
+    }
+    if invalidated:
+        # Additive, like the hard receipt's `verification`: what this call could
+        # actually confirm. Omitted when nothing was invalidated — a forget
+        # that changed nothing verified nothing.
+        detail["serving_residual_checked"] = residual is not None
+
+    receipt = ErasureReceipt(
+        user_id=user_id,
+        requested_memory_ids=[str(m) for m in unique_ids],
+        status=status,
+        detail=detail,
+    )
+    db.add(receipt)
+    await db.commit()
+    await db.refresh(receipt)
+    return receipt
+
+
 # ── reconciliation: the drain's progress revises open receipts (R16) ────────
 
 # Receipt statuses reconcile may revise. Everything else is terminal: a
@@ -745,4 +931,5 @@ __all__ = [
     "erase_memories",
     "list_receipts",
     "reconcile_erasure_receipts",
+    "soft_forget",
 ]

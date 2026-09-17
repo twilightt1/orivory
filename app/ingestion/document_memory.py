@@ -108,28 +108,35 @@ async def is_suppressed_async(db: AsyncSession, *, user_id, source_ref: str) -> 
     return (await db.execute(_suppression_stmt(user_id, source_ref))).first() is not None
 
 
-def suppress_source(db: Session, *, user_id, source_ref: str, reason: str = "forgotten") -> None:
+def suppress_source(db: Session, *, user_id, source_ref: str, reason: str = "forgotten",
+                    namespace: str | None = None, content_hash: str | None = None) -> None:
     """Record that this identity was forgotten (idempotent, caller commits).
 
     The unique ``(user_id, source_ref)`` keeps exactly one suppression row, so
-    replaying the forget is a no-op instead of an integrity error.
+    replaying the forget is a no-op instead of an integrity error. ``namespace``
+    is the boundary the suppression was written in; ``content_hash`` is filled
+    at UPLOAD time by the P4b/T4 guards — a caller that does not know one passes
+    nothing, and the column stays NULL (R38: never backfilled).
     """
     if is_suppressed(db, user_id=user_id, source_ref=source_ref):
         return
     db.add(MemorySuppression(id=uuid.uuid4().hex, user_id=user_id,
-                             source_ref=source_ref, reason=reason))
+                             source_ref=source_ref, reason=reason,
+                             namespace=namespace, content_hash=content_hash))
     # Flush so a replay inside the same transaction sees the row (the session
     # does not autoflush) instead of racing the unique constraint.
     db.flush()
 
 
 async def suppress_source_async(db: AsyncSession, *, user_id, source_ref: str,
-                                reason: str = "forgotten") -> None:
+                                reason: str = "forgotten", namespace: str | None = None,
+                                content_hash: str | None = None) -> None:
     """Async face of :func:`suppress_source`."""
     if await is_suppressed_async(db, user_id=user_id, source_ref=source_ref):
         return
     db.add(MemorySuppression(id=uuid.uuid4().hex, user_id=user_id,
-                             source_ref=source_ref, reason=reason))
+                             source_ref=source_ref, reason=reason,
+                             namespace=namespace, content_hash=content_hash))
     await db.flush()
 
 
