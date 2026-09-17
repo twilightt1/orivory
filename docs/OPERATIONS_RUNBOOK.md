@@ -180,12 +180,14 @@ exactly as it did before the column existed.
   for any other namespace must not inherit pre-P4 points — and it must be
   dropped when a second namespace is served (sharing on): from then on a
   key-less point cannot be assumed personal.
-- **What is NOT here.** Sharing/team namespaces (P4b); a namespace component in
-  the cache keys (§4.3 — no cache read/write path is live in P4a: the retrieval
-  query cache has no producer or consumer and the response cache has no caller,
-  both are invalidation-only today, so P4b must add the component when it wires
-  them); and a namespace column on the outbox record (the applier re-reads the
-  row and writes THAT row's namespace — R33).
+- **What is NOT here.** Sharing/team namespaces (NOT P4b either — P4b ships
+  the lifecycle, `personal` is still the only namespace in existence; a later
+  phase owns sharing); a namespace component in the cache keys (§4.3 — no cache
+  read/write path is live: the retrieval query cache has no producer or
+  consumer and the response cache has no caller, both are invalidation-only
+  today, so the component is owed by whoever wires a live one — P4a AND P4b
+  both left them unwired); and a namespace column on the outbox record (the
+  applier re-reads the row and writes THAT row's namespace — R33).
 - **The fence, and its ceiling.** `tests/api/test_dormant_router_acl.py` scans
   every `select(...)` that NAMES a memory model under `app/`, allowlisted by file
   and statement count, alias-aware. Green there is NOT "every read is guarded":
@@ -234,9 +236,15 @@ Three known ceilings, all diagnostic — none of them changes a verdict:
 
 - the pre-delete cascade count under-counts below the first level (a cascade
   that removes three rows two levels down is counted once);
-- a cascade below a node of the DERIVED closure is not walked at all, and such a
-  receipt can read `completed` — latent while `cm_derived_from` has no writer
-  (P4a ships no consolidation producer);
+- the hard-erase walk collects ONE `cm_derived_from` hop (`collect_derived_ids`),
+  while the pre-delete cascade count spans the whole `parent_id` cascade below
+  the walked set (the S5 fix, T1) — so a cascade that removes a row BELOW a
+  derived node IS reported, but a derived view of a derived view is not walked
+  at all. Measured: such a row survives the erase while the receipt reads
+  `completed` (no residual key covers it). Rule v1 — the P4b consolidation
+  producer — is non-recursive and never builds that chain itself; the soft path
+  (MCP `forget_memory`) DOES walk the closure transitively, so this residual is
+  hard-erase-only;
 - `residual_rows` is an upper bound, not a partition: a cross-user child is
   counted in BOTH `cross_user_children` and `cascaded_out_of_namespace`, so the
   number can exceed the rows that exist.
@@ -260,6 +268,121 @@ MCP `timeline` neighbours are filtered by the caller's namespace AND
 `not_dirty_predicate()`: a stale derived row is wrong data, not history, so it
 no longer appears beside the anchor. Superseded neighbours still do (labelled).
 
+## P4b — lifecycle: soft forget, consolidation, retention
+
+P4b is the lifecycle phase on top of P4a's namespace: invalidation and the
+dependency closure, the same-slot correction CAS, soft forget with universal
+suppression, a budgeted consolidation producer, and opt-in retention. Sharing
+did NOT land here (see the P4a "What is NOT here" note).
+
+### The lifecycle states
+
+One rule, `correction.state_of` (mirrored in SQL by
+`visibility.state_expression`), precedence
+`invalidated > superseded > dirty > needs-check > current`:
+
+| state | meaning | served? |
+|---|---|---|
+| `current` | the row's fact stands | yes |
+| `needs-check` | ambiguous/late-import/refused — a human or agent must decide | yes, labelled |
+| `superseded` | a newer version points back at it | history: REST list and direct reads yes, recall no (unless a surface asks for history) |
+| `dirty` | a stale derived view — wrong data, not history | never, on any surface (not even `timeline`) |
+| `invalidated` | forgotten, or expired by retention — provenance kept | history: direct reads and `timeline` yes, serving surfaces no |
+
+`pin` protects a row from AUTO-retention only. Explicit forget and hard erase
+both win over a pin.
+
+### Soft forget (MCP `forget_memory`)
+
+- Invalidates the target AND its transitive closure (`parent_id` +
+  `cm_derived_from`, `collect_dependency_closure`) — unlike the hard-erase
+  walk, which collects one derived hop (ceiling above). A truncated closure is
+  REFUSED before any write.
+- Writes a `memory_suppressions` row for EVERY affected `source_ref` (not only
+  the root), plus the projection's upload-time `content_hash` when it carries
+  one — the re-upload guard (R38).
+- The row, its content and its provenance stay; the vector point stays too, and
+  its payload `visibility_state` is refreshed to `invalidated` by the drain
+  (R37). SQL `not_dirty_predicate()` is what closes serving immediately.
+- The receipt (`detail.mode: "soft"`) reports `completed` only after a
+  serving-off readback; leftovers are `completed_with_residual`, an unreadable
+  check is `completed_unverified`.
+- The tool's response keys are `receipt_id`, `status`, `invalidated`,
+  `suppressed`, `skipped`, `invalid` (no `erased`): `invalidated` counts the
+  REQUESTED targets, `suppressed` every affected source.
+
+### Consolidation producer (drain hook, R39)
+
+`run_consolidation` runs after every drain round that landed work AND on idle
+ticks, at most `CONSOLIDATION_BUDGET_PER_RUN` (default 10) groups per user per
+pass for at most `CONSOLIDATION_USERS_PER_PASS` (10) users per pass.
+
+- Rule v1 (`tag-summary.v1`): servable memories grouped by tag, ≥2 sources per
+  group, summarized through the shared LLM seam. NON-RECURSIVE: a summary is
+  never a source for another summary.
+- Provenance on the row: `cm_derived_from`, `cm_source_revisions`,
+  `cm_rule_version`, `cm_derived_key` = `sha256(sorted source ids |
+  revisions | rule)` — the dedupe key. A re-run whose key is already published
+  in a servable row skips the group BEFORE any LLM call.
+- Publish-time guard: the sources are re-read right before the publish
+  (`populate_existing`); anything that moved, vanished, left the namespace or
+  stopped being servable stands the publish down and marks the closure's stale
+  views `dirty`. The window it protects is one generation pass; a source that
+  changes and NO pass runs leaves the old view serving (still labelled
+  `derived`) until a later pass re-walks it.
+- `derived` is the serving label, and it lives in the MCP provenance only
+  (`get_memory`/`add_memory`/`correct_memory`: `derived`, `derived_from`,
+  `source_revisions`, `rule_version`). REST/compact payloads carry the raw
+  metadata markers (`metadata.cm_assertion == "derived"` plus the lineage keys)
+  and never the computed flag.
+- Idempotence is PER PROCESS: the in-memory key set is the run's own view, so
+  two app processes passing over the same store can each publish the same key
+  (duplicate summaries, redundant LLM spend — the same single-flight ceiling
+  the drain loop documents). One app process is the supported shape.
+
+### Retention (opt-in, spec §8.1)
+
+- Default OFF, and nothing is swept for a user who has not opted in. Opt in (or
+  change the window) with `PATCH /api/v1/users/me/settings` — a FULL REPLACE
+  body; `{}` turns it off. `enabled` without a window is a 422. Read back via
+  `GET /api/v1/users/me`.
+- The sweep rides IDLE drain ticks only (`_retain_after_drain`), and with no
+  user enabled the whole pass is one `SELECT` on `users` — no memory scan.
+- Per expired row: `invalidated` + one append-only `memory_access_logs` row
+  (`action: retention_expired`, detail `{reason, retention_days, indexed_at}`)
+  + the same payload-refresh intent soft forget uses. The clock is
+  `indexed_at` — how long this install has HELD the row. `pinned` rows are
+  exempt; a second sweep is a no-op (already-invalidated rows are never
+  selected).
+- Expiry RELABELS what it touches: precedence is `invalidated` > `superseded`,
+  so a superseded row that expires reports `invalidated` from then on — the
+  timeline label changes with it, and the history surfaces that widen to
+  superseded (`include_superseded` recall, MCP `include_history`) stop
+  returning it.
+- **Retention is a per-row expiry, NOT a closure walk, and NOT a privacy
+  guarantee.** It writes NO suppression row (auto expiry is not the user
+  forgetting a source), so a re-import after a row expired is caught only by
+  the ordinary `source_ref` dedup (`skipped_duplicates` — silently, like any
+  duplicate), and a derived view whose sources expired keeps serving until its
+  OWN `indexed_at` passes the window. Treat "retention expired this" as "this
+  row left serving", never as "the fact is gone from every surface".
+- **Several app processes:** the sweep is per-process like the drain loop, and
+  it selects and writes per row — two processes racing the same row can both
+  write an audit row for it (the second invalidation is a no-op on the row
+  itself, but the audit log can show the expiry twice). Redundant audit rows,
+  never a second state change; one app process is the supported shape.
+
+### The correction CAS (MCP `correct_memory`)
+
+An explicit `memory_id` carries the revision the tool just read, so the
+supersede applies only if the slot is still where the read found it; a
+concurrent writer that moved it answers `status: "conflict"` (new row flagged
+`needs-check`, nothing superseded, read the slot again). A slot holding more
+than one exact candidate is refused the same way — the tool never supersedes a
+candidate the caller did not name. Ledger rows carry the status, so
+`mcp_correct` volumes with a rising `conflict` share mean agents are racing on
+the same slot (or reading a slot that is genuinely ambiguous).
+
 ## Background indexing (P3)
 
 Every canonical write stamps a durable `index_outbox` intent in the SAME SQL
@@ -278,7 +401,10 @@ replays it against the latest SQL state until the vector store confirms it.
   `OUTBOX_DRAIN_BATCH_SIZE` (default `50`). A round that applied anything runs
   the next one immediately, so a backlog drains at full speed. Set
   `OUTBOX_DRAIN_ENABLED=false` only to quiesce a store for a cutover: memory
-  recall then stops waiting for its own writes.
+  recall then stops waiting for its own writes. The hooks that ride the drain
+  stop with it — with the drain disabled, neither the consolidation producer
+  (R39) nor the retention sweep (`_consolidate_after_drain` /
+  `_retain_after_drain`) ever runs.
 - **Memory recall is guarded, and fails closed.** `MemoryRetriever.recall`
   waits for the calling tenant's pending intents, bounded by
   `RECALL_FRESHNESS_BUDGET_SECONDS` (default `2.0`), and answers
@@ -608,6 +734,13 @@ projection's existing point is deleted by the next GC pass, so the content stops
 being vector-searchable. That is the intended forgetting semantics — a
 read-path behaviour change worth knowing about when a "forgotten" memory is
 expected to be findable by vector search.
+
+> **P4b clarification.** That GC pass is the migration CLI's OFFLINE pass — it
+> runs when an operator runs it. The LIVE path does not wait for it: a soft
+> forget (`forget_memory`, P4b/T3) closes serving immediately through the SQL
+> visibility rule (`not_dirty_predicate`) and refreshes the memory point's
+> payload state to `invalidated` (R37) — the point is kept, not purged, and
+> physical removal is the reconciliation repair's job (R34).
 
 ### After the rollback window closes
 

@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 
 from sqlalchemy import select
@@ -90,12 +91,20 @@ def _document_summary(parents: list[ParentChunk]) -> str:
 
 # ── suppression ledger: a forgotten identity stays forgotten ────────────────
 
+#: The projection metadata key carrying the upload-time content hash (R38).
+#: Computed from the uploaded BYTES at ingest, never backfilled onto rows that
+#: predate it — an absent key is the honest "unknown", not an invented hash.
+CONTENT_HASH_KEY = "content_hash"
+
+
+def _ledger_stmt(column, user_id):
+    """One ledger column, scoped to one owner — the probe's shared half."""
+    return select(column).where(MemorySuppression.user_id == user_id)
+
 
 def _suppression_stmt(user_id, source_ref: str):
-    return select(MemorySuppression.id).where(
-        MemorySuppression.user_id == user_id,
-        MemorySuppression.source_ref == source_ref,
-    )
+    return _ledger_stmt(MemorySuppression.id, user_id).where(
+        MemorySuppression.source_ref == source_ref)
 
 
 def is_suppressed(db: Session, *, user_id, source_ref: str) -> bool:
@@ -108,28 +117,85 @@ async def is_suppressed_async(db: AsyncSession, *, user_id, source_ref: str) -> 
     return (await db.execute(_suppression_stmt(user_id, source_ref))).first() is not None
 
 
-def suppress_source(db: Session, *, user_id, source_ref: str, reason: str = "forgotten") -> None:
+async def is_content_suppressed_async(db: AsyncSession, *, user_id,
+                                      content_hash: str | None) -> bool:
+    """True when this user forgot a source with these BYTES (R38/T4).
+
+    The re-upload guard's probe: a re-upload mints a NEW document id, so a
+    ``source_ref`` match cannot see it — the ledger's ``content_hash`` (written
+    when the source was forgotten) is the only key that survives the new id.
+    ``None`` never matches: an unknown hash is not a forgotten identity.
+    """
+    if not content_hash:
+        return False
+    stmt = _ledger_stmt(MemorySuppression.id, user_id).where(
+        MemorySuppression.content_hash == content_hash)
+    return (await db.execute(stmt)).first() is not None
+
+
+async def suppressed_refs_async(db: AsyncSession, *, user_id,
+                                source_refs: Iterable[str]) -> set[str]:
+    """Which of ``source_refs`` this user forgot — ONE batched ledger read.
+
+    The import guard's probe (never one query per item): the same shape as the
+    import path's dedup select, against the same ``(user_id, source_ref)`` key.
+    The ledger's unique index answers it in one pass.
+    """
+    refs = [ref for ref in source_refs if ref]
+    if not refs:
+        return set()
+    stmt = _ledger_stmt(MemorySuppression.source_ref, user_id).where(
+        MemorySuppression.source_ref.in_(refs))
+    return {row for row in (await db.execute(stmt)).scalars().all() if row}
+
+
+def projection_content_hash(row) -> str | None:
+    """The upload-time content hash a projection row carries, or ``None``.
+
+    Read by the forget path to pin BYTES in the ledger, not only the doc id
+    (R38). A row that predates the hash, or a non-document memory, reads None.
+    """
+    value = (getattr(row, "extra_metadata", None) or {}).get(CONTENT_HASH_KEY)
+    return str(value) if value else None
+
+
+def suppress_source(db: Session, *, user_id, source_ref: str, reason: str = "forgotten",
+                    namespace: str | None = None, content_hash: str | None = None) -> None:
     """Record that this identity was forgotten (idempotent, caller commits).
 
     The unique ``(user_id, source_ref)`` keeps exactly one suppression row, so
-    replaying the forget is a no-op instead of an integrity error.
+    replaying the forget is a no-op instead of an integrity error. ``namespace``
+    is the boundary the suppression was written in; ``content_hash`` is the
+    forgotten projection's upload-time hash, supplied by the caller — a forget
+    passes ``projection_content_hash(row)``, the re-upload guard passes the
+    sha256 it just computed from the incoming bytes — the import/reindex/drain
+    guards only read this ledger, they never write it. A caller with no hash
+    passes nothing and the column stays NULL (R38: never backfilled).
     """
     if is_suppressed(db, user_id=user_id, source_ref=source_ref):
         return
     db.add(MemorySuppression(id=uuid.uuid4().hex, user_id=user_id,
-                             source_ref=source_ref, reason=reason))
+                             source_ref=source_ref, reason=reason,
+                             namespace=namespace, content_hash=content_hash))
     # Flush so a replay inside the same transaction sees the row (the session
     # does not autoflush) instead of racing the unique constraint.
     db.flush()
 
 
 async def suppress_source_async(db: AsyncSession, *, user_id, source_ref: str,
-                                reason: str = "forgotten") -> None:
-    """Async face of :func:`suppress_source`."""
+                                reason: str = "forgotten", namespace: str | None = None,
+                                content_hash: str | None = None) -> None:
+    """Async face of :func:`suppress_source` — same row, same fields.
+
+    ``content_hash`` is the same caller-supplied value (a forget's
+    ``projection_content_hash(row)``, or the re-upload guard's freshly computed
+    sha256 of the incoming bytes); nothing here computes or backfills one.
+    """
     if await is_suppressed_async(db, user_id=user_id, source_ref=source_ref):
         return
     db.add(MemorySuppression(id=uuid.uuid4().hex, user_id=user_id,
-                             source_ref=source_ref, reason=reason))
+                             source_ref=source_ref, reason=reason,
+                             namespace=namespace, content_hash=content_hash))
     await db.flush()
 
 
@@ -195,6 +261,7 @@ def build_document_memories_sync(
     parents: list[ParentChunk],
     *,
     user_id,
+    content_hash: str | None = None,
 ) -> DocMemoryResult:
     """Create the document + passage memories for one ingested document.
 
@@ -206,6 +273,12 @@ def build_document_memories_sync(
 
     A suppressed identity (user forgot this source) is skipped outright: no
     rows, no intent, nothing to re-ingest.
+
+    ``content_hash`` is the sha256 of the UPLOADED BYTES, handed down by the
+    ingest seam (R38/T4). It travels with the projection so a later forget can
+    pin the bytes — not only the doc id — in the suppression ledger, which is
+    what catches a re-upload (a new document id). ``None`` keeps the key out of
+    the metadata: an unknown hash must not be invented.
     """
     if is_suppressed(db, user_id=user_id, source_ref=document_id):
         log.info("Doc→memory skipped: source suppressed",
@@ -243,6 +316,10 @@ def build_document_memories_sync(
         "conversation_id": str(doc.conversation_id),
         "filename": doc.filename,
     }
+    if content_hash:
+        # R38: the upload-time hash rides the projection, so forgetting this
+        # source pins the BYTES and a re-upload of the same file is caught.
+        base_meta[CONTENT_HASH_KEY] = content_hash
 
     doc_memory = Memory(
         id=uuid.uuid4(),
@@ -300,13 +377,17 @@ def build_document_memories_sync(
 
 
 __all__ = [
+    "CONTENT_HASH_KEY",
     "DocMemoryResult",
     "build_document_memories_sync",
     "delete_document_memories_sync",
     "delete_document_memories_async",
+    "is_content_suppressed_async",
     "is_suppressed",
     "is_suppressed_async",
+    "projection_content_hash",
     "suppress_source",
     "suppress_source_async",
+    "suppressed_refs_async",
     "DOC_MEMORY_SOURCE_TYPE",
 ]

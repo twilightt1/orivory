@@ -6,6 +6,8 @@ from app.database import get_db
 from app.schemas.auth import (
     ChangePasswordRequest,
     ChangePasswordResponse,
+    RetentionSettingsRequest,
+    RetentionSettingsResponse,
     UpdateProfileRequest,
     UserResponse,
 )
@@ -28,6 +30,27 @@ async def update_profile(
 ):
     user = await auth_service.update_display_name(db, current_user, body.display_name)
     return UserResponse.model_validate(user)
+
+
+@router.patch("/me/settings", response_model=RetentionSettingsResponse)
+async def update_retention_settings(
+    body: RetentionSettingsRequest,
+    current_user=Depends(get_current_verified_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Turn opt-in retention on/off and choose the window (P4b/T6, spec §8.1).
+
+    A dedicated endpoint rather than a wider ``PATCH /me``: the retention pair
+    is a settings write with its own validation (enabled requires a window),
+    while ``PATCH /me`` stays the profile write it has always been. The read
+    side is ``GET /me`` — ``UserResponse`` carries both fields.
+    """
+    user = await auth_service.set_retention_settings(
+        db, current_user, enabled=body.retention_enabled, days=body.retention_days)
+    return RetentionSettingsResponse(
+        retention_enabled=user.retention_enabled,
+        retention_days=user.retention_days,
+    )
 
 
 @router.post("/me/change-password", response_model=ChangePasswordResponse)

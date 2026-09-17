@@ -44,14 +44,22 @@ from app.models.memory import Memory
 from app.models.memory_access_log import MemoryAccessLog
 from app.observability.fallbacks import count_fallback
 from app.retrieval.embedder import EmbeddingDimensionMismatch
-from app.retrieval.memory.correction import Slot, get_cm, resolve_correction, state_of
+from app.retrieval.memory.correction import (
+    CM_DERIVED_FROM,
+    CM_RULE_VERSION,
+    CM_SOURCE_REVISIONS,
+    Slot,
+    get_cm,
+    resolve_correction,
+    state_of,
+)
 from app.retrieval.memory.namespaces import namespace_of, personal_namespace
 from app.retrieval.memory.outbox import IndexFreshnessTimeout, mark_done
 from app.retrieval.memory.retriever import MemoryRetriever
 from app.retrieval.memory.visibility import namespace_predicate, not_dirty_predicate
 from app.retrieval.memory.write_back import index_new_memory
 from app.retrieval.vector_retriever import VectorUnavailableError
-from app.services.erasure_service import erase_memories
+from app.services.erasure_service import erase_memories, soft_forget
 
 log = logging.getLogger(__name__)
 
@@ -283,7 +291,7 @@ async def search_memory(query: str, limit: int = 8, include_history: bool = Fals
             # Defence in depth (the query above already filters dirty): this
             # mirror of state_of is the layer that also catches a hand-written
             # falsy marker. History widens to superseded, never to dirty.
-            rows_in_rank = [m for m in rows_in_rank if state_of(m) != "dirty"]
+            rows_in_rank = [m for m in rows_in_rank if state_of(m) not in ("dirty", "invalidated")]
             if not include_history:
                 rows_in_rank = [m for m in rows_in_rank if state_of(m) != "superseded"]
             results = [_memory_index_row(m) for m in rows_in_rank]
@@ -313,9 +321,8 @@ async def timeline(memory_id: str, window: int = 4) -> dict[str, Any]:
     The anchor is read by primary key (the caller asked for THAT id: theirs and
     in their namespace, answered "not found" otherwise — no existence oracle).
     The neighbours are a query, so their predicate is in the statement: same
-    tenant, same namespace, and never a dirty row — a stale derived row is
-    wrong data, not the history this tool exists to show. Superseded
-    neighbours stay, labelled.
+    tenant, same namespace; dirty-only rows stay hidden. Superseded and
+    invalidated neighbours stay, labelled as history, never current evidence.
     """
     principal = _current_principal()
     if principal is None:
@@ -346,7 +353,7 @@ async def timeline(memory_id: str, window: int = 4) -> dict[str, Any]:
                     .where(
                         Memory.user_id == principal.user_id,
                         boundary,
-                        not_dirty_predicate(),
+                        not_dirty_predicate(include_invalidated=True),
                         tuple_(Memory.captured_at, Memory.id) < tuple_(literal(anchor.captured_at), literal(anchor.id)),
                     )
                     .order_by(Memory.captured_at.desc(), Memory.id.desc())
@@ -363,7 +370,7 @@ async def timeline(memory_id: str, window: int = 4) -> dict[str, Any]:
                     .where(
                         Memory.user_id == principal.user_id,
                         boundary,
-                        not_dirty_predicate(),
+                        not_dirty_predicate(include_invalidated=True),
                         tuple_(Memory.captured_at, Memory.id) > tuple_(literal(anchor.captured_at), literal(anchor.id)),
                     )
                     .order_by(Memory.captured_at.asc(), Memory.id.asc())
@@ -561,14 +568,17 @@ async def delete_memory(memory_id: str) -> dict[str, Any]:
 
 
 async def forget_memory(memory_ids: list[str]) -> dict[str, Any]:
-    """Erase memories + every derived artifact, with a verification receipt.
+    """Forget memories: invalidate them and pin their sources against re-import.
 
-    Requires ``memory:write``. Ids that are not the caller's — another tenant's,
-    or one of the caller's OWN rows outside their namespace — are resolved out
-    before the erasure service sees them (R35) and reported as ``skipped``:
-    the same answer a missing id gets, so there is never an existence leak.
-    Every authorized call appends one ``mcp_forget`` ledger row pointing at the
-    receipt; the receipt carries the per-target cascade + verification detail.
+    Soft by design (§12/§5.4): the rows, their provenance and their evidence
+    stay; what goes is serving (``invalidated``) and the right to come back (a
+    suppression row per affected source). Requires ``memory:write``. Ids that
+    are not the caller's — another tenant's, or one of the caller's OWN rows
+    outside their namespace — are resolved out before the forget service sees
+    them (R35) and reported as ``skipped``: the same answer a missing id gets,
+    so there is never an existence leak. Every authorized call appends one
+    ``mcp_forget`` ledger row pointing at the receipt, which carries the
+    per-target closure and the serving-off verification detail.
     """
     principal = _current_principal()
     if principal is None:
@@ -586,9 +596,9 @@ async def forget_memory(memory_ids: list[str]) -> dict[str, Any]:
     if not valid:
         return {"error": "invalid memory id"}
     async with _session() as db:
-        # The boundary FIRST: the erasure walk is a read of ``memories`` like
+        # The boundary FIRST: the forget walk is a read of ``memories`` like
         # every other surface, so an id outside the caller's namespace is never
-        # handed to it (and never counted as erased).
+        # handed to it (and never counted as forgotten).
         allowed = set((await db.execute(
             select(Memory.id).where(
                 Memory.id.in_(valid),
@@ -598,8 +608,8 @@ async def forget_memory(memory_ids: list[str]) -> dict[str, Any]:
         )).scalars().all())
         in_namespace = [m for m in valid if m in allowed]
         skipped = len(valid) - len(in_namespace)
-        receipt = await erase_memories(db, principal.user_id, in_namespace,
-                                       requested_by=f"agent:{principal.name}")
+        receipt = await soft_forget(db, principal.user_id, in_namespace,
+                                    requested_by=f"agent:{principal.name}")
         summary = receipt.detail.get("summary", {})
         skipped += summary.get("skipped", 0)
         db.add(
@@ -609,7 +619,7 @@ async def forget_memory(memory_ids: list[str]) -> dict[str, Any]:
                 detail={
                     "receipt_id": str(receipt.id),
                     "requested": [str(m) for m in valid],
-                    "erased": summary.get("erased", 0),
+                    "invalidated": summary.get("invalidated", 0),
                     "skipped": skipped,
                 },
             )
@@ -618,14 +628,23 @@ async def forget_memory(memory_ids: list[str]) -> dict[str, Any]:
     return {
         "receipt_id": str(receipt.id),
         "status": receipt.status,
-        "erased": summary.get("erased", 0),
+        "invalidated": summary.get("invalidated", 0),
+        "suppressed": summary.get("suppressed", 0),
         "skipped": skipped,
         "invalid": invalid,
     }
 
 
 def _memory_provenance(memory: Memory) -> dict[str, Any]:
+    """Provenance every MCP read attaches — including the DERIVED label (§8.2).
+
+    A derived summary is a view of its sources, never evidence as strong as
+    they are: ``derived`` is the serving label a consumer switches on, and
+    ``derived_from`` / ``source_revisions`` / ``rule_version`` are the lineage
+    it was published with (P4b/T5). A raw memory answers ``derived: False``.
+    """
     meta = get_cm(memory)
+    derived_from = list(meta.get(CM_DERIVED_FROM) or [])
     return {
         "state": state_of(memory),
         "assertion": meta.get("cm_assertion", "fact"),
@@ -634,12 +653,29 @@ def _memory_provenance(memory: Memory) -> dict[str, Any]:
         "supersedes": meta.get("cm_supersedes"),
         "superseded_by": meta.get("cm_superseded_by"),
         "evidence_ids": list(meta.get("cm_evidence_ids") or []),
+        "derived": bool(derived_from),
+        "derived_from": derived_from,
+        "source_revisions": dict(meta.get(CM_SOURCE_REVISIONS) or {}),
+        "rule_version": meta.get(CM_RULE_VERSION),
     }
 
 
 async def correct_memory(memory_id=None, subject="", attribute="", scope="default",
         title="", content="", valid_from=None, evidence_ids=None) -> dict[str, Any]:
-    """Correct a fact with evidence: new version links back, never overwrites."""
+    """Correct a fact with evidence: new version links back, never overwrites.
+
+    An explicit ``memory_id`` carries the revision this tool just READ of that
+    row as the caller's snapshot (P4b/T2 CAS, spec §8.2): ``resolve_correction``
+    then applies the supersede only if the slot is still where the read found
+    it. A concurrent correction that moved the target answers ``status:
+    conflict`` (the new row lands flagged ``needs-check``, nothing is
+    superseded) instead of a silent supersede on a stale snapshot. That is why
+    the response set includes ``conflict`` alongside added/superseded/
+    needs-check — consumers that switch on ``status`` must know it. A slot with
+    MORE than one exact candidate is refused the same way: the caller vetted
+    the target it named, and the tool never moves a second candidate the caller
+    never saw.
+    """
     principal = _current_principal()
     if principal is None:
         return IDENTITY_ERROR
@@ -666,6 +702,7 @@ async def correct_memory(memory_id=None, subject="", attribute="", scope="defaul
             content=content, slot=Slot.of(subject, attribute, scope),
             valid_from=valid_from, evidence_ids=list(evidence_ids or []),
             memory_id=str(target.id) if target else None,
+            expected_revisions={target.id: target.revision} if target else None,
             source_ref=f"agent:{principal.name}")
         new = out["memory"]
         db.add(_ledger_entry(principal, ACTION_CORRECT, memory_id=new.id,

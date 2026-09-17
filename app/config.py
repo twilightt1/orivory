@@ -33,6 +33,14 @@ class Settings(BaseSettings):
     OUTBOX_DRAIN_INTERVAL_SECONDS: float = 5.0
     OUTBOX_DRAIN_BATCH_SIZE: int = 50
 
+    # ── Consolidation (P4b background producer) ───────────────────────────────
+    # The drain loop spends a landed round AND an idle tick on the consolidation
+    # producer (ruling R39), which turns servable memories into derived
+    # summaries with provenance. The budget is SOFT and per user per pass: a run
+    # attempts at most this many groups and therefore publishes at most this
+    # many memories. 0 quiesces the producer without touching the drain itself.
+    CONSOLIDATION_BUDGET_PER_RUN: int = 10
+
     # ── Recall freshness barrier (P3) ─────────────────────────────────────────
     # A recall waits up to this long for its OWN tenant's pending index intents
     # to land before it searches (app/retrieval/memory/freshness.py): a memory

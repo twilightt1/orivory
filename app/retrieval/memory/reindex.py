@@ -20,12 +20,16 @@ from __future__ import annotations
 
 import logging
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.database import sync_session
 from app.models.memory import Memory
 from app.retrieval.memory.namespaces import personal_namespace
-from app.retrieval.memory.visibility import current_memory_predicate, namespace_predicate
+from app.retrieval.memory.visibility import (
+    current_memory_predicate,
+    namespace_predicate,
+    suppressed_source_predicate,
+)
 
 log = logging.getLogger(__name__)
 
@@ -41,6 +45,9 @@ def reindex_user_memories_sync(user_id: str, only_missing: bool = True, *,
 
     Current rows only: superseded rows are history and dirty rows are stale —
     neither belongs in the vector index (the predicate applies before paging).
+    Rows whose SOURCE the user forgot are skipped for the same reason (R38/T4:
+    a forgotten source must not regain a servable vector), and are counted in
+    ``suppressed_skipped``.
     The namespace predicate is the same statement's other half: a row outside
     the authorized namespace is never embedded (P4a: one namespace, so the
     boundary is byte-equivalent to the pre-P4 read).
@@ -59,19 +66,31 @@ def reindex_user_memories_sync(user_id: str, only_missing: bool = True, *,
     scanned = 0
     already_indexed = 0
     reindexed = 0
+    suppressed_skipped = 0
     pages = 0
     offset = 0
     ns = namespace or personal_namespace(user_id)
 
     try:
         with sync_session() as db:
+            # Counted, not listed: the filter below is the same predicate, so
+            # the summary can say how many rows the ledger took out.
+            suppressed_skipped = int(db.scalar(
+                select(func.count()).select_from(Memory).where(
+                    Memory.user_id == user_id,
+                    namespace_predicate(ns),
+                    current_memory_predicate(),
+                    suppressed_source_predicate(user_id),
+                )
+            ) or 0)
             while True:
                 rows = (
                     db.execute(
                         select(Memory)
                         .where(Memory.user_id == user_id,
                                namespace_predicate(ns),
-                               current_memory_predicate())
+                               current_memory_predicate(),
+                               ~suppressed_source_predicate(user_id))
                         .order_by(Memory.indexed_at)
                         .offset(offset)
                         .limit(_PAGE_SIZE)
@@ -110,6 +129,7 @@ def reindex_user_memories_sync(user_id: str, only_missing: bool = True, *,
             "scanned": scanned,
             "already_indexed": already_indexed,
             "reindexed": reindexed,
+            "suppressed_skipped": suppressed_skipped,
             "pages": pages,
         }
         log.info("Memory reindex complete", extra=summary)

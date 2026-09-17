@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import uuid
 from uuid import UUID
@@ -41,6 +42,11 @@ async def upload_document(db: AsyncSession, conversation: Conversation, file: Up
     if conversation.document_count >= MAX_DOCS:
         raise HTTPException(400, detail=f"Maximum {MAX_DOCS} documents per conversation.")
 
+    # R38 (P4b/T4): the content hash is computed HERE, from the uploaded bytes.
+    # It is the only key that can catch a re-upload of a forgotten file: the
+    # new document gets a new id, so ``source_ref`` cannot match.
+    content_hash = hashlib.sha256(content).hexdigest()
+
     doc_id    = str(uuid.uuid4())
     file_path = f"{conversation.id}/{doc_id}_{file.filename}"
 
@@ -58,6 +64,28 @@ async def upload_document(db: AsyncSession, conversation: Conversation, file: Up
     )
     db.add(doc)
     conversation.document_count += 1
+
+    from app.ingestion.document_memory import (
+        is_content_suppressed_async,
+        suppress_source_async,
+    )
+    from app.retrieval.memory.namespaces import personal_namespace
+
+    if await is_content_suppressed_async(db, user_id=conversation.user_id,
+                                         content_hash=content_hash):
+        # The same bytes came back after this user forgot their source. The
+        # raw upload is KEPT (spec §12.3: a memory-targeted forget never
+        # deletes uploads); only the projection is refused — the new identity
+        # is pinned in the ledger, which is exactly what the projection guard
+        # (``build_document_memories_sync``) and the reindex/drain guards read.
+        await suppress_source_async(db, user_id=conversation.user_id, source_ref=doc_id,
+                                    reason="forgotten_content", content_hash=content_hash,
+                                    namespace=personal_namespace(conversation.user_id))
+        log.info(
+            "Re-upload of a forgotten source: memories suppressed",
+            extra={"doc_id": doc_id, "conversation_id": str(conversation.id),
+                   "suppressed_skipped": 1, "reason": "forgotten_content"},
+        )
     await db.commit()
     await db.refresh(doc)
 

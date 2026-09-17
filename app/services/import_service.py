@@ -2,6 +2,7 @@
 
 Turns an uploaded provider export file into Memory rows: parse (adapters)
 → resolve/detect format → dedup on (user_id, source_type, source_ref) →
+skip every item whose identity the user FORGOT (suppression ledger, R38/T4) →
 create rows → single commit → best-effort indexing (embed + graph enqueue
 via write_back — Postgres is the source of truth, indexing never raises).
 
@@ -11,7 +12,7 @@ imports move to a Celery task later (docs/API.md §Imports, follow-ups).
 Signature/counts follow the controller's Task 3 binding rules — parse_import
 is called as parse_import(data, source_format) (data first, per its shipped
 signature), and the summary counts are {parsed, created, skipped_duplicates,
-failed, index_failures}.
+suppressed_skipped, failed, index_failures}.
 """
 from __future__ import annotations
 
@@ -22,6 +23,7 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.ingestion.document_memory import suppressed_refs_async
 from app.ingestion.import_formats import (
     SOURCE_TYPE_FOR_FORMAT,
     ImportFormatError,
@@ -89,9 +91,15 @@ async def run_import(
         ).scalars().all()
         existing_refs = {row for row in rows if row}
 
+    # Suppression (R38/T4): an identity the user forgot must not come back
+    # through a re-import. Same batched shape as the dedup read above — one
+    # ledger query for the whole file, never a probe per item.
+    suppressed_refs = await suppressed_refs_async(db, user_id=user_id, source_refs=refs)
+
     created_rows: list[Memory] = []
     seen_refs: set[str] = set()
     skipped_duplicates = 0
+    suppressed_skipped = 0
     failed = 0
     index_failures = 0
 
@@ -100,6 +108,15 @@ async def run_import(
         try:
             if item.source_ref and (item.source_ref in existing_refs or item.source_ref in seen_refs):
                 skipped_duplicates += 1
+                continue
+            if item.source_ref and item.source_ref in suppressed_refs:
+                # Taken before the row exists (and before any intent): nothing
+                # to index, nothing to serve, nothing to replay.
+                suppressed_skipped += 1
+                log.info(
+                    "Import item skipped: source suppressed",
+                    extra={"user_id": str(user_id), "source_ref": item.source_ref},
+                )
                 continue
             memory = Memory(
                 user_id=user_id,
@@ -158,6 +175,7 @@ async def run_import(
         parsed=len(items),
         created=len(created_rows),
         skipped_duplicates=skipped_duplicates,
+        suppressed_skipped=suppressed_skipped,
         failed=failed,
         index_failures=index_failures,
     )

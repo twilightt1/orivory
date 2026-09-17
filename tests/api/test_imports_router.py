@@ -28,6 +28,13 @@ async def _require_test_database():
     await require_db_available()
 
 
+# The two DB-FREE pins — the summary shape (T4's `suppressed_skipped`) and the
+# byte-exact full-request seam — live in tests/api/test_import_summary_shape.py
+# and nowhere else: this module's autouse probe above would skip them whenever
+# Postgres is down, which is exactly the run the P4b CI step (no services) is.
+# Everything left here needs a live session.
+
+
 def test_imports_routes_registered():
     paths = {route.path for route in router.routes if isinstance(route, APIRoute)}
     assert "/imports" in paths
@@ -35,15 +42,6 @@ def test_imports_routes_registered():
 
 def test_import_upload_cap_is_20mib():
     assert MAX_IMPORT_UPLOAD_BYTES == 20 * 1024 * 1024
-
-
-def test_import_summary_response_shape():
-    """Shipped 5-count schema (T3 binding rules) — the plan's old field
-    set (detected_format/filename/errors/...) does not exist."""
-    from app.schemas.Orivory import ImportSummary
-
-    fields = set(ImportSummary.model_fields)
-    assert fields == {"parsed", "created", "skipped_duplicates", "failed", "index_failures"}
 
 
 async def test_router_prevalidates_unknown_source_format():
@@ -252,46 +250,6 @@ async def test_run_import_receives_bytes_not_str(monkeypatch):
     assert received[0][1] is None
     assert received[0][2] == "rest_api"
     assert summary.parsed == 0
-
-
-async def test_import_endpoint_passes_bytes_full_request(monkeypatch):
-    """Fix 1, full-request variant: multipart POST through the ASGI app
-    (dependency overrides for auth+db) must hand the service the exact
-    uploaded bytes — not a decoded str, not a re-wrapped one."""
-    received: list = []
-
-    async def _fake_run_import(db, user_id, raw_data, source_format, *, requested_by):
-        received.append(raw_data)
-        return ImportSummary(parsed=1, created=1, skipped_duplicates=0,
-                             failed=0, index_failures=0)
-
-    monkeypatch.setattr(imports_module, "run_import", _fake_run_import)
-
-    async def _current_user_override():
-        return SimpleNamespace(id=uuid.uuid4())
-
-    async def _db_override():
-        yield object()
-
-    # The endpoint authenticates via `_optional_user` (dual human-JWT /
-    # agent-token auth), not `get_current_verified_user` — overriding the
-    # latter leaves the real auth in place and every call 401s.
-    app.dependency_overrides[imports_module._optional_user] = _current_user_override
-    app.dependency_overrides[get_db] = _db_override
-    try:
-        payload = b'[{"content": "hello", "ref": "r1"}]'
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-            response = await client.post(
-                "/api/v1/imports",
-                files={"file": ("items.json", payload, "application/json")},
-                data={"source_format": "generic"},
-            )
-    finally:
-        app.dependency_overrides.clear()
-    assert response.status_code == 201
-    assert response.json() == {"parsed": 1, "created": 1, "skipped_duplicates": 0,
-                              "failed": 0, "index_failures": 0}
-    assert received == [payload], "service must receive the exact uploaded bytes"
 
 
 async def test_import_endpoint_happy_path_real_service(monkeypatch):

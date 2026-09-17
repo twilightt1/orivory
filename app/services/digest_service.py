@@ -24,7 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.memory import Memory
 from app.retrieval.memory.correction import state_of
 from app.retrieval.memory.namespaces import personal_namespace
-from app.retrieval.memory.visibility import namespace_predicate
+from app.retrieval.memory.visibility import namespace_predicate, not_dirty_predicate
 from app.schemas.Orivory import (
     DigestResponse,
     DigestResurfacedMemory,
@@ -97,12 +97,15 @@ async def build_digest(
     # All three queries below read the user's OWN namespace: a digest is a
     # surfacing view, so a row outside it must never be counted or shown.
     namespace = namespace_predicate(personal_namespace(user_id))
+    # Surfacing mirrors the serving rule: dirty is "never served" and
+    # invalidated is history — neither is counted or proactively shown here.
+    valid = not_dirty_predicate()
 
     # ── recent window ────────────────────────────────────────────────────
     recent_rows = (
         await db.execute(
             select(Memory)
-            .where(Memory.user_id == user_id, namespace, Memory.captured_at >= window_start)
+            .where(Memory.user_id == user_id, namespace, valid, Memory.captured_at >= window_start)
             .order_by(Memory.captured_at.desc())
             .limit(RECENT_LIMIT)
         )
@@ -113,7 +116,7 @@ async def build_digest(
     tag_rows = (
         await db.execute(
             select(Memory.tags).where(
-                Memory.user_id == user_id, namespace, Memory.captured_at >= window_start
+                Memory.user_id == user_id, namespace, valid, Memory.captured_at >= window_start
             )
         )
     ).scalars().all()
@@ -132,7 +135,7 @@ async def build_digest(
     old_rows = (
         await db.execute(
             select(Memory)
-            .where(Memory.user_id == user_id, namespace, Memory.captured_at <= cutoff_old)
+            .where(Memory.user_id == user_id, namespace, valid, Memory.captured_at <= cutoff_old)
             .order_by(Memory.salience.desc(), Memory.captured_at.desc())
             .limit(500)
         )

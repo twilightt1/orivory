@@ -117,6 +117,18 @@ class MemorySuppression(Base):
 
     Reingesting the same source must not resurrect a memory the user chose to
     forget; the ledger records that decision per (user, source identity).
+
+    ``namespace`` records the boundary the suppression was written in (R38);
+    ``content_hash`` is the sha256 of the source's BYTES — computed at UPLOAD
+    (``document_service.upload_document``), carried onto the projection rows at
+    INGEST, and copied into this column by the caller that suppresses: a forget
+    passes ``projection_content_hash(row)`` (soft forget and the hard erase
+    alike), and the re-upload guard pins a repeat of the forgotten bytes with
+    the sha256 it just computed (reason ``forgotten_content``). The
+    import/reindex/drain guards only READ this ledger; they never mint a hash,
+    and the column is never backfilled for rows that predate it. Both are
+    nullable on purpose: a pre-P4b row has no such value, and a NULL is the
+    honest "unknown" instead of an invented one.
     """
     __tablename__ = "memory_suppressions"
     __table_args__ = (
@@ -129,6 +141,8 @@ class MemorySuppression(Base):
                                                   nullable=False)
     source_ref: Mapped[str]       = mapped_column(String(500), nullable=False)
     reason:     Mapped[str]       = mapped_column(String(64), nullable=False)
+    namespace:  Mapped[str | None] = mapped_column(String(32), nullable=True)
+    content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime]  = mapped_column(TIMESTAMP(timezone=True), server_default=func.now(),
                                                   nullable=False)
 

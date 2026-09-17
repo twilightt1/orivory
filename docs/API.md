@@ -463,6 +463,54 @@ Change the authenticated user's password.
 
 ---
 
+### PATCH /api/v1/users/me/settings
+
+Write the opt-in retention setting (P4b/T6, spec §8.1) — the ONLY way retention
+is ever enabled. `GET /api/v1/users/me` reads both fields back.
+
+**Request:**
+
+```json
+{
+  "retention_enabled": true,
+  "retention_days": 30
+}
+```
+
+| Field               | Type    | Required | Description                                                                 |
+|---------------------|---------|----------|-----------------------------------------------------------------------------|
+| `retention_enabled` | boolean | No (default `false`) | Whether the retention sweep runs for this user at all |
+| `retention_days`    | integer | No (default `null`, `> 0`) | Rows the system has held longer than this are expired. Choosing the window alone (retention off) is allowed |
+
+> **The body is a FULL REPLACE, not a merge.** A body that omits a field writes
+> that field's default: `{}` turns retention OFF and clears the window. That is
+> the fail-safe direction — a partial PATCH can never silently *narrow* a
+> user's window or leave a setting enabled that the caller did not restate.
+
+**Response `200 OK`:**
+
+```json
+{ "retention_enabled": true, "retention_days": 30 }
+```
+
+`422` when `retention_enabled: true` arrives without `retention_days`: an
+enabled user with no window is a setting that says nothing about WHEN to
+expire, and the sweep would have to invent one — the boundary refuses it
+instead of storing a config that silently does nothing.
+
+**What the sweep does (and does not) do.** It invalidates each expired row
+(soft — the row keeps its content and provenance, see [§14](#14-erasure-receipts))
+and appends one `retention_expired` row to the access ledger per memory. The
+clock is `indexed_at` — how long this install has held the memory. `pinned`
+memories are exempt; explicit `forget_memory`/erasure still wins over a pin.
+Retention is **per row, not per closure**: it writes NO suppression row (auto
+expiry is not the user forgetting a source), so a re-import after a row
+expired is caught only by the ordinary `source_ref` dedup
+(`skipped_duplicates`) — and a derived view whose sources expired keeps
+serving until its OWN age expires.
+
+---
+
 ## 3. Conversations & Chat (RAG Core)
 
 ### GET /api/v1/chat/conversations
@@ -1072,7 +1120,9 @@ List memories with filtering and semantic search.
 }
 ```
 
-> **Note — `total` counts visible rows only:** dirty (stale-derived) memories are excluded from the page and from the total; superseded rows stay listed, labeled `state: "superseded"`.
+> **Note — `total` counts visible rows only:** dirty (stale-derived) and invalidated (forgotten or retention-expired) memories are excluded from the page and from the total; superseded rows stay listed, labeled `state: "superseded"`.
+
+> **Note — the lifecycle state, and where the `derived` label lives (P4b):** every memory response carries `state` — one of `current`, `superseded`, `dirty`, `needs-check`, `invalidated` (`correction.state_of`, mirrored in SQL by `visibility.state_expression`). Serving surfaces (this list, recall, MCP `search_memory`/`list_recent`) exclude `dirty` and `invalidated`; direct reads (`GET /memories/{id}`, MCP `get_memory`) and MCP `timeline` still answer for them, labeled — invalidated rows are history, dirty rows are wrong data (hidden even from `timeline`). A derived summary is marked in two places and they are NOT the same surface: the REST/compact payload carries only the raw metadata marker `metadata.cm_assertion == "derived"` (plus `metadata.cm_derived_from` / `cm_source_revisions` / `cm_rule_version`), while the computed `derived: true|false` flag with `derived_from`/`source_revisions`/`rule_version` is attached by the MCP provenance (`get_memory`, `add_memory`, `correct_memory`). A REST consumer must read the marker; only MCP switches on `derived`.
 
 > **Note — memory filter language (P1b, Qdrant):** the `where` object accepted by the memory search/recall path takes one operator per field, restricted to the allowlist `source_type`, `captured_at`, `salience`, `pinned`, `tags` (`user_id` is always the authenticated principal and is rejected as a filter). Values must be scalars (`bool`/`int`/`str`) or, for `$in`/`$nin`, a list. Tightened against the Chroma-era behaviour, each of these now raises `ValueError`: a **float** operand on `$eq`/`$ne`/`$in`/`$nin`/`$contains` (a float is a range question — use `$gt`/`$gte`/`$lt`/`$lte` on `salience`), a non-scalar operand where a scalar is required (e.g. `{"tags": {"$contains": ["a", "b"]}}` — `$contains` takes ONE element and matches it against the list), and range operators on fields that are not ranges (`pinned`, `tags`, `source_type`). `$ne` and `$nin` compile to `must_not` clauses, and because a missing field never matches an include, a memory carrying no `tags` key is still returned by `tags: {"$ne": "x"}`.
 
@@ -2822,12 +2872,12 @@ Requests without a valid token — or with a revoked token — are rejected befo
 |-----------------|---------------|------------------------------------------------------|
 | `search_memory` | `memory:read` | Semantic search over the caller's memory hub          |
 | `timeline`      | `memory:read` | Anchor + chronological neighbours around one memory   |
-| `get_memory`    | `memory:read` | Fetch one memory by ID                                |
+| `get_memory`    | `memory:read` | Fetch one memory by ID (full content + provenance, any state) |
 | `list_recent`   | `memory:read` | List the caller's most recent memories                |
 | `add_memory`    | `memory:write`| Store a new memory (title, content, optional tags)    |
-| `correct_memory`| `memory:write`| Supersede a fact (correction) with provenance         |
-| `delete_memory` | `memory:write`| Delete one memory by ID                               |
-| `forget_memory` | `memory:write`| Erase memories with cascades + verification receipt (see [§14](#14-erasure-receipts)) |
+| `correct_memory`| `memory:write`| Supersede a fact (correction) with provenance — a same-slot race answers `status: "conflict"` (see below) |
+| `delete_memory` | `memory:write`| Delete one memory by ID (hard erase + receipt)        |
+| `forget_memory` | `memory:write`| Soft-forget memories: invalidate them and pin their sources against re-import (see below and [§14](#14-erasure-receipts)) |
 
 Every tool is scoped to the caller's namespace as well as to the caller's
 account (the token's owner), and `timeline` filters its neighbours by that
@@ -2837,6 +2887,27 @@ whose owner lost the scope) is refused before any tool runs, and the boundary is
 enforced again below the identity layer, on the SQL that reads the rows.
 
 Scopes are enforced per call: a token with only `memory:read` cannot `add_memory` or `delete_memory`.
+
+#### correct_memory: the correction state machine
+
+`correct_memory` never overwrites: it creates a new version and, when the fact
+is a slot it can match (same normalized `subject` + `attribute` + `scope`), it
+supersedes the current one. `status` is one of:
+
+| Status | Meaning |
+|---|---|
+| `added` | No exact candidate: the fact is new to the slot (or outside normalization) |
+| `superseded` | The matched candidate(s) now point at the new version |
+| `needs-check` | Ambiguous (empty scope with a sibling, wrong target, unparseable `valid_from`, a late old import): both rows stay, nothing is superseded |
+| `conflict` | P4b CAS: the slot moved after this tool read it (or holds a candidate the caller did not name). The new version lands flagged `needs-check` and NOTHING is superseded — read the slot again and decide |
+
+The CAS is the reason `status` grew a value: an explicit `memory_id` carries the
+revision this tool just read of that row, and the supersede applies only if the
+slot is still where the read found it. A second writer that lands in that
+window therefore sees `conflict` instead of silently un-learning the winner. A
+slot holding MORE than one exact candidate is refused the same way — the tool
+never supersedes a candidate the caller did not name (the whole apply stands
+down, the named candidate included).
 
 #### Connecting an MCP Client (Claude Desktop example)
 
@@ -2865,6 +2936,8 @@ Scopes are enforced per call: a token with only `memory:read` cannot `add_memory
 ## 14. Erasure Receipts
 
 Erasing a memory removes the row **and every derived artifact** (child memories, entity links, source links, vector-store entries), then runs a post-deletion verification pass: re-query the vector store and re-count residual DB rows per target. Each erasure call returns one **receipt** with per-target detail. Receipts are user-scoped and are deleted with the user.
+
+> **Two shapes share this receipt table (P4b).** The erasure endpoints and MCP `delete_memory` are HARD: rows deleted, vectors purged, absence positively verified. MCP `forget_memory` is SOFT ([§13](#13-agent-clients--mcp-hub)): rows are invalidated in place, every affected source is suppressed against re-import, and the verification is a serving-off readback. A soft receipt carries `detail.mode: "soft"` (hard receipts keep their earlier shape — no `mode` key) and the shared status vocabulary reads differently for it: `completed` means "no target is visible to a serving surface any more", never "the rows are gone".
 
 > **Honest v0 verification:** v0 verifies erasure by **absence-checks** — the receipt confirms that vectors and DB rows are *gone*. It does not probe whether facts can be re-inferred from correlated knowledge-graph data (KG-correlation re-inference probing is a planned follow-up). Also note that `Entity`/`Relation` nodes themselves survive memory erasure in v0 (link counts are recorded in the receipt; orphan pruning is a follow-up). Don't market this as "adversarially verified" until the deeper protocol ships.
 
@@ -2926,6 +2999,8 @@ curl -s -X POST https://api.orivory.io/api/v1/erasure-receipts \
 
 Rollup precedence: `completed_with_errors` > `completed_with_residual` > `completed_unverified` > `completed`. `detail.verification`/`detail.index_pending` are omitted when the call erased nothing (a forget that deleted nothing verified nothing).
 
+The no-op branch of a **soft** forget follows the same rule: a call that invalidated nothing (every requested id foreign or missing) reports `completed_unverified` — nothing was invalidated, so nothing could be verified, and it never claims `completed`. (The hard endpoints keep their earlier shape: nothing erased, no per-target verification, `completed`.)
+
 `vector_residual_checked: false` means the vector-store re-query was unavailable during verification (the DB delete still succeeded — Postgres is the source of truth). A `false` flag alone does not imply residual data.
 
 **Reconciliation.** Open receipts (`completed_unverified`) are re-checked by the reconcile pass (`POST /admin/erasure/reconcile`), OLDEST first (`created_at ASC`, ties broken by id; at most 200 per pass — FIFO, so a sustained erase load cannot starve an old receipt out of the window). A pass that reads the index clean rewrites the SAME receipt to `completed` with the re-verified evidence. A pass that still finds residual vectors does NOT relabel the receipt: it records what it observed in `detail` (`vector_residual_checked: true`, `vector_residual: [...]`) and leaves `status` alone, so the receipt stays open and re-checkable by a later pass — never frozen into the terminal `completed_with_residual`. A pass whose readback failed observed nothing and writes nothing at all: the receipt is byte-identical afterwards. The pass is upgrade-only: `completed`, `completed_with_residual` and `completed_with_errors` receipts are not even scanned, and no open receipt is ever downgraded.
@@ -2975,7 +3050,15 @@ curl -s https://api.orivory.io/api/v1/erasure-receipts/7c9e6679-7425-40de-944b-e
 
 ### MCP: forget_memory
 
-Agents with the `memory:write` scope can call the `forget_memory` MCP tool (endpoint `/mcp`, see [§13](#13-agent-clients--mcp-hub)) with `{"memory_ids": ["<uuid>", ...]}`. It returns a compact summary (`receipt_id`, `status`, `erased`, `skipped`, `invalid`) instead of the full receipt — fetch the receipt via `GET /api/v1/erasure-receipts/{id}` for the per-target detail. Every authorized call appends an `mcp_forget` row to the access ledger pointing at the receipt.
+Agents with the `memory:write` scope can call the `forget_memory` MCP tool (endpoint `/mcp`, see [§13](#13-agent-clients--mcp-hub)) with `{"memory_ids": ["<uuid>", ...]}`. It returns a compact summary — `receipt_id`, `status`, `invalidated`, `suppressed`, `skipped`, `invalid` — instead of the full receipt; fetch the receipt via `GET /api/v1/erasure-receipts/{id}` for the per-target detail (`detail.mode == "soft"`, `detail.targets[].affected_memory_ids` = the invalidated closure). Every authorized call appends an `mcp_forget` row to the access ledger pointing at the receipt. Ids outside the caller's namespace are resolved out before the service sees them and counted in `skipped` — the same answer a missing id gets, so there is never an existence leak.
+
+**`forget_memory` is SOFT (P4b, spec §12/§5.4).** It invalidates the target AND its transitive closure (parent + `cm_derived_from`) and writes a `memory_suppressions` row for every affected `source_ref`, so the content stops being served and cannot be re-imported. What it does NOT do:
+
+- it does not delete rows — content, tags, provenance and evidence links stay (`state: "invalidated"`, readable through `get_memory`/`timeline` and labelled history);
+- it does not purge the vector at once: the point stays, its payload state is refreshed to `invalidated` by the index drain (R37), and the SQL visibility rule is what closes serving immediately;
+- `invalidated` counts the REQUESTED ids this call invalidated (one per id that reached the service) — not the closure size; `suppressed` counts every affected source, so it can exceed `invalidated`.
+
+Hard deletion (row + descendants + vectors, with the full verification receipt) is `delete_memory` (MCP) or `DELETE /api/v1/memories/{id}` and `POST /api/v1/erasure-receipts` (REST). An explicit erase wins over a pin AND over an invalidated row.
 
 > **Note — ledger rows survive erasure by design.** The access ledger is append-only and is never erased by an erasure call: it records that a memory was *accessed before* deletion, which is exactly what makes it an audit trail. Receipts, by contrast, quote personal memory ids and are deleted with the user.
 
@@ -3015,10 +3098,17 @@ curl -X POST https://api.orivory.io/api/v1/imports \
   "parsed": 42,
   "created": 40,
   "skipped_duplicates": 2,
+  "suppressed_skipped": 0,
   "failed": 0,
   "index_failures": 0
 }
 ```
+
+`suppressed_skipped` (P4b/T4) counts items whose source identity the user
+FORGOT: the suppression ledger blocked the re-import, so they are neither
+created nor folded into `skipped_duplicates`. An item that is both a duplicate
+and suppressed stays attributed to the dedup check (it is read first) — the
+order is the one the counters are read in, not a claim about intent.
 
 Duplicates are detected per `(user, source_type, source_ref)` — re-uploading the same export skips what you already imported. Dedup runs per-request (select-then-insert): two concurrent uploads of the same file can both succeed, and generic items without a `ref` field are re-created on every re-upload (a unique index is the planned hardening). Conversation content is clipped at **10,000 characters** (truncation marker appended). Malformed entries inside an otherwise-valid file are **skipped, never fatal** — one bad conversation can't fail the whole import. Embedding is best-effort: `index_failures > 0` means those memories exist and are searchable by keyword but not yet vector-indexed (Postgres is the source of truth; reindex tasks recover them).
 

@@ -177,7 +177,7 @@ def _build_server() -> FastMCP:
 
     @mcp.tool()
     async def forget_memory(memory_ids: list[str], ctx: Context = None) -> dict[str, Any]:
-        """Erase memories and derived artifacts with a verification receipt (memory:write)."""
+        """Forget memories softly: invalidate + suppress re-import (memory:write)."""
         return await _call_with_identity(hub_tools.forget_memory(memory_ids=memory_ids), ctx)
 
     return mcp

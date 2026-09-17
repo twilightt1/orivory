@@ -7,7 +7,7 @@ whatever ``DATABASE_URL`` is ambient (pattern:
 
 The cross-check is the point: the SQL predicate and the SELECT-side state label
 must agree 1:1 with the Python authority ``state_of`` on fixture rows covering
-all four states, a two-key precedence row, and an empty ``extra_metadata``.
+all five states, a two-key precedence row, and an empty ``extra_metadata``.
 """
 from __future__ import annotations
 
@@ -42,6 +42,7 @@ from app.retrieval.memory import retriever as rmod
 from app.retrieval.memory.context import fetch_personal_context
 from app.retrieval.memory.correction import (
     CM_DERIVED_DIRTY,
+    CM_INVALIDATED,
     CM_NEEDS_CHECK,
     CM_SUPERSEDED_BY,
     Slot,
@@ -137,6 +138,7 @@ def _fixture_rows(owner) -> list[Memory]:
         _mem(owner, "ask-me", meta={CM_NEEDS_CHECK: True}),                       # needs-check
         _mem(owner, "both", meta={CM_SUPERSEDED_BY: "successor",
                                   CM_DERIVED_DIRTY: True, CM_NEEDS_CHECK: True}),
+        _mem(owner, "invalidated", meta={CM_INVALIDATED: True}),
     ]
 
 
@@ -208,8 +210,8 @@ async def test_sql_predicate_matches_state_of_on_fixtures(db):
     db.add_all(rows)
     await db.commit()
 
-    # The fixture really covers all four states (a new state cannot slip by).
-    assert {state_of(m) for m in rows} == {"current", "superseded", "dirty", "needs-check"}
+    # The fixture really covers all five states (a new state cannot slip by).
+    assert {state_of(m) for m in rows} == {"current", "superseded", "dirty", "needs-check", "invalidated"}
 
     selected = set((await db.execute(
         select(Memory.id).where(Memory.user_id == owner, current_memory_predicate())
@@ -217,7 +219,7 @@ async def test_sql_predicate_matches_state_of_on_fixtures(db):
 
     # Visible iff state_of is neither superseded nor dirty — needs-check rows
     # stay visible (labeled), superseded rows are history, dirty rows are wrong.
-    assert selected == {m.id for m in rows if state_of(m) not in ("superseded", "dirty")}
+    assert selected == {m.id for m in rows if state_of(m) not in ("superseded", "dirty", "invalidated")}
     assert rows[0].id in selected      # extra_metadata == {} reads current
     assert rows[5].id not in selected  # superseded outranks dirty
 
@@ -1019,7 +1021,7 @@ async def test_admin_reindex_passes_the_namespace_explicitly(db, monkeypatch):
 async def test_mcp_forget_refuses_a_row_outside_the_namespace(db, monkeypatch):
     """R35: ``forget_memory`` is namespace-bounded like get/list/search.
 
-    Reviewer's reproduce: a same-account row in ``team`` was erased by a
+    Reviewer's reproduce: a same-account row in ``team`` was forgotten by a
     ``memory:write`` agent while every other tool answered "not found" for it.
     It is skipped here, and the row, its children and its vector stay put.
     """
@@ -1028,58 +1030,48 @@ async def test_mcp_forget_refuses_a_row_outside_the_namespace(db, monkeypatch):
     db.add(theirs)
     await db.commit()
 
-    async def _no_purge(_memory_id):
-        return True
-
-    async def _absent(_memory_ids):
-        return set()
-
     # The tool boundary is pinned on its own: the id must never REACH the
-    # erasure service. The service refuses the row too (defence in depth), so a
+    # forget service. The service refuses the row too (defence in depth), so a
     # pin that only looks at the outcome cannot see this guard — it would stay
     # green with the tool's pre-read deleted.
     reached: list[list[str]] = []
-    real_erase = hub_tools.erase_memories
+    real_forget = hub_tools.soft_forget
 
     async def _spy(db_, user_id, memory_ids, *, requested_by):
         reached.append([str(m) for m in memory_ids])
-        return await real_erase(db_, user_id, memory_ids, requested_by=requested_by)
+        return await real_forget(db_, user_id, memory_ids, requested_by=requested_by)
 
-    monkeypatch.setattr("app.services.erasure_service.safe_delete_from_index", _no_purge)
-    monkeypatch.setattr("app.services.erasure_service._vector_present_ids", _absent)
-    monkeypatch.setattr(hub_tools, "erase_memories", _spy)
+    monkeypatch.setattr(hub_tools, "soft_forget", _spy)
     _as_reader(monkeypatch, owner, frozenset({"memory:write"}))
 
     out = await hub_tools.forget_memory(memory_ids=[str(theirs.id)])
 
-    assert reached == [[]], "the id outside the namespace never reaches the erasure service"
-    assert out["erased"] == 0 and out["skipped"] == 1
+    assert reached == [[]], "the id outside the namespace never reaches the forget service"
+    assert out["invalidated"] == 0 and out["skipped"] == 1
     async with database.AsyncSessionLocal() as session:
-        assert await session.get(Memory, theirs.id) is not None, "cross-namespace erase (R35)"
+        row = await session.get(Memory, theirs.id)
+        assert row is not None and state_of(row) == "current", "cross-namespace forget (R35)"
 
 
-async def test_mcp_forget_still_erases_the_callers_own_row(db, monkeypatch):
-    """The same call on the caller's own namespace is unchanged (P4a)."""
+async def test_mcp_forget_still_invalidates_the_callers_own_row(db, monkeypatch):
+    """The same call on the caller's own namespace is the SOFT forget (P4b).
+
+    The row is kept (provenance survives) and leaves serving; no vector is
+    purged here (R37: the payload refresh rides the outbox).
+    """
     owner = await _owner(db)
     mine = _mem(owner, "mine")
     db.add(mine)
     await db.commit()
 
-    async def _no_purge(_memory_id):
-        return True
-
-    async def _absent(_memory_ids):
-        return set()
-
-    monkeypatch.setattr("app.services.erasure_service.safe_delete_from_index", _no_purge)
-    monkeypatch.setattr("app.services.erasure_service._vector_present_ids", _absent)
     _as_reader(monkeypatch, owner, frozenset({"memory:write"}))
-
     out = await hub_tools.forget_memory(memory_ids=[str(mine.id)])
 
-    assert out["erased"] == 1 and out["skipped"] == 0
+    assert out["invalidated"] == 1 and out["skipped"] == 0
     async with database.AsyncSessionLocal() as session:
-        assert await session.get(Memory, mine.id) is None
+        row = await session.get(Memory, mine.id)
+        assert row is not None, "soft forget keeps the row"
+        assert state_of(row) == "invalidated"
 
 
 async def test_the_sql_fallback_order_is_namespaced(db, monkeypatch):

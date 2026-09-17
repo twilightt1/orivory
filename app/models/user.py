@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import TIMESTAMP, Boolean, String, func
+from sqlalchemy import TIMESTAMP, Boolean, Integer, String, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -34,6 +34,15 @@ class User(Base):
     is_verified:     Mapped[bool]      = mapped_column(Boolean(), default=False)
     is_active:       Mapped[bool]      = mapped_column(Boolean(), default=True)
     is_deleted:      Mapped[bool]      = mapped_column(Boolean(), default=False)
+    # Opt-in retention (P4b/T6, spec §8.1): auto expiration is OFF until the
+    # user turns it on — and only then does ``run_retention`` expire memories
+    # the system has held for more than ``retention_days``. ``server_default``
+    # is deliberate: the ladder's ADD COLUMN spells the same default, so every
+    # pre-existing user is OFF without a backfill (the column IS the backfill).
+    # ``retention_days`` NULL means "no window chosen" — an enabled user
+    # without one is a setting that says nothing, so nothing runs.
+    retention_enabled: Mapped[bool]     = mapped_column(Boolean(), nullable=False, server_default="0", default=False)
+    retention_days:    Mapped[int | None] = mapped_column(Integer(), nullable=True)
     created_at:      Mapped[datetime]  = mapped_column(TIMESTAMP(timezone=True), server_default=func.now())
     updated_at:      Mapped[datetime]  = mapped_column(TIMESTAMP(timezone=True), server_default=func.now(), onupdate=utc_now)
 

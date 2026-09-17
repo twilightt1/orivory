@@ -135,9 +135,10 @@ async def test_run_import_dedup_select_is_one_batched_query_scoped_to_user(index
     selects = [stmt for stmt in db.statements if stmt.is_select]
     dedup = [stmt for stmt in selects if "FROM MEMORIES" in _sql(stmt).upper()]
     assert len(dedup) == 1, "run_import must issue exactly one dedup select"
-    # dedup + the outbox's active-generation read, which is memoized per
-    # session (P1a task 2) — never one read per created row.
-    assert len(selects) == 2
+    # dedup + the suppression-ledger read (T4: ONE batched ledger probe, not
+    # one per item) + the outbox's active-generation read, which is memoized
+    # per session (P1a task 2) — never one read per created row.
+    assert len(selects) == 3
     sql = _sql(dedup[0])
     assert "IN" in sql.upper()
     params = dedup[0].compile(dialect=postgresql.dialect()).params

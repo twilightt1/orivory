@@ -593,6 +593,10 @@ async def _apply(db: AsyncSession, row: IndexOutbox) -> str:
 
 
 async def _apply_memory_intent(db: AsyncSession, row: IndexOutbox) -> str:
+    # Local import: ``correction`` imports this module by value (real cycle),
+    # so the state label cannot be a module-level import here.
+    from app.retrieval.memory.correction import state_of
+
     entity_id = uuid.UUID(row.entity_id)
     memory = await db.get(Memory, entity_id)
     if memory is None:
@@ -608,6 +612,26 @@ async def _apply_memory_intent(db: AsyncSession, row: IndexOutbox) -> str:
         # A delete intent has no snapshot to go stale: no post-write re-check.
         await _delete_vector_or_fail(str(memory.id))
         return "applied"
+    if state_of(memory) in ("current", "needs-check") and memory.source_ref:
+        # R38/T4: a SERVING payload for a source the user forgot must not
+        # (re)enter the index — this is the resurrection path (an intent left
+        # over from before the forget, or a writer that touched a row sharing a
+        # suppressed source identity).
+        #
+        # The gate is the STATE, not the suppression alone: soft forget's own
+        # payload refresh (R37) is an upsert for a row that is `invalidated` BY
+        # CONSTRUCTION and whose source is suppressed by construction too.
+        # Blocking it would leave the point serving `visibility_state=current`
+        # — exactly the state contract that refresh exists to land.
+        from app.ingestion.document_memory import is_suppressed_async
+
+        if await is_suppressed_async(db, user_id=memory.user_id, source_ref=memory.source_ref):
+            log.info(
+                "Outbox memory upsert skipped: source suppressed",
+                extra={"entity_id": str(entity_id), "source_ref": memory.source_ref,
+                       "state": state_of(memory)},
+            )
+            return "skipped"
     await upsert_memory(memory)
     return await _settle_written_snapshot(
         db, row, Memory, entity_id,

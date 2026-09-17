@@ -30,6 +30,12 @@ def test_state_of_precedence():
     assert C.state_of(_mem({"cm_derived_dirty": True, "cm_needs_check": True})) == "dirty"
 
 
+def test_invalidated_has_highest_precedence():
+    assert C.state_of(_mem({C.CM_INVALIDATED: True, C.CM_SUPERSEDED_BY: "n1",
+                            C.CM_DERIVED_DIRTY: True, C.CM_NEEDS_CHECK: True})) == "invalidated"
+    assert C.MEMORY_STATES == ("current", "superseded", "dirty", "needs-check", "invalidated")
+
+
 def test_slot_normalizes_once():
     s = C.Slot.of("  Proj-X  DB ", "DB", "")
     assert s is not None

@@ -3,7 +3,7 @@
 > Single source of truth for how Orivory works. Supersedes the pre-pivot
 > `architecture.md` / `TECHNICAL_ARCHITECTURE_v2.md` /
 > `SOTA_TECHNICAL_SPECIFICATION.md` / `AI_ML_OVERVIEW.md` (removed — history
-> lives in git). Last verified against the code: 2026-09-16.
+> lives in git). Last verified against the code: 2026-09-17.
 
 Orivory is a **memory hub for AI agents**. One mental model:
 
@@ -75,11 +75,45 @@ unifies them.
   scored, not by a periodic job (the slim branch has no beat/scheduler).
 - **Knowledge graph** — `entities` / `relations` extracted per memory;
   graph snapshot/related endpoints power the UI; graph context feeds RAG.
-- **Forgetting (suppression/GC)** — a forgotten source gets a
-  `memory_suppressions` row; it blocks re-import AND its projection points
-  (chunk points, or a memory point whose source is suppressed) are deleted by
-  the GC pass, so the content stops being vector-searchable. Deliberate
-  read-path behaviour: absence is the feature, not a bug.
+- **Lifecycle states (P4b) — one state machine, one closure.** `state_of`
+  (`app/retrieval/memory/correction.py`) labels every row
+  `invalidated > superseded > dirty > needs-check > current`, mirrored in SQL by
+  `visibility.state_expression` / `not_dirty_predicate` /
+  `current_memory_predicate`, so a reader filters BEFORE its LIMIT instead of
+  dropping rows after it. `dirty` (a stale derived view) is never served on any
+  surface — not even `timeline`; `invalidated` (forgotten or retention-expired)
+  is history: direct reads and `timeline` answer, labelled, and serving surfaces
+  do not. The dependency closure (`collect_dependency_closure`: BFS over
+  `parent_id` + `cm_derived_from`, cycle-defended, refuses a truncated walk) is
+  what makes invalidation and dirty-propagation transitive. A same-slot
+  correction carries the revision its caller read and applies the supersede as
+  a CAS (`UPDATE ... WHERE revision = :expected AND cm_superseded_by IS NULL`,
+  savepoint stand-down) — two writers on one slot never leave two current facts
+  and a stale snapshot answers `conflict`, never a silent supersede (MCP
+  `correct_memory` supplies that snapshot; spec §8.2).
+- **Forgetting (soft + hard).** MCP `forget_memory` is SOFT: it invalidates the
+  closure and writes a `memory_suppressions` row per affected `source_ref`
+  (plus the projection's upload-time `content_hash`), keeping every row, its
+  content and its provenance; the vector point survives with its payload state
+  refreshed to `invalidated` (R37/R38). A forgotten source blocks re-import on
+  every write path (import/re-upload/reindex/outbox applier). Hard erase
+  (`delete_memory`, REST erasure) still deletes rows + vectors with the
+  verification receipt; explicit erasure wins over a pin and over an
+  `invalidated` row. Known ceilings (measured) are in
+  [OPERATIONS_RUNBOOK.md](OPERATIONS_RUNBOOK.md) §P4b.
+- **Consolidation + retention (P4b).** The drain loop's post-round hook runs a
+  budgeted consolidation producer (`app/retrieval/memory/consolidation.py`,
+  rule `tag-summary.v1`): ≥2 servable memories per tag summarized into a row
+  labeled `derived` with `cm_derived_from` / `cm_source_revisions` /
+  `cm_rule_version` and a dedupe key that makes a re-run idempotent. The
+  publish-time guard re-reads its sources and stands down (marking stale views
+  `dirty`) when one moved — non-recursive, per-process idempotent, and never a
+  competitor for `derived` rows. Retention is OFF by default and opt-in per user
+  (`PATCH /api/v1/users/me/settings`, full-replace): rows the install has held
+  past the user's window are invalidated with a `retention_expired` audit row,
+  `pinned` rows are exempt, and the sweep is per ROW — it writes no suppression
+  row and does not walk the closure, so it is an expiry, never a privacy
+  guarantee over derived views.
 
 ## 2. MCP hub (`app/mcp_hub/`)
 
@@ -141,6 +175,18 @@ memory_ids, *, requested_by)`:
 REST `DELETE /memories/{id}` and MCP `delete_memory` both call
 `erase_memories`; document/session/conversation deletes enqueue memory-kind
 delete intents in their own commit and purge vectors after it.
+
+**Soft forget (P4b/T3) shares the receipt table, not the erasure.**
+`soft_forget(db, user_id, memory_ids, *, requested_by)` invalidates the
+transitive closure (`collect_dependency_closure` — multi-hop, refused when
+truncated), suppresses every affected `source_ref`, enqueues a payload-refresh
+upsert per invalidated row, and verifies by a serving-off readback
+(`not_dirty_predicate()`): `completed` / `completed_with_residual` /
+`completed_unverified` never claim more than that readback saw. Its detail
+carries `mode: "soft"`; the hard receipt keeps its earlier shape. The walk it
+does NOT share is the hard path's `parent_id` BFS + ONE `cm_derived_from` hop —
+a derived view of a derived view survives a hard erase (measured; rule v1's
+output is one hop deep, and the ceilings are in the runbook).
 
 Honest v0 limits: verification is absence-checking (KG-correlation
 re-inference probing is a follow-up).
@@ -242,6 +288,14 @@ by characters before the LLM call; the fallback answer is an explicit
   (`unsupported SQLite schema version 5; expected 4`); the documented way back
   and forward is [ROLLBACK_P1B.md](ROLLBACK_P1B.md) §7. Postgres gets the same
   column from an Alembic revision (server default `'personal'`, NOT NULL).
+- **SQLite schema v6/v7 (P4b).** v6 adds `memory_suppressions.namespace` +
+  `content_hash` (both NULLABLE — NULL is the honest "unknown", and the hash is
+  computed at UPLOAD time by the T4 guards, never backfilled, R38); v7 adds
+  `users.retention_enabled` (NOT NULL, constant default → the ADD COLUMN IS the
+  backfill: every pre-existing user is OFF) + `users.retention_days` (NULLABLE —
+  "no window chosen" is a real state and 0 would expire everything). The v5→v6
+  transition takes the `<db>.pre-p4b.bak` milestone snapshot; Alembic carries
+  the same objects on Postgres.
 
 ## 8. REST surface map
 

@@ -13,6 +13,7 @@ Changes vs. original:
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import uuid
 
@@ -261,6 +262,13 @@ def _project_document_to_memories(db, document_id: str, parents) -> None:
     Commits the new Memory rows — with their durable index intents — then
     embeds them into the shared memory collection. Embedding is best-effort
     (replayable via reindex); the rows are the durable source of truth.
+
+    R38 (P4b/T4): the projection records the sha256 of the UPLOADED BYTES in its
+    metadata. That is what lets a later forget pin the bytes — not only the doc
+    id — in the suppression ledger, and so catch a re-upload of the same file
+    (a new document id can never match on ``source_ref``). The value is computed
+    from the stored object here, never backfilled onto rows that predate it, and
+    an unavailable hash leaves the projection intact with the key absent.
     """
     from sqlalchemy import select
 
@@ -278,7 +286,7 @@ def _project_document_to_memories(db, document_id: str, parents) -> None:
     # projection queries below must not read or embed another user's rows.
     doc = db.get(Document, document_id)
     conversation = db.get(Conversation, doc.conversation_id) if doc is not None else None
-    if conversation is None:
+    if doc is None or conversation is None:
         log.warning(
             "Doc→memory projection skipped: document or conversation not found",
             extra={"doc_id": document_id},
@@ -286,7 +294,24 @@ def _project_document_to_memories(db, document_id: str, parents) -> None:
         return
     user_id = conversation.user_id
 
-    result = build_document_memories_sync(db, document_id, parents, user_id=user_id)
+    content_hash: str | None = None
+    try:
+        # ponytail: one extra object read per ingest — the ingest stage reads
+        # the same bytes for text extraction, so hand the hash down from there
+        # if this ever shows up in ingest latency.
+        from app import storage
+
+        content_hash = hashlib.sha256(storage.get_object_sync(doc.file_path)).hexdigest()
+    except Exception as exc:
+        # The hash is the re-upload guard's key, not the projection's truth: an
+        # unreadable object leaves the rows (with an absent hash) in place.
+        log.warning(
+            "Projection content hash unavailable",
+            extra={"doc_id": document_id, "error": str(exc)},
+        )
+
+    result = build_document_memories_sync(db, document_id, parents, user_id=user_id,
+                                          content_hash=content_hash)
     db.commit()
 
     # Purge vectors from a prior projection whose Postgres rows were just

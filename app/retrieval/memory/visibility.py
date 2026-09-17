@@ -5,25 +5,31 @@ These expressions answer the same question in SQL so a reader can filter and
 label *before* its own LIMIT: a post-hoc Python filter after a ``limit``
 silently returns fewer rows than asked for, or none at all.
 
-Vocabulary (precedence superseded > dirty > needs-check > current):
+Vocabulary (precedence invalidated > superseded > dirty > needs-check > current):
 
 - current / needs-check — served, labeled with their state.
 - superseded — readable in direct get / timeline / history views, labeled.
 - dirty — never served, never used as context or rerank evidence.
+- invalidated — never current/context/rerank evidence; labeled timeline history.
 
 The namespace boundary (``namespace_predicate``) is the second rule every reader
 of ``memories`` composes: an authorization predicate, not a lifecycle label —
 two rows with the same text in two namespaces are two facts with different
 owners' permissions (spec §8.2). It belongs in the SAME statement as the row it
 protects, for the same reason the lifecycle predicates do.
+
+``suppressed_source_predicate`` is the ledger's half, for the WRITE side: a row
+whose source identity the user forgot is not eligible for (re-)embedding, so a
+backfill filters it in SQL like every other eligibility rule (R38/T4).
 """
 from __future__ import annotations
 
-from sqlalchemy import and_, case
+from sqlalchemy import and_, case, or_, select
 
-from app.models.memory import Memory
+from app.models.memory import Memory, MemorySuppression
 from app.retrieval.memory.correction import (
     CM_DERIVED_DIRTY,
+    CM_INVALIDATED,
     CM_NEEDS_CHECK,
     CM_SUPERSEDED_BY,
 )
@@ -63,25 +69,45 @@ def _has(key: str):
     return Memory.extra_metadata[key].as_string().is_not(None)
 
 
-def not_dirty_predicate():
-    """List-view visibility: a dirty (stale derived) row is never served."""
-    return ~_has(CM_DERIVED_DIRTY)
+def not_dirty_predicate(*, include_invalidated: bool = False):
+    """Serving visibility; only explicit timeline/history admits invalidated rows."""
+    clean = ~_has(CM_DERIVED_DIRTY)
+    return or_(clean, _has(CM_INVALIDATED)) if include_invalidated else and_(clean, ~_has(CM_INVALIDATED))
 
 
 def current_memory_predicate():
     """Rows ``state_of`` calls current or needs-check.
 
-    Neither superseded (history, readable elsewhere) nor dirty (wrong) — apply
+    Exclude superseded, invalidated (history) and dirty (wrong) — apply
     it before any LIMIT so stale rows cannot crowd a reader's slice.
     """
-    return and_(~_has(CM_SUPERSEDED_BY), ~_has(CM_DERIVED_DIRTY))
+    return and_(~_has(CM_SUPERSEDED_BY), not_dirty_predicate())
 
 
 def state_expression():
     """SELECT-side state label; precedence mirrors ``state_of`` exactly."""
     return case(
+        (_has(CM_INVALIDATED), "invalidated"),
         (_has(CM_SUPERSEDED_BY), "superseded"),
         (_has(CM_DERIVED_DIRTY), "dirty"),
         (_has(CM_NEEDS_CHECK), "needs-check"),
         else_="current",
+    )
+
+
+def suppressed_source_predicate(user_id):
+    """The suppression ledger as a predicate: this row's source was forgotten.
+
+    The SQL twin of ``document_memory.is_suppressed`` (R38/T4, ruling R28 in the
+    migration CLI): a source identity the user forgot must never be
+    (re-)embedded, so a backfill composes this with the lifecycle predicate
+    instead of probing the ledger per row — the same "one statement, before the
+    LIMIT" rule as the predicates above. A row with no ``source_ref`` has no
+    source identity to suppress, so it is never matched.
+    """
+    return and_(
+        Memory.source_ref.is_not(None),
+        Memory.source_ref.in_(
+            select(MemorySuppression.source_ref).where(MemorySuppression.user_id == user_id)
+        ),
     )

@@ -25,7 +25,10 @@ the statements whose read is DELIBERATELY unpredicated, each pinned by count:
   captures and the post-delete absence checks: a surviving child row in
   another namespace (or another user's) MUST still be counted — a namespace
   predicate there would turn a residual into a clean-looking receipt, because
-  the rows it hunts are exactly the ones the walk's namespace cannot see.
+  the rows it hunts are exactly the ones the walk's namespace cannot see. The
+  soft-forget serving-off readback is the same class: an absence check over
+  the ids THIS call just wrote (P4b/T3) — seeing a row still served is the
+  honest answer, and a predicate could only hide one.
 
 Primary-key surfaces (``db.get`` + an ownership check on the loaded row) cannot
 carry a predicate and are pinned behaviourally, not here.
@@ -55,16 +58,18 @@ INVENTORY = {
     "app/ingestion/document_memory.py": 2,
     "app/ingestion/pipeline.py": 1,
     "app/mcp_hub/tools.py": 8,
+    "app/retrieval/memory/consolidation.py": 3,
     "app/retrieval/memory/context.py": 3,
-    "app/retrieval/memory/correction.py": 3,
+    "app/retrieval/memory/correction.py": 4,
     "app/retrieval/memory/lexical_index.py": 1,
     "app/retrieval/memory/reindex.py": 1,
     "app/retrieval/memory/retriever.py": 1,
     "app/retrieval/memory/salience.py": 1,
     "app/services/demo_data_service.py": 1,
     "app/services/digest_service.py": 3,
-    "app/services/erasure_service.py": 4,
+    "app/services/erasure_service.py": 7,
     "app/services/import_service.py": 1,
+    "app/services/retention_service.py": 1,
 }
 
 # file -> how many of its statements may go without the namespace predicate
@@ -73,7 +78,7 @@ UNGUARDED_OK = {
     "app/ingestion/dispatcher.py": 1,
     "app/ingestion/document_memory.py": 2,
     "app/ingestion/pipeline.py": 1,
-    "app/services/erasure_service.py": 3,
+    "app/services/erasure_service.py": 6,
     "app/services/import_service.py": 1,
 }
 
