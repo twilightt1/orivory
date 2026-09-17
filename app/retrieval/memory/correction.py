@@ -209,20 +209,43 @@ def decide_correction(cands, *, slot: Slot | None = None, assertion: str = "fact
 
 
 async def _cas_supersede(db, memory, successor_id: str, expected: int | None) -> bool:
-    """Point one candidate at its successor iff its revision is still ``expected``.
+    """Point one candidate at its successor iff it is still supersedable.
 
-    The revision rides in the WHERE clause — rowcount IS the compare-and-swap
-    answer, so no row lock and no read-then-write window. ``expected is None``
-    means the caller never named this candidate: it is refused rather than
-    moved behind the caller's back.
+    BOTH cells that can move under the caller ride in the WHERE, so the CAS is
+    the whole comparison: the row's ``revision`` is still ``expected``, and
+    ``cm_superseded_by`` is still NULL (nobody claimed the row yet). The second
+    cell is not optional — a supersede deliberately does NOT bump the revision
+    (a bump without an outbox intent would read as stale to the drain), so a
+    revision-only guard sees a rival's supersede as "unchanged" and overwrites
+    a pointer that already names a successor: two current facts on the slot.
+    ``rowcount == 1`` IS the swap answer — no row lock, and no read-then-write
+    gap between the compared cells and the write. ``expected is None`` means the
+    caller never named this candidate: it is refused rather than moved behind
+    the caller's back.
+
+    ``synchronize_session="fetch"`` because the pointer predicate is a JSON
+    expression the in-Python evaluator refuses (``evaluate`` raises
+    ``InvalidRequestError``); fetch costs one extra SELECT and keeps the
+    in-session row — and the session's savepoint bookkeeping — in step with the
+    write.
+
+    Ceiling: those two cells are all that is compared. The value written is the
+    metadata THIS session holds (``{**get_cm(memory), ...}``), so a concurrent
+    out-of-band edit to another ``cm_*`` key of the same row is overwritten,
+    not detected.
     """
+    # Local import: ``visibility`` imports this module's cm_* markers (cycle).
+    # ``_has`` is the ONE spelling of "this marker is present".
+    from app.retrieval.memory.visibility import _has
+
     if expected is None:
         return False
     result = await db.execute(
         update(Memory)
-        .where(Memory.id == memory.id, Memory.revision == int(expected))
+        .where(Memory.id == memory.id, Memory.revision == int(expected),
+               ~_has(CM_SUPERSEDED_BY))
         .values(extra_metadata={**get_cm(memory), CM_SUPERSEDED_BY: successor_id})
-        .execution_options(synchronize_session="evaluate")
+        .execution_options(synchronize_session="fetch")
     )
     return result.rowcount == 1
 
@@ -231,19 +254,26 @@ async def resolve_correction(db, *, user_id, title, content, tags=None,
         source_type="mcp_agent", source_ref=None, slot: Slot | None = None,
         assertion="fact", valid_from=None,
         evidence_ids=None, memory_id=None, summary=None,
-        expected_revisions: dict[UUID, int] | None = None) -> dict:
+        expected_revisions: dict[UUID | str, int] | None = None) -> dict:
     """Single creation path for add + correct. One commit; incomplete closure raises.
 
     ``slot=None`` is a plain add (no identity, never supersedes).
 
     ``expected_revisions`` is the caller's snapshot of the slot it decided on
-    (candidate id -> the revision it read). The supersede/dirty apply is then a
-    CAS: every exact candidate must be named in the snapshot AND still carry
-    that revision at the guarded UPDATE — otherwise the whole correction stands
-    down as ``conflict``: the new row lands beside the slot flagged
-    ``cm_needs_check`` and no candidate is touched (two writers on one slot
-    never leave two current facts by accident). ``None`` keeps the pre-CAS
-    behaviour for callers that do not take part.
+    (candidate id -> the revision it read). Keys are normalized to UUID, so a
+    caller that stringified its ids names the same candidates (an un-normalized
+    key reads as "never named" — a conflict with nothing to diagnose). The
+    supersede/dirty apply is then a CAS: every exact candidate must be named in
+    the snapshot, still carry that revision, AND still have no successor at the
+    guarded UPDATE — otherwise the whole correction stands down as
+    ``conflict``: the candidate writes that already landed are rolled back to
+    the savepoint the apply opened (the caller's other work in this session is
+    untouched — flush first, so it sits outside that savepoint), the new row
+    lands beside the slot flagged ``cm_needs_check``, and no candidate keeps a
+    pointer (two writers on one slot never leave two current facts by
+    accident). The rows it held come back expired — a ``conflict`` means re-read,
+    not the stale snapshot. ``None`` keeps the pre-CAS behaviour for callers
+    that do not take part.
 
     The candidate read carries the namespace boundary (P4a/T4): a supersede or
     a dirty-mark is a WRITE to the candidate rows, and the decision is made over
@@ -255,6 +285,10 @@ async def resolve_correction(db, *, user_id, title, content, tags=None,
     # module-level import here would be a cycle. The predicate itself stays the
     # ONE spelling.
     from app.retrieval.memory.visibility import namespace_predicate
+
+    if expected_revisions:
+        expected_revisions = {UUID(str(k)): int(v)
+                              for k, v in expected_revisions.items()}
 
     rows = (await db.execute(
         select(Memory).where(Memory.user_id == user_id,
@@ -277,25 +311,36 @@ async def resolve_correction(db, *, user_id, title, content, tags=None,
                  source_ref=source_ref, captured_at=now, extra_metadata=meta,
                  summary=summary)
     superseded, dirtied = [], []
-    if status == "superseded":
-        # Apply BEFORE the new row joins the session: a refused CAS must be able
-        # to roll back exactly the candidate writes and nothing else.
+    if status == "superseded" and expected_revisions is not None:
+        # CAS path. Apply BEFORE the new row joins the session, inside a
+        # savepoint of its own: a refused candidate stands down the candidate
+        # writes and nothing else. Flush first, so caller work in flight sits
+        # OUTSIDE that savepoint (and cannot be expunged as savepoint-new work).
+        await db.flush()
+        savepoint = await db.begin_nested()
         refused = False
         for m in exact:
-            if expected_revisions is None:
-                set_cm(m, {CM_SUPERSEDED_BY: str(new.id)})
-            elif not await _cas_supersede(db, m, str(new.id),
-                                          expected_revisions.get(m.id)):
+            if not await _cas_supersede(db, m, str(new.id),
+                                        expected_revisions.get(m.id)):
                 refused = True
                 break
         if refused:
             # A candidate moved after the caller read it (or was never named):
             # stand down whole — never a silent supersede on a stale snapshot.
-            await db.rollback()
+            # ONLY the savepoint goes back: the caller's other work in this
+            # session is not this correction's to discard.
+            await savepoint.rollback()
             status, closure = "conflict", None
             meta[CM_NEEDS_CHECK] = True
         else:
+            await savepoint.commit()
             superseded = [str(m.id) for m in exact]
+    elif status == "superseded":
+        # No snapshot: no CAS, so nothing can refuse — the in-session pointer
+        # write IS the apply (one commit at the end is the whole transaction).
+        for m in exact:
+            set_cm(m, {CM_SUPERSEDED_BY: str(new.id)})
+        superseded = [str(m.id) for m in exact]
     db.add(new)
     # The new fact is the only row whose vector payload changes (superseded /
     # dirtied rows only carry cm_* metadata, which never reaches the vector):
