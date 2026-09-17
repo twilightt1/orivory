@@ -251,11 +251,15 @@ async def memory_stats(
     current_user: Annotated[User, Depends(get_current_verified_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> dict:
-    """Aggregate counts for the memory dashboard (the caller's namespace only)."""
+    """Aggregate counts for the memory dashboard (the caller's namespace only).
+
+    Visible evidence only: dirty is "never served" and invalidated is history,
+    so neither is counted here — the dashboard must agree with the surfaces.
+    """
     namespace = namespace_predicate(personal_namespace(current_user.id))
     rows = (await db.execute(
         select(Memory.source_type, func.count(Memory.id))
-        .where(Memory.user_id == current_user.id, namespace)
+        .where(Memory.user_id == current_user.id, namespace, not_dirty_predicate())
         .group_by(Memory.source_type)
     )).all()
 
@@ -267,12 +271,15 @@ async def memory_stats(
         select(func.count(Memory.id)).where(
             Memory.user_id == current_user.id,
             namespace,
+            not_dirty_predicate(),
             Memory.captured_at >= week_ago,
         )
     )).scalar_one()
 
     tags_rows = (await db.execute(
-        select(Memory.tags).where(Memory.user_id == current_user.id, namespace)
+        select(Memory.tags).where(
+            Memory.user_id == current_user.id, namespace, not_dirty_predicate()
+        )
     )).scalars().all()
     tag_counts: dict[str, int] = {}
     for tags in tags_rows:

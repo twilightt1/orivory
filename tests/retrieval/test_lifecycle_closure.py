@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -20,6 +21,7 @@ from app.retrieval.memory.visibility import (
     state_expression,
 )
 from app.services.digest_service import build_digest
+from app.utils.dependencies import get_current_verified_user
 from tests.retrieval.test_visibility import (
     _as_reader,
     _mem,
@@ -92,18 +94,21 @@ async def test_shared_memory_hides_invalidated_not_current(db, monkeypatch):
     assert invalid.content not in hidden.text
 
 
-async def test_digest_excludes_invalidated_from_recent_and_resurfaced(db):
+async def test_digest_excludes_invalidated_and_dirty_rows(db):
     owner = await _owner(db)
     now = datetime(2026, 9, 17, tzinfo=UTC)
     current = _mem(owner, "recent current")
     invalid = _mem(owner, "recent invalid", meta={C.CM_INVALIDATED: True})
+    dirty = _mem(owner, "recent dirty", meta={C.CM_DERIVED_DIRTY: True})
     old_current = _mem(owner, "old current")
     old_invalid = _mem(owner, "old invalid", meta={C.CM_INVALIDATED: True})
-    current.captured_at = invalid.captured_at = now - timedelta(days=1)
-    old_current.captured_at = old_invalid.captured_at = now.replace(year=2025)
+    old_dirty = _mem(owner, "old dirty", meta={C.CM_DERIVED_DIRTY: True})
+    current.captured_at = invalid.captured_at = dirty.captured_at = now - timedelta(days=1)
+    old_current.captured_at = old_invalid.captured_at = old_dirty.captured_at = now.replace(year=2025)
     current.tags = ["valid"]
     invalid.tags = ["invalid"]
-    db.add_all([current, invalid, old_current, old_invalid])
+    dirty.tags = ["stale"]
+    db.add_all([current, invalid, dirty, old_current, old_invalid, old_dirty])
     await db.commit()
 
     digest = await build_digest(db, owner, now=now)
@@ -111,6 +116,36 @@ async def test_digest_excludes_invalidated_from_recent_and_resurfaced(db):
     assert [m.memory.id for m in digest.resurfaced] == [old_current.id]
     assert digest.recent_count == 1
     assert [(theme.theme, theme.count) for theme in digest.top_themes] == [("valid", 1)]
+
+
+async def test_stats_excludes_invalidated_and_dirty(db, monkeypatch):
+    """The dashboard counts visible evidence only — dirty is 'never served' too."""
+    owner = await _owner(db)
+    counted = _mem(owner, "counted")
+    invalid = _mem(owner, "invalid", meta={C.CM_INVALIDATED: True})
+    dirty = _mem(owner, "dirty", meta={C.CM_DERIVED_DIRTY: True})
+    counted.tags = ["keep"]
+    invalid.tags = ["gone"]
+    dirty.tags = ["gone"]
+    db.add_all([counted, invalid, dirty])
+    await db.commit()
+
+    async def session():
+        yield db
+
+    async def current_user():
+        return SimpleNamespace(id=owner)
+
+    monkeypatch.setitem(app.dependency_overrides, get_db, session)
+    monkeypatch.setitem(app.dependency_overrides, get_current_verified_user, current_user)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get("/api/v1/memories/stats")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total_memories"] == 1
+    assert body["top_tags"] == [{"tag": "keep", "count": 1}]
+    assert body["recent_activity"][0]["count"] == 1
 
 
 async def _chain(db):

@@ -24,7 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.memory import Memory
 from app.retrieval.memory.correction import state_of
 from app.retrieval.memory.namespaces import personal_namespace
-from app.retrieval.memory.visibility import namespace_predicate, state_expression
+from app.retrieval.memory.visibility import namespace_predicate, not_dirty_predicate
 from app.schemas.Orivory import (
     DigestResponse,
     DigestResurfacedMemory,
@@ -97,8 +97,9 @@ async def build_digest(
     # All three queries below read the user's OWN namespace: a digest is a
     # surfacing view, so a row outside it must never be counted or shown.
     namespace = namespace_predicate(personal_namespace(user_id))
-    # Keep history labels, but never proactively surface invalidated evidence.
-    valid = state_expression() != "invalidated"
+    # Surfacing mirrors the serving rule: dirty is "never served" and
+    # invalidated is history — neither is counted or proactively shown here.
+    valid = not_dirty_predicate()
 
     # ── recent window ────────────────────────────────────────────────────
     recent_rows = (
