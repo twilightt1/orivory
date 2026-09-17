@@ -32,6 +32,7 @@ import json
 import sys
 import uuid
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy import select
@@ -52,6 +53,7 @@ from app.retrieval.memory.outbox import (
     drain_pending,
     enqueue_upsert,
 )
+from app.services import erasure_service as E
 from app.services import import_service
 from app.services.document_service import upload_document
 from app.services.erasure_service import soft_forget
@@ -361,3 +363,58 @@ async def test_backfill_eligibility_still_excludes_a_suppressed_source(db, sync_
     assert rows[str(forgotten.id)]["reason"] == "suppressed", (
         "R28: a forgotten source must not keep (or regain) a servable vector")
     assert rows[str(kept.id)]["reason"] is None
+
+
+# ── (b2) the HARD erase pins the bytes too (review deleg_fb06c1ec) ───────────
+
+
+async def test_a_hard_erase_pins_the_bytes_of_the_forgotten_file(db, sync_db, monkeypatch):
+    """The heaviest forget must close the same door soft forget closes.
+
+    Reviewer finding (deleg_fb06c1ec): the suppression row written by
+    ``erase_memories`` carried ``content_hash=None``, so re-uploading the same
+    bytes after a HARD erase was never caught — the strongest user decision
+    had the weakest guard. The hash comes from the row being erased; nothing
+    is backfilled (R38).
+    """
+    owner = await _owner(db)
+    conversation = Conversation(id=uuid.uuid4(), user_id=owner, document_count=0)
+    db.add(conversation)
+    await db.commit()
+
+    first_id = str(uuid.uuid4())
+    db.add(Document(id=uuid.UUID(first_id), conversation_id=conversation.id,
+                    filename="notes.md", file_path=f"{conversation.id}/{first_id}_notes.md",
+                    file_size=len(FILE_BYTES), mime_type="text/markdown", status="ready"))
+    await db.commit()
+    monkeypatch.setattr("app.storage.get_object_sync", lambda *_a, **_k: FILE_BYTES)
+    monkeypatch.setattr(vector_store, "upsert_memories_sync", lambda rows: 0)
+
+    pipeline._project_document_to_memories(sync_db, first_id,
+                                           [ParentChunk(id="p1", content="body", index=0)])
+    built = next(row for row in (sync_db.execute(
+        select(Memory).where(Memory.source_ref == first_id))).scalars().all()
+        if row.extra_metadata.get("kind") == "document")
+
+    async def _purge(_mid):
+        return True
+
+    monkeypatch.setattr(E, "safe_delete_from_index", _purge)
+    monkeypatch.setattr(E, "_vector_present_ids", AsyncMock(return_value=set()))
+    await E.erase_memories(db, owner, [built.id], requested_by="test")
+
+    ledger = await _suppressions()
+    assert [row.content_hash for row in ledger] == [FILE_HASH], (
+        "hard erase pins the BYTES too — a re-upload must be caught after it")
+
+    _stub_upload_side_effects(monkeypatch)
+    again = await upload_document(db, conversation, _Upload(FILE_BYTES))  # type: ignore[arg-type]
+    pinned = [row for row in await _suppressions() if row.source_ref == str(again.id)]
+    assert pinned and pinned[0].content_hash == FILE_HASH, (
+        "a re-upload after a hard erase is pinned like one after soft forget")
+
+    pipeline._project_document_to_memories(sync_db, str(again.id),
+                                           [ParentChunk(id="p2", content="body", index=0)])
+    refs = (sync_db.execute(
+        select(Memory.source_ref).where(Memory.user_id == owner))).scalars().all()
+    assert list(refs) == [], "the hard-erased projection never comes back"

@@ -288,7 +288,8 @@ async def _suppress_forgotten_projection(db: AsyncSession, user_id: uuid.UUID, r
         return None
     if await db.get(Document, document_id) is None:
         return None
-    await suppress_source_async(db, user_id=user_id, source_ref=row.source_ref, reason="forgotten")
+    await suppress_source_async(db, user_id=user_id, source_ref=row.source_ref, reason="forgotten",
+                                content_hash=projection_content_hash(row))
     return row.source_ref
 
 
