@@ -2906,7 +2906,8 @@ revision this tool just read of that row, and the supersede applies only if the
 slot is still where the read found it. A second writer that lands in that
 window therefore sees `conflict` instead of silently un-learning the winner. A
 slot holding MORE than one exact candidate is refused the same way — the tool
-supersedes the candidate the caller named, never one it was not told about.
+never supersedes a candidate the caller did not name (the whole apply stands
+down, the named candidate included).
 
 #### Connecting an MCP Client (Claude Desktop example)
 
