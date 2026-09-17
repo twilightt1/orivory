@@ -17,7 +17,8 @@ from app import database
 from app.models.memory import Memory
 from app.retrieval.memory import correction as C
 from app.retrieval.memory.correction import Slot, resolve_correction
-from tests.retrieval.test_visibility import _mem, _owner, db  # noqa: F401
+from tests.retrieval.test_visibility import _mem, _owner
+from tests.retrieval.test_visibility import db as db
 
 SLOT = Slot.of("proj-x", "db", "prod")
 SLOT_META = {"cm_subject": "proj-x", "cm_attribute": "db", "cm_scope": "prod"}

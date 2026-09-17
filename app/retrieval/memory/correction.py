@@ -225,9 +225,10 @@ async def _cas_supersede(db, memory, successor_id: str, expected: int | None) ->
 
     ``synchronize_session="fetch"`` because the pointer predicate is a JSON
     expression the in-Python evaluator refuses (``evaluate`` raises
-    ``InvalidRequestError``); fetch costs one extra SELECT and keeps the
-    in-session row — and the session's savepoint bookkeeping — in step with the
-    write.
+    ``InvalidRequestError``); fetch keeps the in-session row — and the
+    session's savepoint bookkeeping — in step with the write (on SQLite /
+    Postgres the UPDATE answers with ``RETURNING``, so still one statement;
+    only backends without RETURNING pay an extra SELECT).
 
     Ceiling: those two cells are all that is compared. The value written is the
     metadata THIS session holds (``{**get_cm(memory), ...}``), so a concurrent
@@ -267,13 +268,17 @@ async def resolve_correction(db, *, user_id, title, content, tags=None,
     the snapshot, still carry that revision, AND still have no successor at the
     guarded UPDATE — otherwise the whole correction stands down as
     ``conflict``: the candidate writes that already landed are rolled back to
-    the savepoint the apply opened (the caller's other work in this session is
-    untouched — flush first, so it sits outside that savepoint), the new row
+    the savepoint the apply opened (BEGIN NESTED snapshots the flushed state —
+    the explicit flush here pins that boundary instead of relying on the
+    implicit one — so the caller's other work sits outside the savepoint and is
+    untouched), the new row
     lands beside the slot flagged ``cm_needs_check``, and no candidate keeps a
     pointer (two writers on one slot never leave two current facts by
-    accident). The rows it held come back expired — a ``conflict`` means re-read,
-    not the stale snapshot. ``None`` keeps the pre-CAS behaviour for callers
-    that do not take part.
+    accident). The rows it held come back expired: a ``conflict`` means re-read,
+    not the stale snapshot — on an async session a sync attribute read of an
+    expired row raises ``MissingGreenlet``, so ``await db.refresh(row)`` (or a
+    re-query) before touching it. ``None`` keeps the pre-CAS behaviour for
+    callers that do not take part.
 
     The candidate read carries the namespace boundary (P4a/T4): a supersede or
     a dirty-mark is a WRITE to the candidate rows, and the decision is made over
@@ -287,8 +292,16 @@ async def resolve_correction(db, *, user_id, title, content, tags=None,
     from app.retrieval.memory.visibility import namespace_predicate
 
     if expected_revisions:
-        expected_revisions = {UUID(str(k)): int(v)
-                              for k, v in expected_revisions.items()}
+        normalized: dict[UUID | str, int] = {}
+        for key, value in expected_revisions.items():
+            try:
+                normalized[UUID(str(key))] = int(value)
+            except ValueError as exc:
+                raise ValueError(
+                    f"expected_revisions key {key!r} is not a UUID — a malformed "
+                    "key would read as an un-named candidate (silent conflict)"
+                ) from exc
+        expected_revisions = normalized
 
     rows = (await db.execute(
         select(Memory).where(Memory.user_id == user_id,
