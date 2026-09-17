@@ -69,7 +69,11 @@ from typing import Any
 from sqlalchemy import delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.ingestion.document_memory import DOC_MEMORY_SOURCE_TYPE, suppress_source_async
+from app.ingestion.document_memory import (
+    DOC_MEMORY_SOURCE_TYPE,
+    projection_content_hash,
+    suppress_source_async,
+)
 from app.models.document import Document
 from app.models.entity import Entity, MemoryEntity, Relation
 from app.models.erasure_receipt import ErasureReceipt
@@ -644,10 +648,14 @@ async def _soft_forget_one(
         if target.source_ref:
             # Universal (R38): every affected source identity is pinned, not
             # only the root projection — including refs that are not
-            # `file_upload` documents. content_hash stays NULL until an upload
-            # computes one (never backfilled).
+            # `file_upload` documents. The content hash rides along when the
+            # projection carries one (computed from the uploaded bytes at
+            # ingest): that is the key a RE-UPLOAD of the same file is caught
+            # by, since the new document id can never match on source_ref.
+            # Rows that predate it keep NULL — never backfilled.
             await suppress_source_async(db, user_id=user_id, source_ref=target.source_ref,
-                                        reason="forgotten", namespace=namespace_of(target))
+                                        reason="forgotten", namespace=namespace_of(target),
+                                        content_hash=projection_content_hash(target))
             suppressed.append(target.source_ref)
     await db.commit()
     return {

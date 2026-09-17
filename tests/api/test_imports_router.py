@@ -38,12 +38,15 @@ def test_import_upload_cap_is_20mib():
 
 
 def test_import_summary_response_shape():
-    """Shipped 5-count schema (T3 binding rules) — the plan's old field
-    set (detected_format/filename/errors/...) does not exist."""
+    """Shipped 5-count schema (T3 binding rules) + the T4 suppression counter —
+    the plan's old field set (detected_format/filename/errors/...) does not exist."""
     from app.schemas.Orivory import ImportSummary
 
     fields = set(ImportSummary.model_fields)
-    assert fields == {"parsed", "created", "skipped_duplicates", "failed", "index_failures"}
+    assert fields == {"parsed", "created", "skipped_duplicates", "suppressed_skipped",
+                      "failed", "index_failures"}
+    assert ImportSummary.model_fields["suppressed_skipped"].default == 0, (
+        "additive: an older caller's 5-count construction keeps working")
 
 
 async def test_router_prevalidates_unknown_source_format():
@@ -290,7 +293,7 @@ async def test_import_endpoint_passes_bytes_full_request(monkeypatch):
         app.dependency_overrides.clear()
     assert response.status_code == 201
     assert response.json() == {"parsed": 1, "created": 1, "skipped_duplicates": 0,
-                              "failed": 0, "index_failures": 0}
+                              "suppressed_skipped": 0, "failed": 0, "index_failures": 0}
     assert received == [payload], "service must receive the exact uploaded bytes"
 
 

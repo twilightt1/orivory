@@ -17,12 +17,16 @@ of ``memories`` composes: an authorization predicate, not a lifecycle label —
 two rows with the same text in two namespaces are two facts with different
 owners' permissions (spec §8.2). It belongs in the SAME statement as the row it
 protects, for the same reason the lifecycle predicates do.
+
+``suppressed_source_predicate`` is the ledger's half, for the WRITE side: a row
+whose source identity the user forgot is not eligible for (re-)embedding, so a
+backfill filters it in SQL like every other eligibility rule (R38/T4).
 """
 from __future__ import annotations
 
-from sqlalchemy import and_, case, or_
+from sqlalchemy import and_, case, or_, select
 
-from app.models.memory import Memory
+from app.models.memory import Memory, MemorySuppression
 from app.retrieval.memory.correction import (
     CM_DERIVED_DIRTY,
     CM_INVALIDATED,
@@ -88,4 +92,22 @@ def state_expression():
         (_has(CM_DERIVED_DIRTY), "dirty"),
         (_has(CM_NEEDS_CHECK), "needs-check"),
         else_="current",
+    )
+
+
+def suppressed_source_predicate(user_id):
+    """The suppression ledger as a predicate: this row's source was forgotten.
+
+    The SQL twin of ``document_memory.is_suppressed`` (R38/T4, ruling R28 in the
+    migration CLI): a source identity the user forgot must never be
+    (re-)embedded, so a backfill composes this with the lifecycle predicate
+    instead of probing the ledger per row — the same "one statement, before the
+    LIMIT" rule as the predicates above. A row with no ``source_ref`` has no
+    source identity to suppress, so it is never matched.
+    """
+    return and_(
+        Memory.source_ref.is_not(None),
+        Memory.source_ref.in_(
+            select(MemorySuppression.source_ref).where(MemorySuppression.user_id == user_id)
+        ),
     )

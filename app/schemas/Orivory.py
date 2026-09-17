@@ -38,10 +38,16 @@ class MemoryUpdate(BaseModel):
 
 
 class ImportSummary(BaseModel):
-    """Result of one import run (POST /api/v1/imports)."""
+    """Result of one import run (POST /api/v1/imports).
+
+    ``suppressed_skipped`` counts items whose source identity the user forgot
+    (R38/T4): the ledger blocked the re-import, so they are neither created nor
+    silently folded into ``skipped_duplicates``.
+    """
     parsed:              int
     created:             int
     skipped_duplicates:  int
+    suppressed_skipped:  int = 0
     failed:              int
     index_failures:      int
 

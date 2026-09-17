@@ -205,6 +205,7 @@ async def create_import(
             # reserved attribute and raises KeyError when the record emits.
             "created_count": summary.created,
             "skipped_duplicates": summary.skipped_duplicates,
+            "suppressed_skipped": summary.suppressed_skipped,
         },
     )
     return summary
