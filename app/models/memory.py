@@ -119,10 +119,14 @@ class MemorySuppression(Base):
     forget; the ledger records that decision per (user, source identity).
 
     ``namespace`` records the boundary the suppression was written in (R38);
-    ``content_hash`` is the forgotten source's content hash — computed at UPLOAD
-    time by the import/reindex guards (P4b/T4), never backfilled for rows that
-    predate it. Both are nullable on purpose: a pre-P4b row has no such value,
-    and a NULL is the honest "unknown" instead of an invented one.
+    ``content_hash`` is the sha256 of the source's BYTES — computed at UPLOAD
+    (``document_service.upload_document``), carried onto the projection rows at
+    INGEST, and copied into this column only when a forget is recorded (soft
+    forget and the hard erase both pass ``projection_content_hash(row)``). The
+    import/reindex/drain guards only READ this ledger; they never mint a hash,
+    and the column is never backfilled for rows that predate it. Both are
+    nullable on purpose: a pre-P4b row has no such value, and a NULL is the
+    honest "unknown" instead of an invented one.
     """
     __tablename__ = "memory_suppressions"
     __table_args__ = (

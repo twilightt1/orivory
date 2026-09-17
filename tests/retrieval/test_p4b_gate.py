@@ -120,6 +120,10 @@ P4B_CI_SUITES = (
     "tests/services/test_retention.py",
     "tests/lite/test_sqlite_schema_v6.py",
     "tests/lite/test_sqlite_schema_v7.py",
+    # DB-free, so the step can gate it without Postgres: the T4 shape pin lived
+    # in a PG-probed module before, i.e. it skipped in exactly the CI run that
+    # was supposed to gate it.
+    "tests/api/test_import_summary_shape.py",
 )
 # Wired by other steps — the pin only requires they stay wired SOMEWHERE (a
 # suite that silently loses its step is the same hole as one that never had

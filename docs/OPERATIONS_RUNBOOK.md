@@ -354,6 +354,11 @@ pass for at most `CONSOLIDATION_USERS_PER_PASS` (10) users per pass.
   `indexed_at` — how long this install has HELD the row. `pinned` rows are
   exempt; a second sweep is a no-op (already-invalidated rows are never
   selected).
+- Expiry RELABELS what it touches: precedence is `invalidated` > `superseded`,
+  so a superseded row that expires reports `invalidated` from then on — the
+  timeline label changes with it, and the history surfaces that widen to
+  superseded (`include_superseded` recall, MCP `include_history`) stop
+  returning it.
 - **Retention is a per-row expiry, NOT a closure walk, and NOT a privacy
   guarantee.** It writes NO suppression row (auto expiry is not the user
   forgetting a source), so a re-import after a row expired is caught only by
@@ -396,7 +401,10 @@ replays it against the latest SQL state until the vector store confirms it.
   `OUTBOX_DRAIN_BATCH_SIZE` (default `50`). A round that applied anything runs
   the next one immediately, so a backlog drains at full speed. Set
   `OUTBOX_DRAIN_ENABLED=false` only to quiesce a store for a cutover: memory
-  recall then stops waiting for its own writes.
+  recall then stops waiting for its own writes. The hooks that ride the drain
+  stop with it — with the drain disabled, neither the consolidation producer
+  (R39) nor the retention sweep (`_consolidate_after_drain` /
+  `_retain_after_drain`) ever runs.
 - **Memory recall is guarded, and fails closed.** `MemoryRetriever.recall`
   waits for the calling tenant's pending intents, bounded by
   `RECALL_FRESHNESS_BUDGET_SECONDS` (default `2.0`), and answers

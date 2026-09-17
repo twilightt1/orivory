@@ -154,12 +154,16 @@ jobs:
           # and v7 ladder modules) was wired into no CI step at all. The mcp_hub
           # forget-tool units, the v5 ladder and the AST fence stay wired in
           # their own steps; the gate's CI pin checks they are still wired
-          # somewhere, not re-runs them here.
+          # somewhere, not re-runs them here. The last command is the DB-free
+          # imports shape pin (T4's `suppressed_skipped`): it sat in a
+          # PG-probed module before, so it skipped in exactly this step's
+          # no-service conditions — here it runs for real.
           DATABASE_URL: sqlite+aiosqlite:////tmp/p4b_ci.db
         run: |
           python -m pytest --confcutdir=tests/retrieval tests/retrieval/test_p4b_gate.py tests/retrieval/test_lifecycle_closure.py tests/retrieval/test_correction_concurrency.py tests/retrieval/test_consolidation.py -q
           python -m pytest --confcutdir=tests/services tests/services/test_soft_forget.py tests/services/test_suppression_guards.py tests/services/test_retention.py -q
           python -m pytest --confcutdir=tests/lite tests/lite/test_sqlite_schema_v6.py tests/lite/test_sqlite_schema_v7.py -q
+          python -m pytest --confcutdir=tests/api tests/api/test_import_summary_shape.py -q
 
       - name: Run P1b mean-vs-CLS ablation (evidence artifact, never a gate)
         env:

@@ -122,6 +122,10 @@ async def test_soft_forget_records_a_foreign_or_missing_id_and_writes_nothing(db
 
     assert receipt.detail["summary"]["invalidated"] == 0
     assert receipt.detail["summary"]["skipped"] == 2
+    assert receipt.status == ERASURE_STATUS_UNVERIFIED, (
+        "nothing was invalidated, so nothing could be verified: the no-op "
+        "branch reports completed_unverified — the fail-safe direction, never "
+        "a faked completed")
     assert {t["status"] for t in receipt.detail["targets"]} == {"not_found_or_foreign"}
     async with database.AsyncSessionLocal() as session:
         row = await session.get(Memory, theirs.id)

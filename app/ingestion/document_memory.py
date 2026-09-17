@@ -165,9 +165,11 @@ def suppress_source(db: Session, *, user_id, source_ref: str, reason: str = "for
 
     The unique ``(user_id, source_ref)`` keeps exactly one suppression row, so
     replaying the forget is a no-op instead of an integrity error. ``namespace``
-    is the boundary the suppression was written in; ``content_hash`` is filled
-    at UPLOAD time by the P4b/T4 guards — a caller that does not know one passes
-    nothing, and the column stays NULL (R38: never backfilled).
+    is the boundary the suppression was written in; ``content_hash`` is the
+    forgotten projection's upload-time hash, supplied by the FORGET caller
+    (``projection_content_hash(row)``) — the import/reindex/drain guards only
+    read this ledger, they never write it. A caller with no hash passes nothing
+    and the column stays NULL (R38: never backfilled).
     """
     if is_suppressed(db, user_id=user_id, source_ref=source_ref):
         return
@@ -182,7 +184,11 @@ def suppress_source(db: Session, *, user_id, source_ref: str, reason: str = "for
 async def suppress_source_async(db: AsyncSession, *, user_id, source_ref: str,
                                 reason: str = "forgotten", namespace: str | None = None,
                                 content_hash: str | None = None) -> None:
-    """Async face of :func:`suppress_source`."""
+    """Async face of :func:`suppress_source` — same row, same fields.
+
+    ``content_hash`` is the same forget-time, caller-supplied value read off
+    the projection; nothing here computes or backfills one.
+    """
     if await is_suppressed_async(db, user_id=user_id, source_ref=source_ref):
         return
     db.add(MemorySuppression(id=uuid.uuid4().hex, user_id=user_id,
