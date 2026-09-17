@@ -662,7 +662,20 @@ def _memory_provenance(memory: Memory) -> dict[str, Any]:
 
 async def correct_memory(memory_id=None, subject="", attribute="", scope="default",
         title="", content="", valid_from=None, evidence_ids=None) -> dict[str, Any]:
-    """Correct a fact with evidence: new version links back, never overwrites."""
+    """Correct a fact with evidence: new version links back, never overwrites.
+
+    An explicit ``memory_id`` carries the revision this tool just READ of that
+    row as the caller's snapshot (P4b/T2 CAS, spec §8.2): ``resolve_correction``
+    then applies the supersede only if the slot is still where the read found
+    it. A concurrent correction that moved the target answers ``status:
+    conflict`` (the new row lands flagged ``needs-check``, nothing is
+    superseded) instead of a silent supersede on a stale snapshot. That is why
+    the response set includes ``conflict`` alongside added/superseded/
+    needs-check — consumers that switch on ``status`` must know it. A slot with
+    MORE than one exact candidate is refused the same way: the caller vetted
+    the target it named, and the tool never moves a second candidate the caller
+    never saw.
+    """
     principal = _current_principal()
     if principal is None:
         return IDENTITY_ERROR
@@ -689,6 +702,7 @@ async def correct_memory(memory_id=None, subject="", attribute="", scope="defaul
             content=content, slot=Slot.of(subject, attribute, scope),
             valid_from=valid_from, evidence_ids=list(evidence_ids or []),
             memory_id=str(target.id) if target else None,
+            expected_revisions={target.id: target.revision} if target else None,
             source_ref=f"agent:{principal.name}")
         new = out["memory"]
         db.add(_ledger_entry(principal, ACTION_CORRECT, memory_id=new.id,
