@@ -22,6 +22,13 @@ CM_SUPERSEDED_BY = "cm_superseded_by"
 CM_EVIDENCE_IDS = "cm_evidence_ids"
 CM_DERIVED_FROM = "cm_derived_from"
 CM_DERIVED_DIRTY = "cm_derived_dirty"
+# Provenance of a derived summary (P4b/T5): the dedupe key over its source set
+# + revisions + rule version, the source revisions themselves, and the rule
+# generation that produced it (spec §8.1 — a summary keeps the generation of
+# the rule/model that made it, and never claims to be a raw fact).
+CM_DERIVED_KEY = "cm_derived_key"
+CM_SOURCE_REVISIONS = "cm_source_revisions"
+CM_RULE_VERSION = "cm_rule_version"
 CM_NEEDS_CHECK = "cm_needs_check"
 CM_INVALIDATED = "cm_invalidated"
 MEMORY_STATES = ("current", "superseded", "dirty", "needs-check", "invalidated")

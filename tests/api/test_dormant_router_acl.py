@@ -58,6 +58,7 @@ INVENTORY = {
     "app/ingestion/document_memory.py": 2,
     "app/ingestion/pipeline.py": 1,
     "app/mcp_hub/tools.py": 8,
+    "app/retrieval/memory/consolidation.py": 3,
     "app/retrieval/memory/context.py": 3,
     "app/retrieval/memory/correction.py": 4,
     "app/retrieval/memory/lexical_index.py": 1,

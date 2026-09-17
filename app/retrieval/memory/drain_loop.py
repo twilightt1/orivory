@@ -10,6 +10,10 @@ Single-flight (ruling R1): every claim goes through :func:`drain_once`, which
 holds the module-level lock, so exactly one claimer exists inside the process —
 the loop, and whatever else calls it (the freshness barrier reads through the
 same door rather than starting a second one).
+
+The loop also carries the two post-drain hooks: the erasure-receipt reconcile
+(R15) and the consolidation producer (R39, budgeted — see
+:func:`_consolidate_after_drain`).
 """
 from __future__ import annotations
 
@@ -19,6 +23,7 @@ import structlog
 
 from app.config import settings
 from app.observability.fallbacks import count_fallback
+from app.retrieval.memory.consolidation import run_consolidation, users_with_servable_memories
 from app.retrieval.memory.outbox import drain_pending
 from app.services.erasure_service import reconcile_erasure_receipts
 
@@ -93,14 +98,48 @@ async def _reconcile_after_drain() -> None:
         log.warning("erasure receipt reconcile failed", error=str(e))
 
 
+async def _consolidate_after_drain() -> None:
+    """Spend a drain round's spare time on the consolidation producer (R39).
+
+    Runs after a round that landed work AND on an idle tick — a landed batch is
+    where new evidence arrives, and an idle tick is free time either way. Opens
+    its own session (the erase-reconcile shape: the request-path barrier drains
+    through :func:`drain_once` and must not pay for this) and never fatal: a
+    producer failure must not stop the drain.
+
+    Budget: ``CONSOLIDATION_BUDGET_PER_RUN`` per user per pass (soft — a run
+    publishes at most that many summaries).
+
+    ponytail: one full pass per round, per-tagged-user scan; the producer's
+    dedupe key makes a repeat pass cheap (no LLM work), so gate this to idle
+    ticks only if a measured cost says to.
+    """
+    try:
+        # Late import: the test fixtures' sessionmaker lives on the module.
+        from app.database import AsyncSessionLocal
+
+        async with AsyncSessionLocal() as db:
+            for user_id in await users_with_servable_memories(db):
+                report = await run_consolidation(
+                    db, user_id, budget=settings.CONSOLIDATION_BUDGET_PER_RUN)
+                if (report.published or report.refused or report.errors
+                        or report.truncated):
+                    log.info("consolidation pass", user_id=str(user_id),
+                             **report._asdict())
+    except Exception as e:  # the loop must outlive any failure
+        log.warning("consolidation pass failed", error=str(e))
+
+
 async def run_drain_loop(*, interval: float, batch_size: int, stop: asyncio.Event) -> None:
     """Drain the outbox until ``stop`` is set. Never raises out of itself.
 
     A batch that applied anything is followed immediately by the next one (a
     backlog drains at full speed) and by the erasure-receipt reconcile pass; an
     idle batch then waits out ``interval`` or wakes for the stop flag, whichever
-    comes first. Every round logs its counts; a drain-level error is a warning
-    and the round after it runs as usual.
+    comes first. Both shapes also run the consolidation producer (R39): after a
+    landed round because that is where new evidence arrived, on an idle tick
+    because that is free time. Every round logs its counts; a drain-level error
+    is a warning and the round after it runs as usual.
     """
     while not stop.is_set():
         try:
@@ -114,7 +153,11 @@ async def run_drain_loop(*, interval: float, batch_size: int, stop: asyncio.Even
         if applied:
             # A landed batch is where a receipt's owed deletes get satisfied.
             await _reconcile_after_drain()
+            # ... and where the producer picks the new evidence up (R39).
+            await _consolidate_after_drain()
             continue  # there may be more work right now: don't wait the interval
+        # An idle tick is free time for the producer too (R39).
+        await _consolidate_after_drain()
         try:
             await asyncio.wait_for(stop.wait(), timeout=interval)
         except TimeoutError:

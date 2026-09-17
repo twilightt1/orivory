@@ -44,7 +44,15 @@ from app.models.memory import Memory
 from app.models.memory_access_log import MemoryAccessLog
 from app.observability.fallbacks import count_fallback
 from app.retrieval.embedder import EmbeddingDimensionMismatch
-from app.retrieval.memory.correction import Slot, get_cm, resolve_correction, state_of
+from app.retrieval.memory.correction import (
+    CM_DERIVED_FROM,
+    CM_RULE_VERSION,
+    CM_SOURCE_REVISIONS,
+    Slot,
+    get_cm,
+    resolve_correction,
+    state_of,
+)
 from app.retrieval.memory.namespaces import namespace_of, personal_namespace
 from app.retrieval.memory.outbox import IndexFreshnessTimeout, mark_done
 from app.retrieval.memory.retriever import MemoryRetriever
@@ -628,7 +636,15 @@ async def forget_memory(memory_ids: list[str]) -> dict[str, Any]:
 
 
 def _memory_provenance(memory: Memory) -> dict[str, Any]:
+    """Provenance every MCP read attaches — including the DERIVED label (§8.2).
+
+    A derived summary is a view of its sources, never evidence as strong as
+    they are: ``derived`` is the serving label a consumer switches on, and
+    ``derived_from`` / ``source_revisions`` / ``rule_version`` are the lineage
+    it was published with (P4b/T5). A raw memory answers ``derived: False``.
+    """
     meta = get_cm(memory)
+    derived_from = list(meta.get(CM_DERIVED_FROM) or [])
     return {
         "state": state_of(memory),
         "assertion": meta.get("cm_assertion", "fact"),
@@ -637,6 +653,10 @@ def _memory_provenance(memory: Memory) -> dict[str, Any]:
         "supersedes": meta.get("cm_supersedes"),
         "superseded_by": meta.get("cm_superseded_by"),
         "evidence_ids": list(meta.get("cm_evidence_ids") or []),
+        "derived": bool(derived_from),
+        "derived_from": derived_from,
+        "source_revisions": dict(meta.get(CM_SOURCE_REVISIONS) or {}),
+        "rule_version": meta.get(CM_RULE_VERSION),
     }
 
 
