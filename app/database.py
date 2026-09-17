@@ -27,8 +27,12 @@ IS_SQLITE = settings.DATABASE_URL.startswith("sqlite")
 # backfill IS the column default, so every pre-existing row is 'personal'),
 # v6 = the P4b suppression-ledger columns (DDL: namespace + content_hash on
 # memory_suppressions, both NULLABLE and never backfilled — NULL is the honest
-# "unknown" for a row that predates the hash being computed at upload time).
-SQLITE_SCHEMA_VERSION = 6
+# "unknown" for a row that predates the hash being computed at upload time),
+# v7 = the P4b opt-in retention settings on users (DDL: retention_enabled, a
+# NOT NULL Boolean whose constant default IS the backfill — every pre-existing
+# user is OFF, spec §8.1 never lets a migration turn auto-expiration on — and
+# retention_days, NULLABLE: "no window chosen" is a real state, not 0).
+SQLITE_SCHEMA_VERSION = 7
 
 # Objects added by the v1 -> v2 ladder; excluded from the v1 shape check.
 V2_TABLES = ("index_outbox", "index_generations", "memory_suppressions")
@@ -38,6 +42,9 @@ V2_COLUMNS = {"memories": "revision", "document_chunks": "revision"}
 # accept the genuine v1 shape whether or not an earlier boot already got this
 # far (a partially-upgraded file is upgraded again, not refused).
 V5_COLUMNS = {"memories": "namespace"}
+# Columns added by the v4 -> v5 and v5 -> v6 -> v7 steps are excluded the same
+# way; V7 (P4b/T6) adds two columns to ``users`` (a v1 file predates them).
+V7_COLUMNS = {"users": ("retention_enabled", "retention_days")}
 
 
 def _make_engine():
@@ -100,9 +107,9 @@ def _upgradable_v1_schema(sync_conn) -> bool:
     Pre-versioning installs (<= v1.1.0) built the full v1 schema with
     ``create_all`` and left ``PRAGMA user_version`` at 0. v1 is the model
     metadata minus the ladder's own additions (the v2 tables + revision columns,
-    and the v5 namespace column), so such a DB is adoptable and then upgraded by
-    the ladder. Any missing v1 table or column is divergence and must fail
-    closed.
+    the v5 namespace column, and the v7 users retention settings), so such a DB
+    is adoptable and then upgraded by the ladder. Any missing v1 table or column
+    is divergence and must fail closed.
     """
     insp = sa_inspect(sync_conn)
     existing = set(insp.get_table_names())
@@ -111,7 +118,8 @@ def _upgradable_v1_schema(sync_conn) -> bool:
             continue
         if table.name not in existing:
             return False
-        later_columns = (V2_COLUMNS.get(table.name), V5_COLUMNS.get(table.name))
+        later_columns = (V2_COLUMNS.get(table.name), V5_COLUMNS.get(table.name),
+                         *V7_COLUMNS.get(table.name, ()))
         have = {col["name"] for col in insp.get_columns(table.name)}
         if {col.name for col in table.columns if col.name not in later_columns} - have:
             return False
@@ -359,6 +367,38 @@ def _upgrade_v5_to_v6(sync_conn) -> None:
         )
 
 
+def _upgrade_v6_to_v7(sync_conn) -> None:
+    """v6 -> v7: the opt-in retention settings on ``users`` (P4b/T6, spec §8.1).
+
+    Runs ONCE, on the version transition, and on a fresh install too (which has
+    nothing to back up). ``retention_enabled`` is NOT NULL with a constant
+    default, so the ADD COLUMN IS the backfill: every pre-existing user is OFF —
+    auto expiration is opt-in, and a migration must never turn it on for a user
+    who did not ask. ``retention_days`` is NULLABLE with no default: "no window
+    chosen" is a real state, and 0 would be a window that expires everything.
+
+    The DDL mirrors the model byte for byte: ``Boolean()`` renders as
+    ``BOOLEAN`` with ``DEFAULT '0'`` and ``Integer()`` as ``INTEGER``, the exact
+    types ``create_all`` installs, so an upgraded file and a fresh one are
+    indistinguishable (``tests/lite`` compares their ``PRAGMA table_info``).
+
+    Idempotent: a crash between the DDL and the version stamp re-enters with the
+    columns already present, and SQLite has no ``ADD COLUMN IF NOT EXISTS`` —
+    hence the per-column inspect. A later boot never re-runs the step: a restart
+    must not re-assert a setting the user turned on.
+    """
+    insp = sa_inspect(sync_conn)
+    have = {col["name"] for col in insp.get_columns("users")}
+    if "retention_enabled" not in have:
+        sync_conn.exec_driver_sql(
+            "ALTER TABLE users ADD COLUMN retention_enabled BOOLEAN NOT NULL DEFAULT '0'"
+        )
+    if "retention_days" not in have:
+        sync_conn.exec_driver_sql(
+            "ALTER TABLE users ADD COLUMN retention_days INTEGER"
+        )
+
+
 def _conn_sqlite_path(conn) -> str:
     """File path of the SQLite database behind an engine/connection."""
     path = conn.engine.url.database
@@ -387,7 +427,10 @@ def upgrade_sqlite_schema(conn) -> None:
     repaired), then v4 -> v5 (the P4a namespace column + its index, ONCE — the
     column default backfills every existing row with ``'personal'``), then
     v5 -> v6 (the P4b ledger columns on ``memory_suppressions``, ONCE — nullable
-    and never backfilled: NULL is the honest value for a row that predates them).
+    and never backfilled: NULL is the honest value for a row that predates them),
+    then v6 -> v7 (the P4b opt-in retention settings on ``users``, ONCE — the
+    NOT NULL ``retention_enabled`` default backfills every existing user OFF,
+    which is the only value a migration may choose for it).
     Divergence fails closed — ``create_all`` is never used as an
     existing-schema migration mechanism.
     """
@@ -467,6 +510,18 @@ def upgrade_sqlite_schema(conn) -> None:
         # it too, so every v6 install carries the ledger columns (nullable —
         # NULL is the honest value for a row that predates them).
         _upgrade_v5_to_v6(conn)
+    if version in (0, 1, 2, 3, 4, 5, 6):
+        # T6 milestone backup: its OWN name, taken where the ladder stands now
+        # (v6, pre-retention-settings). The earlier files are snapshots of
+        # EARLIER states — nothing to inherit, so no rename — and are never
+        # overwritten. A fresh install has nothing to back up.
+        if tables:
+            _backup_before_ddl(path, suffix="pre-retention")
+        # The v6 -> v7 DDL step, ONCE, on the transition; a fresh install runs
+        # it too, so every v7 install carries the retention settings the
+        # service reads — OFF for every pre-existing user (the column default
+        # IS the backfill: spec §8.1 never lets a migration opt a user in).
+        _upgrade_v6_to_v7(conn)
     conn.execute(text(f"PRAGMA user_version = {SQLITE_SCHEMA_VERSION}"))
     integrity = conn.exec_driver_sql("PRAGMA integrity_check").fetchone()
     if integrity is None or integrity[0] != "ok":

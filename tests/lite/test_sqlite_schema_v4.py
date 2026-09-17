@@ -170,7 +170,7 @@ async def test_v3_install_upgrades_to_v4_with_the_p2_backup_and_a_populated_inde
         ids = await _indexed_ids(conn)
         integrity = (await conn.execute(text("PRAGMA integrity_check"))).scalar_one()
 
-    assert version == database.SQLITE_SCHEMA_VERSION == 6
+    assert version == database.SQLITE_SCHEMA_VERSION == 7
     assert lexical_index.TABLE in tables
     assert triggers >= TRIGGERS, "the index is maintained by triggers, not by callers"
     assert indexed == canonical == 4 and ids == await _canonical_ids_of(eng)
@@ -213,7 +213,7 @@ async def test_rebooting_a_v4_install_is_a_no_op(v3_db):
     async with eng.connect() as conn:
         version, _tables = await _schema(conn)
         assert (await _indexed_count(conn), await _canonical_count(conn)) == before
-    assert version == 6
+    assert version == 7
 
 
 async def test_a_later_boot_never_re_asserts_the_index(v3_db):
@@ -234,7 +234,7 @@ async def test_a_later_boot_never_re_asserts_the_index(v3_db):
     async with eng.connect() as conn:
         version, _tables = await _schema(conn)
         assert await _indexed_count(conn) == 0, "a v4 boot does not rebuild"
-    assert version == 6
+    assert version == 7
 
 
 async def test_a_crashed_v4_step_resumes_and_never_duplicates(v3_db):
@@ -250,7 +250,7 @@ async def test_a_crashed_v4_step_resumes_and_never_duplicates(v3_db):
         version, _tables = await _schema(conn)
         assert await _indexed_count(conn) == await _canonical_count(conn) == 4, (
             "the step resumed and backfilled the empty index")
-    assert version == 6
+    assert version == 7
 
     async with eng.begin() as conn:  # the same, one step further: killed after the backfill
         await conn.execute(text("PRAGMA user_version = 3"))
@@ -272,7 +272,7 @@ async def test_fresh_install_runs_the_v4_step_without_a_backup(tmp_path, monkeyp
         async with eng.connect() as conn:
             version, tables = await _schema(conn)
             triggers = await _triggers(conn)
-        assert version == 6 and lexical_index.TABLE in tables
+        assert version == 7 and lexical_index.TABLE in tables
         assert triggers >= TRIGGERS
         assert not list(Path(tmp_path).glob("*.pre-p2.bak")), "nothing to back up yet"
         assert not list(Path(tmp_path).glob("*.pre-p1b.bak"))

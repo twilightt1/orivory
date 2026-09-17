@@ -11,9 +11,10 @@ holds the module-level lock, so exactly one claimer exists inside the process �
 the loop, and whatever else calls it (the freshness barrier reads through the
 same door rather than starting a second one).
 
-The loop also carries the two post-drain hooks: the erasure-receipt reconcile
-(R15) and the consolidation producer (R39, budgeted — see
-:func:`_consolidate_after_drain`).
+The loop also carries the post-drain hooks: the erasure-receipt reconcile
+(R15), the consolidation producer (R39, budgeted — see
+:func:`_consolidate_after_drain`), and the opt-in retention sweep (P4b/T6,
+idle-only — see :func:`_retain_after_drain`).
 """
 from __future__ import annotations
 
@@ -26,6 +27,7 @@ from app.observability.fallbacks import count_fallback
 from app.retrieval.memory.consolidation import run_consolidation, users_with_servable_memories
 from app.retrieval.memory.outbox import drain_pending
 from app.services.erasure_service import reconcile_erasure_receipts
+from app.services.retention_service import run_retention
 
 log = structlog.get_logger()
 
@@ -130,6 +132,31 @@ async def _consolidate_after_drain() -> None:
         log.warning("consolidation pass failed", error=str(e))
 
 
+async def _retain_after_drain() -> None:
+    """Spend an idle tick on the opt-in retention sweep (P4b/T6, spec §8.1).
+
+    IDLE ONLY — unlike the producer there is nothing a landed batch changes
+    about retention: it is a clock (``indexed_at`` vs the user's own window),
+    not evidence. Opens its own session (the same shape as the erase-reconcile
+    and the producer: the request-path barrier drains through
+    :func:`drain_once` and must not pay for this) and never fatal.
+
+    Cost: the sweep is opt-in, so with no user enabled the whole pass is ONE
+    SELECT on ``users`` and nothing else (no memory scan at all) — every
+    pre-P4b user reads OFF via the ladder's column default.
+    """
+    try:
+        # Late import: the test fixtures' sessionmaker lives on the module.
+        from app.database import AsyncSessionLocal
+
+        async with AsyncSessionLocal() as db:
+            report = await run_retention(db)
+            if report.invalidated:
+                log.info("retention pass", **report._asdict())
+    except Exception as e:  # the loop must outlive any failure
+        log.warning("retention pass failed", error=str(e))
+
+
 async def run_drain_loop(*, interval: float, batch_size: int, stop: asyncio.Event) -> None:
     """Drain the outbox until ``stop`` is set. Never raises out of itself.
 
@@ -158,6 +185,9 @@ async def run_drain_loop(*, interval: float, batch_size: int, stop: asyncio.Even
             continue  # there may be more work right now: don't wait the interval
         # An idle tick is free time for the producer too (R39).
         await _consolidate_after_drain()
+        # ... and for the retention sweep, which rides idle ticks only (T6):
+        # it is a clock, not evidence — a landed batch changes nothing for it.
+        await _retain_after_drain()
         try:
             await asyncio.wait_for(stop.wait(), timeout=interval)
         except TimeoutError:

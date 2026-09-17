@@ -69,6 +69,7 @@ INVENTORY = {
     "app/services/digest_service.py": 3,
     "app/services/erasure_service.py": 7,
     "app/services/import_service.py": 1,
+    "app/services/retention_service.py": 1,
 }
 
 # file -> how many of its statements may go without the namespace predicate

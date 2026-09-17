@@ -405,6 +405,22 @@ async def update_display_name(db: AsyncSession, user: User, display_name: str) -
     return user
 
 
+async def set_retention_settings(db: AsyncSession, user: User, *,
+                                 enabled: bool, days: int | None) -> User:
+    """Write the user's opt-in retention setting (P4b/T6, spec §8.1).
+
+    The window is stored even while retention is OFF (a user may set it up
+    before turning it on); ``None`` means "no window chosen". The boundary
+    (``RetentionSettingsRequest``) refuses "enabled without a window", so the
+    pair stored here is always runnable or switched off.
+    """
+    user.retention_enabled = enabled
+    user.retention_days = days
+    await db.commit()
+    await db.refresh(user)
+    return user
+
+
 async def change_password(db: AsyncSession, user: User, current: str, new_pw: str) -> None:
     from fastapi import HTTPException
     if user.auth_provider != "email":
