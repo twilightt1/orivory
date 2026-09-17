@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from typing import NamedTuple
 from uuid import UUID, uuid4
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from app.models.memory import Memory
 from app.retrieval.memory.namespaces import namespace_of, personal_namespace
@@ -131,6 +131,36 @@ def find_derived_dependent_ids(memories, erased_ids: set[str]) -> list[str]:
             if _depends_on(m, erased_ids) and state_of(m) != "dirty"]
 
 
+def _valid_from_dt(value) -> datetime | None:
+    """``cm_valid_from`` as an aware datetime, or None when it is unusable.
+
+    A naive stamp is read as UTC so it can still be compared with an
+    offset-aware one instead of raising.
+    """
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+def _late_import(meta: dict, exact) -> bool:
+    """True when the incoming fact's event time predates an exact candidate's.
+
+    An old record imported after a newer fact is already stored must not
+    supersede it by ingestion order — that un-learns the newer fact. Missing or
+    unparseable stamps never raise the flag: there is nothing to compare, and
+    that is the legacy shape (rows written before ``cm_valid_from`` existed).
+    """
+    incoming = _valid_from_dt(meta.get(CM_VALID_FROM))
+    if incoming is None:
+        return False
+    return any((stamp := _valid_from_dt(get_cm(m).get(CM_VALID_FROM))) is not None
+               and stamp > incoming for m in exact)
+
+
 def decide_correction(cands, *, slot: Slot | None = None, assertion: str = "fact",
                       valid_from: str | None = None, memory_id: str | None = None,
                       evidence_ids=None) -> tuple[str, dict, list]:
@@ -146,11 +176,10 @@ def decide_correction(cands, *, slot: Slot | None = None, assertion: str = "fact
                   CM_SCOPE: (slot.scope if slot else "") or DEFAULT_SCOPE,
                   CM_EVIDENCE_IDS: [str(e) for e in (evidence_ids or [])]}
     if valid_from:
-        try:
-            datetime.fromisoformat(str(valid_from).replace("Z", "+00:00"))
-            meta[CM_VALID_FROM] = str(valid_from)
-        except ValueError:
+        if _valid_from_dt(valid_from) is None:
             meta[CM_NEEDS_CHECK] = True
+        else:
+            meta[CM_VALID_FROM] = str(valid_from)
     if memory_id:
         meta.setdefault(CM_EVIDENCE_IDS, []).append(str(memory_id))
 
@@ -163,7 +192,7 @@ def decide_correction(cands, *, slot: Slot | None = None, assertion: str = "fact
         if exact and not meta.get(CM_NEEDS_CHECK):
             clash = any(get_cm(m).get(CM_ASSERTION, "fact") != meta[CM_ASSERTION] for m in exact)
             target_ok = (not memory_id) or any(str(m.id) == str(memory_id) for m in exact)
-            if not clash and target_ok:
+            if not clash and target_ok and not _late_import(meta, exact):
                 status = "superseded"
             else:
                 meta[CM_NEEDS_CHECK] = True
@@ -179,13 +208,42 @@ def decide_correction(cands, *, slot: Slot | None = None, assertion: str = "fact
     return status, meta, exact
 
 
+async def _cas_supersede(db, memory, successor_id: str, expected: int | None) -> bool:
+    """Point one candidate at its successor iff its revision is still ``expected``.
+
+    The revision rides in the WHERE clause — rowcount IS the compare-and-swap
+    answer, so no row lock and no read-then-write window. ``expected is None``
+    means the caller never named this candidate: it is refused rather than
+    moved behind the caller's back.
+    """
+    if expected is None:
+        return False
+    result = await db.execute(
+        update(Memory)
+        .where(Memory.id == memory.id, Memory.revision == int(expected))
+        .values(extra_metadata={**get_cm(memory), CM_SUPERSEDED_BY: successor_id})
+        .execution_options(synchronize_session="evaluate")
+    )
+    return result.rowcount == 1
+
+
 async def resolve_correction(db, *, user_id, title, content, tags=None,
         source_type="mcp_agent", source_ref=None, slot: Slot | None = None,
         assertion="fact", valid_from=None,
-        evidence_ids=None, memory_id=None, summary=None) -> dict:
+        evidence_ids=None, memory_id=None, summary=None,
+        expected_revisions: dict[UUID, int] | None = None) -> dict:
     """Single creation path for add + correct. One commit; incomplete closure raises.
 
     ``slot=None`` is a plain add (no identity, never supersedes).
+
+    ``expected_revisions`` is the caller's snapshot of the slot it decided on
+    (candidate id -> the revision it read). The supersede/dirty apply is then a
+    CAS: every exact candidate must be named in the snapshot AND still carry
+    that revision at the guarded UPDATE — otherwise the whole correction stands
+    down as ``conflict``: the new row lands beside the slot flagged
+    ``cm_needs_check`` and no candidate is touched (two writers on one slot
+    never leave two current facts by accident). ``None`` keeps the pre-CAS
+    behaviour for callers that do not take part.
 
     The candidate read carries the namespace boundary (P4a/T4): a supersede or
     a dirty-mark is a WRITE to the candidate rows, and the decision is made over
@@ -218,17 +276,33 @@ async def resolve_correction(db, *, user_id, title, content, tags=None,
                  tags=list(tags or []), source_type=source_type,
                  source_ref=source_ref, captured_at=now, extra_metadata=meta,
                  summary=summary)
+    superseded, dirtied = [], []
+    if status == "superseded":
+        # Apply BEFORE the new row joins the session: a refused CAS must be able
+        # to roll back exactly the candidate writes and nothing else.
+        refused = False
+        for m in exact:
+            if expected_revisions is None:
+                set_cm(m, {CM_SUPERSEDED_BY: str(new.id)})
+            elif not await _cas_supersede(db, m, str(new.id),
+                                          expected_revisions.get(m.id)):
+                refused = True
+                break
+        if refused:
+            # A candidate moved after the caller read it (or was never named):
+            # stand down whole — never a silent supersede on a stale snapshot.
+            await db.rollback()
+            status, closure = "conflict", None
+            meta[CM_NEEDS_CHECK] = True
+        else:
+            superseded = [str(m.id) for m in exact]
     db.add(new)
     # The new fact is the only row whose vector payload changes (superseded /
     # dirtied rows only carry cm_* metadata, which never reaches the vector):
     # enqueue its durable intent in this same commit.
     bump_revision(new)
     await enqueue_upsert(db, new)
-    superseded, dirtied = [], []
     if status == "superseded":
-        for m in exact:
-            set_cm(m, {CM_SUPERSEDED_BY: str(new.id)})
-            superseded.append(str(m.id))
         meta[CM_SUPERSEDES] = superseded[0] if len(superseded) == 1 else superseded
         new.extra_metadata = {**new.extra_metadata, CM_SUPERSEDES: meta[CM_SUPERSEDES]}
         for m in rows:
