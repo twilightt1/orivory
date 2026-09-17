@@ -428,6 +428,7 @@ async def get_shared_memory(
             Memory.id == memory_id,
             Memory.is_shared.is_(True),
             namespace_predicate(PERSONAL),
+            not_dirty_predicate(),
         )
     )).scalar_one_or_none()
     if memory is None:

@@ -1,11 +1,15 @@
 """P4b lifecycle pins on the existing private SQLite harness."""
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock
 
 import pytest
+from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 
+from app.database import get_db
+from app.main import app
 from app.mcp_hub import tools
 from app.models.memory import Memory
 from app.retrieval.memory import correction as C
@@ -15,6 +19,7 @@ from app.retrieval.memory.visibility import (
     not_dirty_predicate,
     state_expression,
 )
+from app.services.digest_service import build_digest
 from tests.retrieval.test_visibility import (
     _as_reader,
     _mem,
@@ -64,6 +69,48 @@ async def test_retriever_context_drops_invalidated(db, monkeypatch):
     monkeypatch.setattr(R, "embed_query", AsyncMock(side_effect=RuntimeError("offline")))
     await R.MemoryRetriever(db, owner).recall("hello", include_personal_context=True)
     assert rewrite.call_args.kwargs["context"] == []
+
+
+async def test_shared_memory_hides_invalidated_not_current(db, monkeypatch):
+    owner = await _owner(db)
+    current = _mem(owner, "shared current")
+    invalid = _mem(owner, "shared invalid", meta={C.CM_INVALIDATED: True})
+    current.is_shared = invalid.is_shared = True
+    db.add_all([current, invalid])
+    await db.commit()
+
+    async def session():
+        yield db
+
+    monkeypatch.setitem(app.dependency_overrides, get_db, session)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        visible = await client.get(f"/api/v1/memories/{current.id}/share")
+        hidden = await client.get(f"/api/v1/memories/{invalid.id}/share")
+    assert visible.status_code == 200
+    assert visible.json()["content"] == current.content
+    assert hidden.status_code == 404
+    assert invalid.content not in hidden.text
+
+
+async def test_digest_excludes_invalidated_from_recent_and_resurfaced(db):
+    owner = await _owner(db)
+    now = datetime(2026, 9, 17, tzinfo=UTC)
+    current = _mem(owner, "recent current")
+    invalid = _mem(owner, "recent invalid", meta={C.CM_INVALIDATED: True})
+    old_current = _mem(owner, "old current")
+    old_invalid = _mem(owner, "old invalid", meta={C.CM_INVALIDATED: True})
+    current.captured_at = invalid.captured_at = now - timedelta(days=1)
+    old_current.captured_at = old_invalid.captured_at = now.replace(year=2025)
+    current.tags = ["valid"]
+    invalid.tags = ["invalid"]
+    db.add_all([current, invalid, old_current, old_invalid])
+    await db.commit()
+
+    digest = await build_digest(db, owner, now=now)
+    assert [m.id for m in digest.recent_memories] == [current.id]
+    assert [m.memory.id for m in digest.resurfaced] == [old_current.id]
+    assert digest.recent_count == 1
+    assert [(theme.theme, theme.count) for theme in digest.top_themes] == [("valid", 1)]
 
 
 async def _chain(db):
