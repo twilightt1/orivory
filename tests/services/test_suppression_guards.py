@@ -418,3 +418,46 @@ async def test_a_hard_erase_pins_the_bytes_of_the_forgotten_file(db, sync_db, mo
     refs = (sync_db.execute(
         select(Memory.source_ref).where(Memory.user_id == owner))).scalars().all()
     assert list(refs) == [], "the hard-erased projection never comes back"
+
+
+# ── OCR review fixes: hash fill + producer labels ───────────────────────────
+
+
+async def test_a_later_forget_fills_a_hash_the_first_one_never_knew(db):
+    """OCR fix (P4b review): a suppression row that predated the hash column
+    kept NULL forever — the early return meant a later forget carrying the
+    upload hash could not fill it, so a re-upload of the same bytes slipped
+    past the content guard for good. NULL -> value only; the first writer's
+    values always win."""
+    owner = await _owner(db)
+    await suppress_source_async(db, user_id=owner, source_ref="doc-old",
+                                reason="forgotten")   # the predating row: hash NULL
+    await db.commit()
+    digest = hashlib.sha256(b"the same bytes coming back").hexdigest()
+
+    await suppress_source_async(db, user_id=owner, source_ref="doc-old",
+                                reason="forgotten", content_hash=digest)
+    await db.commit()
+
+    ledger = await _suppressions()
+    assert [row.content_hash for row in ledger] == [digest], (
+        "a later forget fills the unknown hash (NULL -> value, once)")
+
+
+async def test_a_producer_label_is_never_pinned_by_a_forget(db):
+    """OCR fix (P4b review): the MCP boundary files every agent memory under
+    ONE shared ``agent:<name>`` ref. Pinning it on a single forget would block
+    every FUTURE memory the same producer adds (outbox/reindex guards read the
+    ledger by source_ref) — a producer label is a writer identity, not a
+    re-importable source. The primitive refuses; the row still leaves serving."""
+    owner = await _owner(db)
+    row = _memory(owner, "agent fact", source_type="mcp_agent", source_ref="agent:Claude")
+    db.add(row)
+    await db.commit()
+
+    receipt = await soft_forget(db, owner, [row.id], requested_by="agent:test")
+
+    assert receipt.detail["summary"]["suppressed"] == 0, receipt.detail
+    assert await _suppressions() == [], "no ledger row for a producer label"
+    async with database.AsyncSessionLocal() as session:
+        assert state_of(await session.get(Memory, row.id)) == "invalidated"

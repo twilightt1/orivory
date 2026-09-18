@@ -362,3 +362,33 @@ async def test_the_loop_runs_retention_on_idle_ticks_only(monkeypatch):
     assert markers[0] == "idle", "the hook runs on an idle tick"
     assert "applied" not in markers, (
         "a landed round must not pay for the sweep — idle only")
+
+
+# ── OCR review fixes: bounded window + no starvation ────────────────────────
+
+
+def test_the_settings_refuse_a_window_the_clock_cannot_subtract():
+    """OCR fix (P4b review): ``gt=0`` was the only bound on ``retention_days``,
+    so ``1_000_000`` was accepted — and ``now - timedelta(days=...)`` then
+    raised ``OverflowError`` inside the sweep. The schema bounds the window."""
+    RetentionSettingsRequest(retention_enabled=True, retention_days=36_500)
+    with pytest.raises(ValidationError):
+        RetentionSettingsRequest(retention_enabled=True, retention_days=1_000_000)
+
+
+async def test_a_broken_window_never_starves_the_users_behind_it(db):
+    """A persisted out-of-range window (pre-bound row, hand edit) fails THAT
+    user's pass; the sweep rolls it back and keeps going — the healthy users
+    behind it still expire. Before the fix the same account aborted the whole
+    pass, every pass."""
+    await _owner(db, enabled=True, days=1_000_000)   # the broken window
+    healthy = await _owner(db, enabled=True, days=1)
+    row = _memory(healthy.id, "held too long", age_days=2)
+    db.add(row)
+    await db.commit()
+
+    report = await run_retention(db, now=NOW)
+
+    assert report.users == 2, f"both windows were attempted: {report}"
+    assert report.invalidated == 1, f"the healthy window still expired its row: {report}"
+    assert await _state(row.id) == "invalidated"

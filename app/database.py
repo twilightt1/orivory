@@ -461,16 +461,16 @@ def upgrade_sqlite_schema(conn) -> None:
         raise RuntimeError(
             "SQLite schema version is marked active but required tables are missing"
         )
-    if version in (0, 1) and tables:
+    if version in (0, 1) and tables and SQLITE_SCHEMA_VERSION >= 2:
         _backup_before_ddl(path)
         _upgrade_v1_to_v2(conn)
         _check_sqlite_foreign_keys(conn)
-    if version in (0, 1, 2) and tables:
+    if version in (0, 1, 2) and tables and SQLITE_SCHEMA_VERSION >= 3:
         # P1b milestone backup (R24): reused if present, renamed if the
         # v1 -> v2 step just produced the pre-ladder file, else a fresh
         # consistent snapshot. Never overwritten.
         _p1b_backup(path)
-    if version in (0, 1, 2):
+    if version in (0, 1, 2) and SQLITE_SCHEMA_VERSION >= 3:
         # The v2 -> v3 DATA step, ONCE, on the transition: the two real rows.
         # A fresh install (no tables before this call) may have them active —
         # nothing to serve yet. An UPGRADE must not: the old pointer keeps
@@ -480,7 +480,7 @@ def upgrade_sqlite_schema(conn) -> None:
         # A later boot (already v3) never re-asserts the pointer (that would
         # undo a rollback) and never re-mutates the manifest.
         _upgrade_v2_to_v3(conn, activate=fresh_install)
-    if version in (0, 1, 2, 3):
+    if version in (0, 1, 2, 3) and SQLITE_SCHEMA_VERSION >= 4:
         # P2 milestone backup (R18): its OWN name, taken where the ladder stands
         # now (v3, pre-FTS) — nothing to inherit from the P1b file, so no
         # rename. A fresh install has nothing to back up.
@@ -489,7 +489,7 @@ def upgrade_sqlite_schema(conn) -> None:
         # The v3 -> v4 DDL step, ONCE, on the transition; a fresh install runs
         # it too, so every v4 install serves a lexical leg.
         _upgrade_v3_to_v4(conn)
-    if version in (0, 1, 2, 3, 4):
+    if version in (0, 1, 2, 3, 4) and SQLITE_SCHEMA_VERSION >= 5:
         # P4a milestone backup: its OWN name, taken where the ladder stands now
         # (v4, pre-namespace). The P1b/P2 files are snapshots of EARLIER states —
         # nothing to inherit, so no rename — and are never overwritten. A fresh
@@ -499,7 +499,7 @@ def upgrade_sqlite_schema(conn) -> None:
         # The v4 -> v5 DDL step, ONCE, on the transition; a fresh install runs it
         # too, so every v5 install carries the column the ACL predicates read.
         _upgrade_v4_to_v5(conn)
-    if version in (0, 1, 2, 3, 4, 5):
+    if version in (0, 1, 2, 3, 4, 5) and SQLITE_SCHEMA_VERSION >= 6:
         # P4b milestone backup: its OWN name, taken where the ladder stands now
         # (v5, pre-suppression-columns). The earlier files are snapshots of
         # EARLIER states — nothing to inherit, so no rename — and are never
@@ -510,7 +510,7 @@ def upgrade_sqlite_schema(conn) -> None:
         # it too, so every v6 install carries the ledger columns (nullable —
         # NULL is the honest value for a row that predates them).
         _upgrade_v5_to_v6(conn)
-    if version in (0, 1, 2, 3, 4, 5, 6):
+    if version in (0, 1, 2, 3, 4, 5, 6) and SQLITE_SCHEMA_VERSION >= 7:
         # T6 milestone backup: its OWN name, taken where the ladder stands now
         # (v6, pre-retention-settings). The earlier files are snapshots of
         # EARLIER states — nothing to inherit, so no rename — and are never

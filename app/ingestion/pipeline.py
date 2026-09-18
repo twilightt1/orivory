@@ -100,6 +100,10 @@ def _ingest(db, document_id: str) -> None:
         file_bytes = minio.get_object_sync(doc.file_path)
     except Exception as exc:
         raise _stage_error("minio_read", exc) from exc
+    # The projection's content hash comes from THESE bytes (R38): read once,
+    # hash once, hand it down — a second storage read could fail on its own and
+    # leave the re-upload guard blind.
+    upload_content_hash = hashlib.sha256(file_bytes).hexdigest()
 
     try:
         text = extract_text(file_bytes, doc.mime_type)
@@ -210,7 +214,8 @@ def _ingest(db, document_id: str) -> None:
     # the per-conversation path works regardless; a failure here is replayable
     # via the reindex helper and must not fail ingestion.
     try:
-        _project_document_to_memories(db, document_id, parents)
+        _project_document_to_memories(db, document_id, parents,
+                                      content_hash=upload_content_hash)
     except Exception as exc:
         log.warning(
             "Doc→memory projection failed",
@@ -256,7 +261,8 @@ def _index_document_chunks(db, *, children, old_ids, user_id: str,
     )
 
 
-def _project_document_to_memories(db, document_id: str, parents) -> None:
+def _project_document_to_memories(db, document_id: str, parents,
+                                  content_hash: str | None = None) -> None:
     """Create + embed cross-conversation memories for an ingested document.
 
     Commits the new Memory rows — with their durable index intents — then
@@ -266,9 +272,13 @@ def _project_document_to_memories(db, document_id: str, parents) -> None:
     R38 (P4b/T4): the projection records the sha256 of the UPLOADED BYTES in its
     metadata. That is what lets a later forget pin the bytes — not only the doc
     id — in the suppression ledger, and so catch a re-upload of the same file
-    (a new document id can never match on ``source_ref``). The value is computed
-    from the stored object here, never backfilled onto rows that predate it, and
-    an unavailable hash leaves the projection intact with the key absent.
+    (a new document id can never match on ``source_ref``).
+
+    ``content_hash`` is handed down by the ingest stage (which already read the
+    exact same bytes for text extraction, so the hash cannot fail independently
+    of the ingest itself). When None — a direct caller that never read the
+    bytes, tests — the hash is read from the stored object; an unavailable hash
+    then leaves the projection intact with the key absent ("unknown").
     """
     from sqlalchemy import select
 
@@ -294,21 +304,20 @@ def _project_document_to_memories(db, document_id: str, parents) -> None:
         return
     user_id = conversation.user_id
 
-    content_hash: str | None = None
-    try:
-        # ponytail: one extra object read per ingest — the ingest stage reads
-        # the same bytes for text extraction, so hand the hash down from there
-        # if this ever shows up in ingest latency.
-        from app import storage
+    if content_hash is None:
+        try:
+            # Fallback only (direct callers/tests): the ingest stage hands the
+            # hash down from the bytes it already read — no second object read.
+            from app import storage
 
-        content_hash = hashlib.sha256(storage.get_object_sync(doc.file_path)).hexdigest()
-    except Exception as exc:
-        # The hash is the re-upload guard's key, not the projection's truth: an
-        # unreadable object leaves the rows (with an absent hash) in place.
-        log.warning(
-            "Projection content hash unavailable",
-            extra={"doc_id": document_id, "error": str(exc)},
-        )
+            content_hash = hashlib.sha256(storage.get_object_sync(doc.file_path)).hexdigest()
+        except Exception as exc:
+            # The hash is the re-upload guard's key, not the projection's truth:
+            # an unreadable object leaves the rows (with an absent hash) in place.
+            log.warning(
+                "Projection content hash unavailable",
+                extra={"doc_id": document_id, "error": str(exc)},
+            )
 
     result = build_document_memories_sync(db, document_id, parents, user_id=user_id,
                                           content_hash=content_hash)

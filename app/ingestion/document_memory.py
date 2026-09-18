@@ -39,6 +39,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
@@ -149,18 +150,51 @@ async def suppressed_refs_async(db: AsyncSession, *, user_id,
     return {row for row in (await db.execute(stmt)).scalars().all() if row}
 
 
+# Producer labels are WRITER identities (the MCP boundary files every agent
+# memory under one shared ``agent:<name>`` ref — app/mcp_hub/tools.py), never
+# re-importable sources: no pipeline re-creates that ref, so pinning it would
+# only block every FUTURE memory the same producer adds (its outbox/reindex
+# guards read the ledger by ``source_ref``). Forgotten rows still leave
+# serving via ``cm_invalidated``; the ledger entry is simply not written.
+PRODUCER_SOURCE_PREFIX = "agent:"
+
+
+def _fill_missing_suppression_fields(existing, *, namespace: str | None,
+                                     content_hash: str | None) -> None:
+    """Let a predating row pick up fields it never knew (NULL -> value only).
+
+    R38: nothing is backfilled across time — but when a LATER forget of the
+    same identity brings a value the first row was missing, the ledger should
+    learn it, otherwise a re-upload of the same bytes slips past the hash
+    guard forever. The first writer's values always win.
+    """
+    if existing.content_hash is None and content_hash is not None:
+        existing.content_hash = content_hash
+    if existing.namespace is None and namespace is not None:
+        existing.namespace = namespace
+
+
 def projection_content_hash(row) -> str | None:
     """The upload-time content hash a projection row carries, or ``None``.
 
     Read by the forget path to pin BYTES in the ledger, not only the doc id
-    (R38). A row that predates the hash, or a non-document memory, reads None.
+    (R38). Only the shape the ingest writes is trusted — a 64-char hex string:
+    ``extra_metadata`` is client-reachable, and a forged or oversized value
+    must reach the ledger as "unknown" (``None``), never as a pin. A row that
+    predates the hash, or a non-document memory, reads ``None``.
     """
     value = (getattr(row, "extra_metadata", None) or {}).get(CONTENT_HASH_KEY)
-    return str(value) if value else None
+    if not isinstance(value, str) or len(value) != 64:
+        return None
+    try:
+        bytes.fromhex(value)
+    except ValueError:
+        return None
+    return value
 
 
 def suppress_source(db: Session, *, user_id, source_ref: str, reason: str = "forgotten",
-                    namespace: str | None = None, content_hash: str | None = None) -> None:
+                    namespace: str | None = None, content_hash: str | None = None) -> bool:
     """Record that this identity was forgotten (idempotent, caller commits).
 
     The unique ``(user_id, source_ref)`` keeps exactly one suppression row, so
@@ -171,32 +205,71 @@ def suppress_source(db: Session, *, user_id, source_ref: str, reason: str = "for
     sha256 it just computed from the incoming bytes — the import/reindex/drain
     guards only read this ledger, they never write it. A caller with no hash
     passes nothing and the column stays NULL (R38: never backfilled).
+
+    Returns whether the ledger now says "suppressed" — ``False`` only for a
+    producer label (``PRODUCER_SOURCE_PREFIX``: see the constant), so a
+    caller's receipt never counts a pin that was never written. A lost
+    check-then-insert race resolves to "already suppressed" instead of
+    aborting the caller's transaction.
     """
-    if is_suppressed(db, user_id=user_id, source_ref=source_ref):
-        return
+    if source_ref and source_ref.startswith(PRODUCER_SOURCE_PREFIX):
+        return False
+    existing = db.execute(
+        select(MemorySuppression).where(
+            MemorySuppression.user_id == user_id,
+            MemorySuppression.source_ref == source_ref)
+    ).scalar_one_or_none()
+    if existing is not None:
+        _fill_missing_suppression_fields(existing, namespace=namespace,
+                                         content_hash=content_hash)
+        db.flush()
+        return True
     db.add(MemorySuppression(id=uuid.uuid4().hex, user_id=user_id,
                              source_ref=source_ref, reason=reason,
                              namespace=namespace, content_hash=content_hash))
     # Flush so a replay inside the same transaction sees the row (the session
-    # does not autoflush) instead of racing the unique constraint.
-    db.flush()
+    # does not autoflush) instead of racing the unique constraint. The
+    # savepoint scopes the race: a rival forget that landed the row first
+    # answers IntegrityError, the savepoint rolls back — and THIS caller's
+    # other work stays alive.
+    try:
+        with db.begin_nested():
+            db.flush()
+    except IntegrityError:
+        pass
+    return True
 
 
 async def suppress_source_async(db: AsyncSession, *, user_id, source_ref: str,
                                 reason: str = "forgotten", namespace: str | None = None,
-                                content_hash: str | None = None) -> None:
-    """Async face of :func:`suppress_source` — same row, same fields.
+                                content_hash: str | None = None) -> bool:
+    """Async face of :func:`suppress_source` — same row, same fields, same bool.
 
     ``content_hash`` is the same caller-supplied value (a forget's
     ``projection_content_hash(row)``, or the re-upload guard's freshly computed
     sha256 of the incoming bytes); nothing here computes or backfills one.
     """
-    if await is_suppressed_async(db, user_id=user_id, source_ref=source_ref):
-        return
+    if source_ref and source_ref.startswith(PRODUCER_SOURCE_PREFIX):
+        return False
+    existing = (await db.execute(
+        select(MemorySuppression).where(
+            MemorySuppression.user_id == user_id,
+            MemorySuppression.source_ref == source_ref)
+    )).scalar_one_or_none()
+    if existing is not None:
+        _fill_missing_suppression_fields(existing, namespace=namespace,
+                                         content_hash=content_hash)
+        await db.flush()
+        return True
     db.add(MemorySuppression(id=uuid.uuid4().hex, user_id=user_id,
                              source_ref=source_ref, reason=reason,
                              namespace=namespace, content_hash=content_hash))
-    await db.flush()
+    try:
+        async with db.begin_nested():
+            await db.flush()
+    except IntegrityError:
+        pass
+    return True
 
 
 # ── projection queries: always scoped to (source_ref, owner) ────────────────

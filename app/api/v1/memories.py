@@ -27,7 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.models.memory import Memory
 from app.models.user import User
-from app.retrieval.memory.correction import state_of
+from app.retrieval.memory.correction import client_metadata, state_of
 from app.retrieval.memory.namespaces import PERSONAL, namespace_of, personal_namespace
 from app.retrieval.memory.outbox import bump_revision, enqueue_upsert, mark_done
 from app.retrieval.memory.retriever import MemoryRetriever
@@ -143,7 +143,7 @@ async def create_memory(
         captured_at=body.captured_at or datetime.now(UTC),
         parent_id=body.parent_id,
         pinned=body.pinned,
-        extra_metadata=body.metadata,
+        extra_metadata=client_metadata(body.metadata),
     )
     db.add(memory)
     # Durable index intent in the SAME commit as the row: if the process dies
@@ -328,7 +328,14 @@ async def update_memory(
     # Pydantic alias `metadata` maps to ORM attribute `extra_metadata` (the
     # underlying column is named "metadata", reserved by SQLAlchemy).
     if "metadata" in data:
-        data["extra_metadata"] = data.pop("metadata")
+        # Client metadata replaces only the CLIENT's own keys: the server-owned
+        # ``cm_*`` entries already on the row ride through untouched — a PATCH
+        # carrying ``{}`` (or forged markers) must never clear
+        # ``cm_invalidated`` (un-forget) or fake lifecycle state.
+        incoming = client_metadata(data.pop("metadata"))
+        reserved = {key: value for key, value in (memory.extra_metadata or {}).items()
+                    if isinstance(key, str) and key.startswith("cm_")}
+        data["extra_metadata"] = {**incoming, **reserved}
     for field, value in data.items():
         setattr(memory, field, value)
 

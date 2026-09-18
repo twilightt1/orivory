@@ -87,6 +87,7 @@ from app.retrieval.memory.correction import (
     collect_derived_ids,
     collect_derived_ids_outside_namespace,
     set_cm,
+    state_of,
 )
 from app.retrieval.memory.namespaces import namespace_of, personal_namespace
 from app.retrieval.memory.outbox import (
@@ -215,7 +216,7 @@ async def _cross_user_cascade_count(
 
 
 async def _cascaded_out_of_namespace_count(
-    db: AsyncSession, memory_ids: list[uuid.UUID], *, user_id: uuid.UUID
+    db: AsyncSession, memory_ids: list[uuid.UUID]
 ) -> int:
     """Count every cascade-only descendant, including below derived nodes (S5).
 
@@ -417,8 +418,7 @@ async def _erase_one(db: AsyncSession, user_id: uuid.UUID, memory_id: uuid.UUID)
     # and their vectors were never enumerable from this scope — the receipt
     # must still carry them as a residual.
     cross_user_children = await _cross_user_cascade_count(db, affected, user_id=user_id)
-    cascaded_out_of_namespace = await _cascaded_out_of_namespace_count(
-        db, affected, user_id=user_id)
+    cascaded_out_of_namespace = await _cascaded_out_of_namespace_count(db, affected)
 
     # One DELETE for the whole closure: children and links go with it through
     # the DB-level ON DELETE CASCADE. The DB is also the only deleter that can
@@ -637,6 +637,12 @@ async def _soft_forget_one(
         target = await db.get(Memory, affected_id)
         if target is None or not _owned(target, user_id):
             continue  # the closure is scoped by construction; belt and braces
+        if state_of(target) == "invalidated":
+            # Already forgotten — an overlapping closure target (forget
+            # [parent, child]) or a replay. A second bump/intent/suppression
+            # would only double the receipt counts; the row is already out of
+            # serving. ``closure.affected`` still reports it as affected.
+            continue
         set_cm(target, {CM_INVALIDATED: True})
         # R37: the state must REACH the vector payload. The bump makes this a
         # real write and the durable upsert carries it to the applier, which
@@ -653,11 +659,15 @@ async def _soft_forget_one(
             # projection carries one (computed from the uploaded bytes at
             # ingest): that is the key a RE-UPLOAD of the same file is caught
             # by, since the new document id can never match on source_ref.
-            # Rows that predate it keep NULL — never backfilled.
-            await suppress_source_async(db, user_id=user_id, source_ref=target.source_ref,
-                                        reason="forgotten", namespace=namespace_of(target),
-                                        content_hash=projection_content_hash(target))
-            suppressed.append(target.source_ref)
+            # Rows that predate it keep NULL — never backfilled (a later
+            # forget of the same identity may fill it: see
+            # ``_fill_missing_suppression_fields``). Producer labels
+            # (`agent:<name>`) are refused by the primitive: they are writer
+            # identities, not re-importable sources.
+            if await suppress_source_async(db, user_id=user_id, source_ref=target.source_ref,
+                                           reason="forgotten", namespace=namespace_of(target),
+                                           content_hash=projection_content_hash(target)):
+                suppressed.append(target.source_ref)
     await db.commit()
     return {
         "memory_id": str(memory_id),
@@ -743,7 +753,8 @@ async def soft_forget(
             "invalidated": len(invalidated),
             "skipped": len(unique_ids) - len(invalidated),
             "errors": sum(1 for t in targets if t["status"] == "error"),
-            "suppressed": sum(len(t.get("suppressed_sources") or []) for t in invalidated),
+            "suppressed": len({ref for t in invalidated
+                               for ref in (t.get("suppressed_sources") or [])}),
             "payload_refresh_enqueued": sum(int(t.get("payload_refresh_enqueued") or 0)
                                             for t in invalidated),
             "serving_residual": len(residual_ids),

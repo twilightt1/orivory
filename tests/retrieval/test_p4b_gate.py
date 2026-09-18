@@ -405,6 +405,15 @@ async def test_mcp_forget_is_soft_suppresses_every_source_and_blocks_reimport(li
         await db.commit()
         root_id, derived_id = root.id, derived.id
 
+    # Seed the REAL store with their CURRENT payloads FIRST (OCR fix): R37's
+    # claim is that the point SURVIVES and its payload MOVES — which needs a
+    # point that already exists and already serves `current`. A point first
+    # created at drain time would only prove the drain wrote something.
+    vector_store.upsert_memories_sync([root, derived])
+    seeded = _payloads(generation_name("memory"))
+    assert seeded[str(root_id)]["visibility_state"] == "current"
+    assert seeded[str(derived_id)]["visibility_state"] == "current"
+
     out = await hub_tools.forget_memory([str(root_id)])
 
     assert set(out) == {"receipt_id", "status", "invalidated", "suppressed", "skipped", "invalid"}, (
@@ -428,11 +437,13 @@ async def test_mcp_forget_is_soft_suppresses_every_source_and_blocks_reimport(li
     pinned_refs = {s.source_ref for s in suppressions}
     assert {root_ref, derived_ref} <= pinned_refs, "EVERY affected source is suppressed, not only the root"
 
-    # R37 through the real applier: the point survives, its payload state moves.
+    # R37 through the real applier: the same points stay, their payloads move.
     assert (await outbox.drain_pending())["applied"] >= 2
-    payload = _payloads(generation_name("memory"))[str(root_id)]
-    assert payload["visibility_state"] == "invalidated", (
+    payloads = _payloads(generation_name("memory"))
+    assert payloads[str(root_id)]["visibility_state"] == "invalidated", (
         "the vector kept serving `current` — the refresh intent never landed")
+    assert payloads[str(derived_id)]["visibility_state"] == "invalidated", (
+        "the closure's refresh covers every affected row, not only the root")
 
     # The re-import guard reads the same ledger, through the real import path.
     async with live.sessions() as db:
@@ -721,9 +732,14 @@ def test_the_workflow_runs_this_gate_and_names_only_paths_that_exist():
         f"an --ignore in the {CI_STEP_NAME!r} step skips a suite it claims to run: {run!r}")
     all_runs = "\n".join(s.get("run", "") for job in workflow["jobs"].values() for s in job["steps"])
     for suite in P4B_WIRED_ELSEWHERE:
-        # A directory-scoped step (`tests/mcp_hub`) wires every module under it.
-        assert suite in all_runs or suite in run or suite.rsplit("/", 1)[0] in all_runs, (
-            f"{suite} is wired into no CI step at all")
+        # A directory-scoped step (`tests/mcp_hub` as a STANDALONE pytest
+        # target) wires every module under it. A mere substring of a longer
+        # path never counts: `tests/lite` must not read as wired-on-its-own
+        # just because `tests/lite/test_sqlite_schema_v7.py` exists somewhere
+        # (OCR/W3-N1: the pin has to survive the wiring it claims to guard).
+        targets = (suite, suite.rsplit("/", 1)[0])
+        assert any(re.search(rf"(?m)(?:^|\s){re.escape(t)}(?=\s|$)", all_runs)
+                   for t in targets), f"{suite} is wired into no CI step at all"
     assert GATE_MODULE in run, "the acceptance gate itself must be in the step"
 
     # No dead path: pytest exits 4 on a missing target, and a stale mention in

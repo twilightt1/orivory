@@ -9,6 +9,11 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Least privilege for every job in this workflow: PR-controlled code runs here
+# (checkout persists the workflow token), and nothing needs more than reads.
+permissions:
+  contents: read
+
 jobs:
   test:
     name: Lint and infra-free tests

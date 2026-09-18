@@ -32,6 +32,7 @@ from app.ingestion.import_formats import (
 )
 from app.models.memory import Memory
 from app.retrieval.embedder import EmbeddingDimensionMismatch
+from app.retrieval.memory.correction import client_metadata
 from app.retrieval.memory.outbox import bump_revision, enqueue_upsert, mark_done
 from app.retrieval.memory.write_back import index_new_memory
 from app.schemas.Orivory import ImportSummary
@@ -106,17 +107,21 @@ async def run_import(
     # Dedup part 2: within the same file.
     for item in items:
         try:
-            if item.source_ref and (item.source_ref in existing_refs or item.source_ref in seen_refs):
-                skipped_duplicates += 1
-                continue
             if item.source_ref and item.source_ref in suppressed_refs:
-                # Taken before the row exists (and before any intent): nothing
-                # to index, nothing to serve, nothing to replay.
+                # Checked BEFORE the duplicate branch: a soft-forgotten row
+                # stays in SQL (invalidated), so its ref can read as a
+                # duplicate too — suppression is the truer reason and the one
+                # the summary owes. Taken before the row exists (and before any
+                # intent): nothing to index, nothing to serve, nothing to
+                # replay.
                 suppressed_skipped += 1
                 log.info(
                     "Import item skipped: source suppressed",
                     extra={"user_id": str(user_id), "source_ref": item.source_ref},
                 )
+                continue
+            if item.source_ref and (item.source_ref in existing_refs or item.source_ref in seen_refs):
+                skipped_duplicates += 1
                 continue
             memory = Memory(
                 user_id=user_id,
@@ -127,7 +132,7 @@ async def run_import(
                 source_url=item.source_url,
                 tags=item.tags,
                 captured_at=item.captured_at,
-                extra_metadata={**item.metadata, "import": {"requested_by": requested_by}},
+                extra_metadata={**client_metadata(item.metadata), "import": {"requested_by": requested_by}},
             )
             # Stamp the first indexed revision at construction: a later flush
             # would materialize the column default first and turn the same

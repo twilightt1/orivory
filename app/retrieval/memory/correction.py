@@ -95,6 +95,20 @@ def set_cm(memory, patch: dict) -> None:
     memory.extra_metadata = {**(memory.extra_metadata or {}), **patch}
 
 
+def client_metadata(raw: dict | None) -> dict:
+    """Client-supplied metadata with the server-owned ``cm_*`` keys dropped.
+
+    The ``cm_*`` vocabulary IS the lifecycle: a client update that could clear
+    ``cm_invalidated`` (or forge ``cm_superseded_by``/``cm_derived_dirty``)
+    would un-forget a row or fake history. Every CLIENT boundary (REST
+    create/update, import) passes its metadata through here; the server's own
+    writers (correction, forget, consolidation, retention) write ``cm_*``
+    directly and never route through this.
+    """
+    return {key: value for key, value in (raw or {}).items()
+            if not (isinstance(key, str) and key.startswith("cm_"))}
+
+
 def state_of(memory) -> str:
     """One question for a memory's lifecycle state.
 
@@ -102,15 +116,20 @@ def state_of(memory) -> str:
     Invalidation preserves provenance but forbids serving. A superseded
     memory stays "superseded" even if also dirty; dirty (stale derived
     view) outranks needs-check because it must not be served either way.
+
+    PRESENCE, not truthiness: the SQL predicates read these markers with
+    ``_has`` (any non-NULL value counts), so a stored falsy value
+    (``{"cm_invalidated": false}`` — client metadata can say anything) must
+    not make Python and SQL disagree about the same row.
     """
     meta = get_cm(memory)
-    if meta.get(CM_INVALIDATED):
+    if meta.get(CM_INVALIDATED) is not None:
         return "invalidated"
-    if meta.get(CM_SUPERSEDED_BY):
+    if meta.get(CM_SUPERSEDED_BY) is not None:
         return "superseded"
-    if meta.get(CM_DERIVED_DIRTY):
+    if meta.get(CM_DERIVED_DIRTY) is not None:
         return "dirty"
-    if meta.get(CM_NEEDS_CHECK):
+    if meta.get(CM_NEEDS_CHECK) is not None:
         return "needs-check"
     return "current"
 
@@ -194,8 +213,6 @@ def decide_correction(cands, *, slot: Slot | None = None, assertion: str = "fact
     exact: list = []
     if slot is not None:
         exact = [m for m in cands if slot.matches(m)]
-        if memory_id and exact and str(exact[0].id) != str(memory_id) and len(exact) == 1:
-            pass  # explicit target mismatch handled below as ambiguous
         if exact and not meta.get(CM_NEEDS_CHECK):
             clash = any(get_cm(m).get(CM_ASSERTION, "fact") != meta[CM_ASSERTION] for m in exact)
             target_ok = (not memory_id) or any(str(m.id) == str(memory_id) for m in exact)
@@ -320,6 +337,19 @@ async def resolve_correction(db, *, user_id, title, content, tags=None,
         cands, slot=slot, assertion=assertion, valid_from=valid_from,
         memory_id=str(memory_id) if memory_id else None,
         evidence_ids=evidence_ids)
+
+    if expected_revisions is not None and memory_id is not None:
+        # The caller named a target and carried its snapshot (the MCP boundary
+        # does both). If that row is no longer an eligible candidate — a
+        # concurrent forget/supersede took it out of ``cands``, or it was
+        # deleted — the snapshot can never match at the CAS, and without this
+        # guard the decision would degrade to a silent "added" that publishes a
+        # new fact over a target the caller believed was still current.
+        # Fail closed instead: conflict, needs-check, nothing superseded.
+        named = UUID(str(memory_id))
+        if all(m.id != named for m in cands):
+            status = "conflict"
+            meta[CM_NEEDS_CHECK] = True
 
     closure = _dependency_closure(rows, [m.id for m in exact]) if status == "superseded" else None
     if closure is not None and closure.truncated:

@@ -331,3 +331,37 @@ async def test_a_conflict_after_a_landed_cas_leaves_no_pointer(db):
     rows = await _rows(db, owner)
     assert all(rows[i].extra_metadata.get(C.CM_SUPERSEDED_BY) is None for i in ids)
     assert [mid for mid, row in rows.items() if C.state_of(row) == "current"] == ids
+
+
+# ── OCR review fix: a snapshot onto a target that left the slot ─────────────
+
+
+async def test_a_snapshot_onto_a_forgotten_target_still_conflicts(db):
+    """OCR fix (P4b review): the named target was invalidated between the
+    caller's read and the apply, so it dropped out of the candidate set and the
+    decision degraded from the CAS path to a silent "added" — a new fact
+    published over a target the caller believed was current. Fail closed:
+    conflict, needs-check, nothing superseded, the forgotten row stays
+    forgotten."""
+    from app.services.erasure_service import soft_forget
+
+    owner = await _owner(db)
+    row = _slotted(owner, "db v1")
+    db.add(row)
+    await db.commit()
+    snapshot = {row.id: row.revision}
+
+    await soft_forget(db, owner, [row.id], requested_by="agent:test")
+
+    out = await resolve_correction(db, user_id=owner, title="DB", content="Postgres",
+                                   slot=SLOT, memory_id=str(row.id),
+                                   expected_revisions=dict(snapshot))
+
+    assert out["status"] == "conflict", (
+        f"a snapshot onto a row that left serving must fail closed, got {out['status']!r}")
+    assert out["memory"].extra_metadata[C.CM_NEEDS_CHECK] is True
+    assert (out["superseded"], out["dirtied"]) == ([], [])
+
+    rows = await _rows(db, owner)
+    assert C.state_of(rows[row.id]) == "invalidated", "the forgotten row stays forgotten"
+    assert [mid for mid, r in rows.items() if C.state_of(r) == "superseded"] == []
