@@ -1,0 +1,2869 @@
+{
+  "artifact": "m-v2-ablation-retrieval",
+  "plan": "2026-09-19-model-scale-gates (T2 / D3)",
+  "scales": {
+    "kind": "fixture",
+    "memories": 311,
+    "queries": 48,
+    "top_k": 10,
+    "note": "EVIDENCE AT FIXTURE SCALE — never a production claim"
+  },
+  "fingerprint": {
+    "git": {
+      "head": "c752639dfe249f82f215b255d056817fd6ff951b",
+      "dirty": true,
+      "dirty_paths": [
+        "eval/ablation_retrieval_mv2.json",
+        "eval/ablation_retrieval_mv2.py",
+        "eval/mv2/reference.py",
+        "tests/benchmarks/test_ablation_mv2.py"
+      ]
+    },
+    "runtime": {
+      "python": "3.13.15",
+      "platform": "macOS-15.6.1-arm64-arm-64bit-Mach-O",
+      "machine": "arm64",
+      "processor": "arm",
+      "cpu_count": 10,
+      "memory_bytes": 34359738368,
+      "onnxruntime": "1.30.0",
+      "tokenizers": "0.22.2",
+      "numpy": "2.5.3",
+      "torch": "2.14.0",
+      "transformers": "4.57.6"
+    },
+    "model_pins": {
+      "repo": "Snowflake/snowflake-arctic-embed-m-v2.0",
+      "revision": "95c2741480856aa9666782eb4afe11959938017f"
+    },
+    "seeds": {
+      "fixture_seed": 20260916,
+      "ranking": "deterministic; no other randomness"
+    },
+    "top_k": 10,
+    "concurrency": "single process, single thread of control (ORT session defaults)",
+    "warmup": "none — every query is embedded on its own call"
+  },
+  "fixture": {
+    "source": "eval/ablation_retrieval_p2.py:build_fixture() — imported, not copied",
+    "seed": 20260916,
+    "corpus_hash": "sha256:3fa94d5676fb193ff5a0436a188d3f3d76c865e0f6b6ce30c059dcb5993b8bad",
+    "query_set_hash": "sha256:024b43d408047b3899334cd98492d79d397d9132e58fb80381384c5788caabd3",
+    "slices": [
+      "exact_id",
+      "vi_diacritics",
+      "vi_no_diacritics",
+      "en",
+      "short_query",
+      "long_query"
+    ],
+    "slice_definitions": {
+      "exact_id": "exact identifier / path lookup (rare-token queries)",
+      "vi_diacritics": "Vietnamese with diacritics (semantic queries)",
+      "vi_no_diacritics": "Vietnamese typed WITHOUT tone marks — same rows, differently typed query",
+      "en": "English semantic queries",
+      "short_query": "one-token queries",
+      "long_query": "long prose queries (phrase-like, many tokens)"
+    },
+    "queries_per_slice": {
+      "exact_id": 8,
+      "vi_diacritics": 8,
+      "vi_no_diacritics": 8,
+      "en": 8,
+      "short_query": 8,
+      "long_query": 8
+    },
+    "query_ids": [
+      "exact_id.q00",
+      "exact_id.q01",
+      "exact_id.q02",
+      "exact_id.q03",
+      "exact_id.q04",
+      "exact_id.q05",
+      "exact_id.q06",
+      "exact_id.q07",
+      "vi_diacritics.q00",
+      "vi_diacritics.q01",
+      "vi_diacritics.q02",
+      "vi_diacritics.q03",
+      "vi_diacritics.q04",
+      "vi_diacritics.q05",
+      "vi_diacritics.q06",
+      "vi_diacritics.q07",
+      "vi_no_diacritics.q00",
+      "vi_no_diacritics.q01",
+      "vi_no_diacritics.q02",
+      "vi_no_diacritics.q03",
+      "vi_no_diacritics.q04",
+      "vi_no_diacritics.q05",
+      "vi_no_diacritics.q06",
+      "vi_no_diacritics.q07",
+      "en.q00",
+      "en.q01",
+      "en.q02",
+      "en.q03",
+      "en.q04",
+      "en.q05",
+      "en.q06",
+      "en.q07",
+      "short_query.q00",
+      "short_query.q01",
+      "short_query.q02",
+      "short_query.q03",
+      "short_query.q04",
+      "short_query.q05",
+      "short_query.q06",
+      "short_query.q07",
+      "long_query.q00",
+      "long_query.q01",
+      "long_query.q02",
+      "long_query.q03",
+      "long_query.q04",
+      "long_query.q05",
+      "long_query.q06",
+      "long_query.q07"
+    ],
+    "rows": 311,
+    "superseded_rows_excluded_before_topk": 10
+  },
+  "arms": {
+    "xs_cls_baseline": {
+      "status": "ran",
+      "config": {
+        "model": "arctic-embed-xs ONNX (the shipped local default)",
+        "dim": 384,
+        "pooling": "cls",
+        "prefix": "Represent this sentence for searching relevant passages: ",
+        "max_tokens": 512,
+        "batch_policy": "batched (e5_local _BATCH=128, longest-padded)"
+      },
+      "per_slice": {
+        "en": {
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0,
+          "n": 8
+        },
+        "exact_id": {
+          "recall@1": 0.125,
+          "recall@5": 0.375,
+          "recall@10": 0.625,
+          "mrr": 0.263889,
+          "n": 8
+        },
+        "long_query": {
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0,
+          "n": 8
+        },
+        "short_query": {
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0,
+          "n": 8
+        },
+        "vi_diacritics": {
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0,
+          "n": 8
+        },
+        "vi_no_diacritics": {
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0,
+          "n": 8
+        }
+      },
+      "overall": {
+        "recall@1": 0.854167,
+        "recall@5": 0.895833,
+        "recall@10": 0.9375,
+        "mrr": 0.877315,
+        "n": 48
+      },
+      "per_query": [
+        {
+          "key": "exact_id.q00",
+          "slice": "exact_id",
+          "recall@1": 0.0,
+          "recall@5": 0.0,
+          "recall@10": 0.0,
+          "mrr": 0.0
+        },
+        {
+          "key": "exact_id.q01",
+          "slice": "exact_id",
+          "recall@1": 0.0,
+          "recall@5": 0.0,
+          "recall@10": 0.0,
+          "mrr": 0.0
+        },
+        {
+          "key": "exact_id.q02",
+          "slice": "exact_id",
+          "recall@1": 0.0,
+          "recall@5": 0.0,
+          "recall@10": 0.0,
+          "mrr": 0.0
+        },
+        {
+          "key": "exact_id.q03",
+          "slice": "exact_id",
+          "recall@1": 0.0,
+          "recall@5": 0.0,
+          "recall@10": 1.0,
+          "mrr": 0.1111111111111111
+        },
+        {
+          "key": "exact_id.q04",
+          "slice": "exact_id",
+          "recall@1": 0.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 0.3333333333333333
+        },
+        {
+          "key": "exact_id.q05",
+          "slice": "exact_id",
+          "recall@1": 0.0,
+          "recall@5": 0.0,
+          "recall@10": 1.0,
+          "mrr": 0.16666666666666666
+        },
+        {
+          "key": "exact_id.q06",
+          "slice": "exact_id",
+          "recall@1": 0.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 0.5
+        },
+        {
+          "key": "exact_id.q07",
+          "slice": "exact_id",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "vi_diacritics.q00",
+          "slice": "vi_diacritics",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "vi_diacritics.q01",
+          "slice": "vi_diacritics",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "vi_diacritics.q02",
+          "slice": "vi_diacritics",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "vi_diacritics.q03",
+          "slice": "vi_diacritics",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "vi_diacritics.q04",
+          "slice": "vi_diacritics",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "vi_diacritics.q05",
+          "slice": "vi_diacritics",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "vi_diacritics.q06",
+          "slice": "vi_diacritics",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "vi_diacritics.q07",
+          "slice": "vi_diacritics",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "vi_no_diacritics.q00",
+          "slice": "vi_no_diacritics",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "vi_no_diacritics.q01",
+          "slice": "vi_no_diacritics",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "vi_no_diacritics.q02",
+          "slice": "vi_no_diacritics",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "vi_no_diacritics.q03",
+          "slice": "vi_no_diacritics",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "vi_no_diacritics.q04",
+          "slice": "vi_no_diacritics",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "vi_no_diacritics.q05",
+          "slice": "vi_no_diacritics",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "vi_no_diacritics.q06",
+          "slice": "vi_no_diacritics",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "vi_no_diacritics.q07",
+          "slice": "vi_no_diacritics",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "en.q00",
+          "slice": "en",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "en.q01",
+          "slice": "en",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "en.q02",
+          "slice": "en",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "en.q03",
+          "slice": "en",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "en.q04",
+          "slice": "en",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "en.q05",
+          "slice": "en",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "en.q06",
+          "slice": "en",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "en.q07",
+          "slice": "en",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "short_query.q00",
+          "slice": "short_query",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "short_query.q01",
+          "slice": "short_query",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "short_query.q02",
+          "slice": "short_query",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "short_query.q03",
+          "slice": "short_query",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "short_query.q04",
+          "slice": "short_query",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "short_query.q05",
+          "slice": "short_query",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "short_query.q06",
+          "slice": "short_query",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "short_query.q07",
+          "slice": "short_query",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "long_query.q00",
+          "slice": "long_query",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "long_query.q01",
+          "slice": "long_query",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "long_query.q02",
+          "slice": "long_query",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "long_query.q03",
+          "slice": "long_query",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "long_query.q04",
+          "slice": "long_query",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "long_query.q05",
+          "slice": "long_query",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "long_query.q06",
+          "slice": "long_query",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "long_query.q07",
+          "slice": "long_query",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        }
+      ],
+      "fingerprint": {
+        "arctic_model.onnx": {
+          "path": "/Users/twilight/.cache/orivory/e5/arctic_model.onnx",
+          "sha256": "cf2698d30ff05da02c70a088313bad56e5c2f401d734cb24a8390d446111936c",
+          "size_bytes": 90387631
+        },
+        "arctic_tokenizer.json": {
+          "path": "/Users/twilight/.cache/orivory/e5/arctic_tokenizer.json",
+          "sha256": "91f1def9b9391fdabe028cd3f3fcc4efd34e5d1f08c3bf2de513ebb5911a1854",
+          "size_bytes": 711649
+        }
+      }
+    },
+    "mv2_fp_reference": {
+      "status": "ran",
+      "config": {
+        "model": "official custom code, pinned revision (eval/mv2/reference.py)",
+        "dim": 768,
+        "pooling": "cls",
+        "prefix": "query: ",
+        "max_tokens": 512,
+        "batch_policy": "batched (torch CPU float32, batch=16)"
+      },
+      "per_slice": {
+        "en": {
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0,
+          "n": 8
+        },
+        "exact_id": {
+          "recall@1": 0.75,
+          "recall@5": 0.9375,
+          "recall@10": 1.0,
+          "mrr": 0.80625,
+          "n": 8
+        },
+        "long_query": {
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0,
+          "n": 8
+        },
+        "short_query": {
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0,
+          "n": 8
+        },
+        "vi_diacritics": {
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0,
+          "n": 8
+        },
+        "vi_no_diacritics": {
+          "recall@1": 0.375,
+          "recall@5": 0.625,
+          "recall@10": 0.75,
+          "mrr": 0.478125,
+          "n": 8
+        }
+      },
+      "overall": {
+        "recall@1": 0.854167,
+        "recall@5": 0.927083,
+        "recall@10": 0.958333,
+        "mrr": 0.880729,
+        "n": 48
+      },
+      "per_query": [
+        {
+          "key": "exact_id.q00",
+          "slice": "exact_id",
+          "recall@1": 0.0,
+          "recall@5": 0.5,
+          "recall@10": 1.0,
+          "mrr": 0.2
+        },
+        {
+          "key": "exact_id.q01",
+          "slice": "exact_id",
+          "recall@1": 0.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 0.25
+        },
+        {
+          "key": "exact_id.q02",
+          "slice": "exact_id",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "exact_id.q03",
+          "slice": "exact_id",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "exact_id.q04",
+          "slice": "exact_id",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "exact_id.q05",
+          "slice": "exact_id",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "exact_id.q06",
+          "slice": "exact_id",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "exact_id.q07",
+          "slice": "exact_id",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "vi_diacritics.q00",
+          "slice": "vi_diacritics",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "vi_diacritics.q01",
+          "slice": "vi_diacritics",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "vi_diacritics.q02",
+          "slice": "vi_diacritics",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "vi_diacritics.q03",
+          "slice": "vi_diacritics",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "vi_diacritics.q04",
+          "slice": "vi_diacritics",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "vi_diacritics.q05",
+          "slice": "vi_diacritics",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "vi_diacritics.q06",
+          "slice": "vi_diacritics",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "vi_diacritics.q07",
+          "slice": "vi_diacritics",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "vi_no_diacritics.q00",
+          "slice": "vi_no_diacritics",
+          "recall@1": 0.0,
+          "recall@5": 0.0,
+          "recall@10": 0.0,
+          "mrr": 0.0
+        },
+        {
+          "key": "vi_no_diacritics.q01",
+          "slice": "vi_no_diacritics",
+          "recall@1": 0.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 0.2
+        },
+        {
+          "key": "vi_no_diacritics.q02",
+          "slice": "vi_no_diacritics",
+          "recall@1": 0.0,
+          "recall@5": 0.0,
+          "recall@10": 1.0,
+          "mrr": 0.125
+        },
+        {
+          "key": "vi_no_diacritics.q03",
+          "slice": "vi_no_diacritics",
+          "recall@1": 0.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 0.5
+        },
+        {
+          "key": "vi_no_diacritics.q04",
+          "slice": "vi_no_diacritics",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "vi_no_diacritics.q05",
+          "slice": "vi_no_diacritics",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "vi_no_diacritics.q06",
+          "slice": "vi_no_diacritics",
+          "recall@1": 0.0,
+          "recall@5": 0.0,
+          "recall@10": 0.0,
+          "mrr": 0.0
+        },
+        {
+          "key": "vi_no_diacritics.q07",
+          "slice": "vi_no_diacritics",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "en.q00",
+          "slice": "en",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "en.q01",
+          "slice": "en",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "en.q02",
+          "slice": "en",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "en.q03",
+          "slice": "en",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "en.q04",
+          "slice": "en",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "en.q05",
+          "slice": "en",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "en.q06",
+          "slice": "en",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "en.q07",
+          "slice": "en",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "short_query.q00",
+          "slice": "short_query",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "short_query.q01",
+          "slice": "short_query",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "short_query.q02",
+          "slice": "short_query",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "short_query.q03",
+          "slice": "short_query",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "short_query.q04",
+          "slice": "short_query",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "short_query.q05",
+          "slice": "short_query",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "short_query.q06",
+          "slice": "short_query",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "short_query.q07",
+          "slice": "short_query",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "long_query.q00",
+          "slice": "long_query",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "long_query.q01",
+          "slice": "long_query",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "long_query.q02",
+          "slice": "long_query",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "long_query.q03",
+          "slice": "long_query",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "long_query.q04",
+          "slice": "long_query",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "long_query.q05",
+          "slice": "long_query",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "long_query.q06",
+          "slice": "long_query",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "long_query.q07",
+          "slice": "long_query",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        }
+      ],
+      "fingerprint": {
+        "repo": "Snowflake/snowflake-arctic-embed-m-v2.0",
+        "revision": "95c2741480856aa9666782eb4afe11959938017f",
+        "weights": {
+          "file": "model.safetensors",
+          "path": "/Users/twilight/.cache/orivory/mv2/reference/hf/hub/models--Snowflake--snowflake-arctic-embed-m-v2.0/snapshots/95c2741480856aa9666782eb4afe11959938017f/model.safetensors",
+          "sha256": "3d80d4727ac8759fb8624b690697c053a3d1992120111dc4a71178e608c26604",
+          "size_bytes": 1221487872
+        },
+        "code": {
+          "configuration_hf_alibaba_nlp_gte.py": "d31622918ecf738d1bb082bb27fe8141c3189238cef51d464c7f68e32bbe3d54",
+          "modeling_hf_alibaba_nlp_gte.py": "f8dff057e7c91790771f24ac8b8c172ab5c863835194872539c74fa5f538ed4c"
+        },
+        "torch": "2.14.0",
+        "transformers": "4.57.6"
+      }
+    },
+    "mv2_onnx_fp": {
+      "status": "ran",
+      "config": {
+        "model": "mv2_fp32.onnx (onnx/model.onnx, pinned revision)",
+        "dim": 768,
+        "pooling": "cls",
+        "prefix": "query: ",
+        "max_tokens": 512,
+        "batch_policy": "batched (Mv2Onnx _BATCH=16)"
+      },
+      "per_slice": {
+        "en": {
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0,
+          "n": 8
+        },
+        "exact_id": {
+          "recall@1": 0.75,
+          "recall@5": 0.9375,
+          "recall@10": 1.0,
+          "mrr": 0.80625,
+          "n": 8
+        },
+        "long_query": {
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0,
+          "n": 8
+        },
+        "short_query": {
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0,
+          "n": 8
+        },
+        "vi_diacritics": {
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0,
+          "n": 8
+        },
+        "vi_no_diacritics": {
+          "recall@1": 0.375,
+          "recall@5": 0.625,
+          "recall@10": 0.75,
+          "mrr": 0.478125,
+          "n": 8
+        }
+      },
+      "overall": {
+        "recall@1": 0.854167,
+        "recall@5": 0.927083,
+        "recall@10": 0.958333,
+        "mrr": 0.880729,
+        "n": 48
+      },
+      "per_query": [
+        {
+          "key": "exact_id.q00",
+          "slice": "exact_id",
+          "recall@1": 0.0,
+          "recall@5": 0.5,
+          "recall@10": 1.0,
+          "mrr": 0.2
+        },
+        {
+          "key": "exact_id.q01",
+          "slice": "exact_id",
+          "recall@1": 0.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 0.25
+        },
+        {
+          "key": "exact_id.q02",
+          "slice": "exact_id",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "exact_id.q03",
+          "slice": "exact_id",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "exact_id.q04",
+          "slice": "exact_id",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "exact_id.q05",
+          "slice": "exact_id",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "exact_id.q06",
+          "slice": "exact_id",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "exact_id.q07",
+          "slice": "exact_id",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "vi_diacritics.q00",
+          "slice": "vi_diacritics",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "vi_diacritics.q01",
+          "slice": "vi_diacritics",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "vi_diacritics.q02",
+          "slice": "vi_diacritics",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "vi_diacritics.q03",
+          "slice": "vi_diacritics",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "vi_diacritics.q04",
+          "slice": "vi_diacritics",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "vi_diacritics.q05",
+          "slice": "vi_diacritics",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "vi_diacritics.q06",
+          "slice": "vi_diacritics",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "vi_diacritics.q07",
+          "slice": "vi_diacritics",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "vi_no_diacritics.q00",
+          "slice": "vi_no_diacritics",
+          "recall@1": 0.0,
+          "recall@5": 0.0,
+          "recall@10": 0.0,
+          "mrr": 0.0
+        },
+        {
+          "key": "vi_no_diacritics.q01",
+          "slice": "vi_no_diacritics",
+          "recall@1": 0.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 0.2
+        },
+        {
+          "key": "vi_no_diacritics.q02",
+          "slice": "vi_no_diacritics",
+          "recall@1": 0.0,
+          "recall@5": 0.0,
+          "recall@10": 1.0,
+          "mrr": 0.125
+        },
+        {
+          "key": "vi_no_diacritics.q03",
+          "slice": "vi_no_diacritics",
+          "recall@1": 0.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 0.5
+        },
+        {
+          "key": "vi_no_diacritics.q04",
+          "slice": "vi_no_diacritics",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "vi_no_diacritics.q05",
+          "slice": "vi_no_diacritics",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "vi_no_diacritics.q06",
+          "slice": "vi_no_diacritics",
+          "recall@1": 0.0,
+          "recall@5": 0.0,
+          "recall@10": 0.0,
+          "mrr": 0.0
+        },
+        {
+          "key": "vi_no_diacritics.q07",
+          "slice": "vi_no_diacritics",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "en.q00",
+          "slice": "en",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "en.q01",
+          "slice": "en",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "en.q02",
+          "slice": "en",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "en.q03",
+          "slice": "en",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "en.q04",
+          "slice": "en",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "en.q05",
+          "slice": "en",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "en.q06",
+          "slice": "en",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "en.q07",
+          "slice": "en",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "short_query.q00",
+          "slice": "short_query",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "short_query.q01",
+          "slice": "short_query",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "short_query.q02",
+          "slice": "short_query",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "short_query.q03",
+          "slice": "short_query",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "short_query.q04",
+          "slice": "short_query",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "short_query.q05",
+          "slice": "short_query",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "short_query.q06",
+          "slice": "short_query",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "short_query.q07",
+          "slice": "short_query",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "long_query.q00",
+          "slice": "long_query",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "long_query.q01",
+          "slice": "long_query",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "long_query.q02",
+          "slice": "long_query",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "long_query.q03",
+          "slice": "long_query",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "long_query.q04",
+          "slice": "long_query",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "long_query.q05",
+          "slice": "long_query",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "long_query.q06",
+          "slice": "long_query",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "long_query.q07",
+          "slice": "long_query",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        }
+      ],
+      "fingerprint": {
+        "mv2_fp32.onnx": {
+          "path": "/Users/twilight/.cache/orivory/mv2/mv2_fp32.onnx",
+          "sha256": "c0c53d7f49a2db60761b92b7bbf5be87a7b3cf5d92dbbd7f1b5028bd5a40aa39",
+          "size_bytes": 1226099913
+        },
+        "mv2_tokenizer.json": {
+          "path": "/Users/twilight/.cache/orivory/mv2/mv2_tokenizer.json",
+          "sha256": "f1cc44ad7faaeec47241864835473fd5403f2da94673f3f764a77ebcb0a803ec",
+          "size_bytes": 17083009
+        }
+      }
+    },
+    "mv2_onnx_int8": {
+      "status": "ran",
+      "config": {
+        "model": "mv2_int8.onnx (onnx/model_int8.onnx, pinned revision)",
+        "dim": 768,
+        "pooling": "cls",
+        "prefix": "query: ",
+        "max_tokens": 512,
+        "batch_policy": "ONE TEXT PER CALL (T1: per-tensor dynamic quantization)"
+      },
+      "per_slice": {
+        "en": {
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0,
+          "n": 8
+        },
+        "exact_id": {
+          "recall@1": 0.75,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 0.816667,
+          "n": 8
+        },
+        "long_query": {
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0,
+          "n": 8
+        },
+        "short_query": {
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0,
+          "n": 8
+        },
+        "vi_diacritics": {
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0,
+          "n": 8
+        },
+        "vi_no_diacritics": {
+          "recall@1": 0.375,
+          "recall@5": 0.625,
+          "recall@10": 0.625,
+          "mrr": 0.447917,
+          "n": 8
+        }
+      },
+      "overall": {
+        "recall@1": 0.854167,
+        "recall@5": 0.9375,
+        "recall@10": 0.9375,
+        "mrr": 0.877431,
+        "n": 48
+      },
+      "per_query": [
+        {
+          "key": "exact_id.q00",
+          "slice": "exact_id",
+          "recall@1": 0.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 0.3333333333333333
+        },
+        {
+          "key": "exact_id.q01",
+          "slice": "exact_id",
+          "recall@1": 0.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 0.2
+        },
+        {
+          "key": "exact_id.q02",
+          "slice": "exact_id",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "exact_id.q03",
+          "slice": "exact_id",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "exact_id.q04",
+          "slice": "exact_id",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "exact_id.q05",
+          "slice": "exact_id",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "exact_id.q06",
+          "slice": "exact_id",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "exact_id.q07",
+          "slice": "exact_id",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "vi_diacritics.q00",
+          "slice": "vi_diacritics",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "vi_diacritics.q01",
+          "slice": "vi_diacritics",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "vi_diacritics.q02",
+          "slice": "vi_diacritics",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "vi_diacritics.q03",
+          "slice": "vi_diacritics",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "vi_diacritics.q04",
+          "slice": "vi_diacritics",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "vi_diacritics.q05",
+          "slice": "vi_diacritics",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "vi_diacritics.q06",
+          "slice": "vi_diacritics",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "vi_diacritics.q07",
+          "slice": "vi_diacritics",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "vi_no_diacritics.q00",
+          "slice": "vi_no_diacritics",
+          "recall@1": 0.0,
+          "recall@5": 0.0,
+          "recall@10": 0.0,
+          "mrr": 0.0
+        },
+        {
+          "key": "vi_no_diacritics.q01",
+          "slice": "vi_no_diacritics",
+          "recall@1": 0.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 0.25
+        },
+        {
+          "key": "vi_no_diacritics.q02",
+          "slice": "vi_no_diacritics",
+          "recall@1": 0.0,
+          "recall@5": 0.0,
+          "recall@10": 0.0,
+          "mrr": 0.0
+        },
+        {
+          "key": "vi_no_diacritics.q03",
+          "slice": "vi_no_diacritics",
+          "recall@1": 0.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 0.3333333333333333
+        },
+        {
+          "key": "vi_no_diacritics.q04",
+          "slice": "vi_no_diacritics",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "vi_no_diacritics.q05",
+          "slice": "vi_no_diacritics",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "vi_no_diacritics.q06",
+          "slice": "vi_no_diacritics",
+          "recall@1": 0.0,
+          "recall@5": 0.0,
+          "recall@10": 0.0,
+          "mrr": 0.0
+        },
+        {
+          "key": "vi_no_diacritics.q07",
+          "slice": "vi_no_diacritics",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "en.q00",
+          "slice": "en",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "en.q01",
+          "slice": "en",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "en.q02",
+          "slice": "en",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "en.q03",
+          "slice": "en",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "en.q04",
+          "slice": "en",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "en.q05",
+          "slice": "en",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "en.q06",
+          "slice": "en",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "en.q07",
+          "slice": "en",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "short_query.q00",
+          "slice": "short_query",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "short_query.q01",
+          "slice": "short_query",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "short_query.q02",
+          "slice": "short_query",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "short_query.q03",
+          "slice": "short_query",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "short_query.q04",
+          "slice": "short_query",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "short_query.q05",
+          "slice": "short_query",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "short_query.q06",
+          "slice": "short_query",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "short_query.q07",
+          "slice": "short_query",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "long_query.q00",
+          "slice": "long_query",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "long_query.q01",
+          "slice": "long_query",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "long_query.q02",
+          "slice": "long_query",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "long_query.q03",
+          "slice": "long_query",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "long_query.q04",
+          "slice": "long_query",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "long_query.q05",
+          "slice": "long_query",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "long_query.q06",
+          "slice": "long_query",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "long_query.q07",
+          "slice": "long_query",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        }
+      ],
+      "fingerprint": {
+        "mv2_int8.onnx": {
+          "path": "/Users/twilight/.cache/orivory/mv2/mv2_int8.onnx",
+          "sha256": "03d923bb1850ebdccb068e2f3abd8aa43fe81c50d07d037ef103fe3d0fb78e3b",
+          "size_bytes": 310916060
+        },
+        "mv2_tokenizer.json": {
+          "path": "/Users/twilight/.cache/orivory/mv2/mv2_tokenizer.json",
+          "sha256": "f1cc44ad7faaeec47241864835473fd5403f2da94673f3f764a77ebcb0a803ec",
+          "size_bytes": 17083009
+        }
+      }
+    },
+    "mv2_onnx_int8_mrl256": {
+      "status": "ran",
+      "config": {
+        "model": "mv2_int8.onnx (onnx/model_int8.onnx, same session), MRL dim=256",
+        "dim": 256,
+        "pooling": "cls (slice to 256, then L2 AGAIN — not the 128-byte claim)",
+        "prefix": "query: ",
+        "max_tokens": 512,
+        "batch_policy": "ONE TEXT PER CALL (T1: per-tensor dynamic quantization)"
+      },
+      "per_slice": {
+        "en": {
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0,
+          "n": 8
+        },
+        "exact_id": {
+          "recall@1": 0.625,
+          "recall@5": 0.75,
+          "recall@10": 0.875,
+          "mrr": 0.663889,
+          "n": 8
+        },
+        "long_query": {
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0,
+          "n": 8
+        },
+        "short_query": {
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0,
+          "n": 8
+        },
+        "vi_diacritics": {
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0,
+          "n": 8
+        },
+        "vi_no_diacritics": {
+          "recall@1": 0.25,
+          "recall@5": 0.625,
+          "recall@10": 0.625,
+          "mrr": 0.395833,
+          "n": 8
+        }
+      },
+      "overall": {
+        "recall@1": 0.8125,
+        "recall@5": 0.895833,
+        "recall@10": 0.916667,
+        "mrr": 0.843287,
+        "n": 48
+      },
+      "per_query": [
+        {
+          "key": "exact_id.q00",
+          "slice": "exact_id",
+          "recall@1": 0.0,
+          "recall@5": 0.0,
+          "recall@10": 1.0,
+          "mrr": 0.1111111111111111
+        },
+        {
+          "key": "exact_id.q01",
+          "slice": "exact_id",
+          "recall@1": 0.0,
+          "recall@5": 0.0,
+          "recall@10": 0.0,
+          "mrr": 0.0
+        },
+        {
+          "key": "exact_id.q02",
+          "slice": "exact_id",
+          "recall@1": 0.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 0.2
+        },
+        {
+          "key": "exact_id.q03",
+          "slice": "exact_id",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "exact_id.q04",
+          "slice": "exact_id",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "exact_id.q05",
+          "slice": "exact_id",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "exact_id.q06",
+          "slice": "exact_id",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "exact_id.q07",
+          "slice": "exact_id",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "vi_diacritics.q00",
+          "slice": "vi_diacritics",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "vi_diacritics.q01",
+          "slice": "vi_diacritics",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "vi_diacritics.q02",
+          "slice": "vi_diacritics",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "vi_diacritics.q03",
+          "slice": "vi_diacritics",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "vi_diacritics.q04",
+          "slice": "vi_diacritics",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "vi_diacritics.q05",
+          "slice": "vi_diacritics",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "vi_diacritics.q06",
+          "slice": "vi_diacritics",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "vi_diacritics.q07",
+          "slice": "vi_diacritics",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "vi_no_diacritics.q00",
+          "slice": "vi_no_diacritics",
+          "recall@1": 0.0,
+          "recall@5": 0.0,
+          "recall@10": 0.0,
+          "mrr": 0.0
+        },
+        {
+          "key": "vi_no_diacritics.q01",
+          "slice": "vi_no_diacritics",
+          "recall@1": 0.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 0.3333333333333333
+        },
+        {
+          "key": "vi_no_diacritics.q02",
+          "slice": "vi_no_diacritics",
+          "recall@1": 0.0,
+          "recall@5": 0.0,
+          "recall@10": 0.0,
+          "mrr": 0.0
+        },
+        {
+          "key": "vi_no_diacritics.q03",
+          "slice": "vi_no_diacritics",
+          "recall@1": 0.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 0.3333333333333333
+        },
+        {
+          "key": "vi_no_diacritics.q04",
+          "slice": "vi_no_diacritics",
+          "recall@1": 0.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 0.5
+        },
+        {
+          "key": "vi_no_diacritics.q05",
+          "slice": "vi_no_diacritics",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "vi_no_diacritics.q06",
+          "slice": "vi_no_diacritics",
+          "recall@1": 0.0,
+          "recall@5": 0.0,
+          "recall@10": 0.0,
+          "mrr": 0.0
+        },
+        {
+          "key": "vi_no_diacritics.q07",
+          "slice": "vi_no_diacritics",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "en.q00",
+          "slice": "en",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "en.q01",
+          "slice": "en",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "en.q02",
+          "slice": "en",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "en.q03",
+          "slice": "en",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "en.q04",
+          "slice": "en",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "en.q05",
+          "slice": "en",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "en.q06",
+          "slice": "en",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "en.q07",
+          "slice": "en",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "short_query.q00",
+          "slice": "short_query",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "short_query.q01",
+          "slice": "short_query",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "short_query.q02",
+          "slice": "short_query",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "short_query.q03",
+          "slice": "short_query",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "short_query.q04",
+          "slice": "short_query",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "short_query.q05",
+          "slice": "short_query",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "short_query.q06",
+          "slice": "short_query",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "short_query.q07",
+          "slice": "short_query",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "long_query.q00",
+          "slice": "long_query",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "long_query.q01",
+          "slice": "long_query",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "long_query.q02",
+          "slice": "long_query",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "long_query.q03",
+          "slice": "long_query",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "long_query.q04",
+          "slice": "long_query",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "long_query.q05",
+          "slice": "long_query",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "long_query.q06",
+          "slice": "long_query",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        },
+        {
+          "key": "long_query.q07",
+          "slice": "long_query",
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0,
+          "mrr": 1.0
+        }
+      ],
+      "fingerprint": {
+        "mv2_int8.onnx": {
+          "path": "/Users/twilight/.cache/orivory/mv2/mv2_int8.onnx",
+          "sha256": "03d923bb1850ebdccb068e2f3abd8aa43fe81c50d07d037ef103fe3d0fb78e3b",
+          "size_bytes": 310916060
+        },
+        "mv2_tokenizer.json": {
+          "path": "/Users/twilight/.cache/orivory/mv2/mv2_tokenizer.json",
+          "sha256": "f1cc44ad7faaeec47241864835473fd5403f2da94673f3f764a77ebcb0a803ec",
+          "size_bytes": 17083009
+        }
+      }
+    }
+  },
+  "deltas_vs_xs_cls_baseline": {
+    "mv2_fp_reference": {
+      "per_slice": {
+        "exact_id": {
+          "recall@1": 0.625,
+          "recall@5": 0.5625,
+          "recall@10": 0.375,
+          "mrr": 0.542361,
+          "recall@5_delta": 0.5625
+        },
+        "vi_diacritics": {
+          "recall@1": 0.0,
+          "recall@5": 0.0,
+          "recall@10": 0.0,
+          "mrr": 0.0,
+          "recall@5_delta": 0.0
+        },
+        "vi_no_diacritics": {
+          "recall@1": -0.625,
+          "recall@5": -0.375,
+          "recall@10": -0.25,
+          "mrr": -0.521875,
+          "recall@5_delta": -0.375
+        },
+        "en": {
+          "recall@1": 0.0,
+          "recall@5": 0.0,
+          "recall@10": 0.0,
+          "mrr": 0.0,
+          "recall@5_delta": 0.0
+        },
+        "short_query": {
+          "recall@1": 0.0,
+          "recall@5": 0.0,
+          "recall@10": 0.0,
+          "mrr": 0.0,
+          "recall@5_delta": 0.0
+        },
+        "long_query": {
+          "recall@1": 0.0,
+          "recall@5": 0.0,
+          "recall@10": 0.0,
+          "mrr": 0.0,
+          "recall@5_delta": 0.0
+        }
+      },
+      "overall": {
+        "recall@1": 0.0,
+        "recall@5": 0.03125,
+        "recall@10": 0.020833,
+        "mrr": 0.003414,
+        "recall@5_gain": 0.03125
+      }
+    },
+    "mv2_onnx_fp": {
+      "per_slice": {
+        "exact_id": {
+          "recall@1": 0.625,
+          "recall@5": 0.5625,
+          "recall@10": 0.375,
+          "mrr": 0.542361,
+          "recall@5_delta": 0.5625
+        },
+        "vi_diacritics": {
+          "recall@1": 0.0,
+          "recall@5": 0.0,
+          "recall@10": 0.0,
+          "mrr": 0.0,
+          "recall@5_delta": 0.0
+        },
+        "vi_no_diacritics": {
+          "recall@1": -0.625,
+          "recall@5": -0.375,
+          "recall@10": -0.25,
+          "mrr": -0.521875,
+          "recall@5_delta": -0.375
+        },
+        "en": {
+          "recall@1": 0.0,
+          "recall@5": 0.0,
+          "recall@10": 0.0,
+          "mrr": 0.0,
+          "recall@5_delta": 0.0
+        },
+        "short_query": {
+          "recall@1": 0.0,
+          "recall@5": 0.0,
+          "recall@10": 0.0,
+          "mrr": 0.0,
+          "recall@5_delta": 0.0
+        },
+        "long_query": {
+          "recall@1": 0.0,
+          "recall@5": 0.0,
+          "recall@10": 0.0,
+          "mrr": 0.0,
+          "recall@5_delta": 0.0
+        }
+      },
+      "overall": {
+        "recall@1": 0.0,
+        "recall@5": 0.03125,
+        "recall@10": 0.020833,
+        "mrr": 0.003414,
+        "recall@5_gain": 0.03125
+      }
+    },
+    "mv2_onnx_int8": {
+      "per_slice": {
+        "exact_id": {
+          "recall@1": 0.625,
+          "recall@5": 0.625,
+          "recall@10": 0.375,
+          "mrr": 0.552778,
+          "recall@5_delta": 0.625
+        },
+        "vi_diacritics": {
+          "recall@1": 0.0,
+          "recall@5": 0.0,
+          "recall@10": 0.0,
+          "mrr": 0.0,
+          "recall@5_delta": 0.0
+        },
+        "vi_no_diacritics": {
+          "recall@1": -0.625,
+          "recall@5": -0.375,
+          "recall@10": -0.375,
+          "mrr": -0.552083,
+          "recall@5_delta": -0.375
+        },
+        "en": {
+          "recall@1": 0.0,
+          "recall@5": 0.0,
+          "recall@10": 0.0,
+          "mrr": 0.0,
+          "recall@5_delta": 0.0
+        },
+        "short_query": {
+          "recall@1": 0.0,
+          "recall@5": 0.0,
+          "recall@10": 0.0,
+          "mrr": 0.0,
+          "recall@5_delta": 0.0
+        },
+        "long_query": {
+          "recall@1": 0.0,
+          "recall@5": 0.0,
+          "recall@10": 0.0,
+          "mrr": 0.0,
+          "recall@5_delta": 0.0
+        }
+      },
+      "overall": {
+        "recall@1": 0.0,
+        "recall@5": 0.041667,
+        "recall@10": 0.0,
+        "mrr": 0.000116,
+        "recall@5_gain": 0.041667
+      }
+    },
+    "mv2_onnx_int8_mrl256": {
+      "per_slice": {
+        "exact_id": {
+          "recall@1": 0.5,
+          "recall@5": 0.375,
+          "recall@10": 0.25,
+          "mrr": 0.4,
+          "recall@5_delta": 0.375
+        },
+        "vi_diacritics": {
+          "recall@1": 0.0,
+          "recall@5": 0.0,
+          "recall@10": 0.0,
+          "mrr": 0.0,
+          "recall@5_delta": 0.0
+        },
+        "vi_no_diacritics": {
+          "recall@1": -0.75,
+          "recall@5": -0.375,
+          "recall@10": -0.375,
+          "mrr": -0.604167,
+          "recall@5_delta": -0.375
+        },
+        "en": {
+          "recall@1": 0.0,
+          "recall@5": 0.0,
+          "recall@10": 0.0,
+          "mrr": 0.0,
+          "recall@5_delta": 0.0
+        },
+        "short_query": {
+          "recall@1": 0.0,
+          "recall@5": 0.0,
+          "recall@10": 0.0,
+          "mrr": 0.0,
+          "recall@5_delta": 0.0
+        },
+        "long_query": {
+          "recall@1": 0.0,
+          "recall@5": 0.0,
+          "recall@10": 0.0,
+          "mrr": 0.0,
+          "recall@5_delta": 0.0
+        }
+      },
+      "overall": {
+        "recall@1": -0.041667,
+        "recall@5": 0.0,
+        "recall@10": -0.020833,
+        "mrr": -0.034028,
+        "recall@5_gain": 0.0
+      }
+    }
+  },
+  "cross_checks": {
+    "vi_query_form_cosine_per_arm": {
+      "pairs": 8,
+      "per_arm": {
+        "xs_cls_baseline": {
+          "rows": 8,
+          "mean_cosine": 1.0,
+          "min_cosine": 1.0
+        },
+        "mv2_fp_reference": {
+          "rows": 8,
+          "mean_cosine": 0.390619,
+          "min_cosine": 0.300316
+        },
+        "mv2_onnx_fp": {
+          "rows": 8,
+          "mean_cosine": 0.390619,
+          "min_cosine": 0.300315
+        },
+        "mv2_onnx_int8": {
+          "rows": 8,
+          "mean_cosine": 0.393206,
+          "min_cosine": 0.325468
+        },
+        "mv2_onnx_int8_mrl256": {
+          "rows": 8,
+          "mean_cosine": 0.422646,
+          "min_cosine": 0.336633
+        }
+      },
+      "note": "cosine between each VI query typed with diacritics and the same query typed without tone marks: 1.0 means the two forms are the same vector to that embedder"
+    },
+    "reference_vs_onnx_fp": {
+      "corpus_passages": {
+        "rows": 311,
+        "mean_cosine": 1.0,
+        "min_cosine": 1.0
+      },
+      "queries": {
+        "rows": 48,
+        "mean_cosine": 1.0,
+        "min_cosine": 1.0
+      },
+      "note": "row-wise cosine between the official custom code (fp32 torch) and the pinned onnx/model.onnx export on identical inputs; 1.0 means the export reproduces the reference"
+    }
+  },
+  "verdict": {
+    "gate": "SIGNED D1 (§12, 2026-09-19): eligible iff non-inferior on EVERY slice (drop <= 0.02 recall@5 vs xs_cls_baseline) AND superior on the VI slices (gain >= +0.02 recall@5); vi_diacritics is the primary VI slice, vi_no_diacritics is recorded separately — disagreement fails",
+    "thresholds": {
+      "max_slice_drop_recall@5": 0.02,
+      "min_vi_gain_recall@5": 0.02,
+      "vi_primary_slice": "vi_diacritics",
+      "vi_secondary_slice": "vi_no_diacritics"
+    },
+    "arms": {
+      "mv2_fp_reference": {
+        "eligible": false,
+        "verdict": "FAIL",
+        "thresholds": {
+          "max_slice_drop_recall@5": 0.02,
+          "min_vi_gain_recall@5": 0.02,
+          "vi_primary_slice": "vi_diacritics",
+          "vi_secondary_slice": "vi_no_diacritics"
+        },
+        "non_inferior": {
+          "passed": false,
+          "failing_slices": [
+            "vi_no_diacritics"
+          ]
+        },
+        "vi_superiority": {
+          "passed": false,
+          "failing_slices": [
+            "vi_diacritics",
+            "vi_no_diacritics"
+          ],
+          "gains": {
+            "vi_diacritics": 0.0,
+            "vi_no_diacritics": -0.375
+          }
+        },
+        "per_slice_deltas": {
+          "exact_id": 0.5625,
+          "vi_diacritics": 0.0,
+          "vi_no_diacritics": -0.375,
+          "en": 0.0,
+          "short_query": 0.0,
+          "long_query": 0.0
+        },
+        "reason": "not eligible: non-inferiority violated on vi_no_diacritics (-0.3750); VI superiority not met on vi_diacritics (+0.0000 < +0.02), vi_no_diacritics (-0.3750 < +0.02)"
+      },
+      "mv2_onnx_fp": {
+        "eligible": false,
+        "verdict": "FAIL",
+        "thresholds": {
+          "max_slice_drop_recall@5": 0.02,
+          "min_vi_gain_recall@5": 0.02,
+          "vi_primary_slice": "vi_diacritics",
+          "vi_secondary_slice": "vi_no_diacritics"
+        },
+        "non_inferior": {
+          "passed": false,
+          "failing_slices": [
+            "vi_no_diacritics"
+          ]
+        },
+        "vi_superiority": {
+          "passed": false,
+          "failing_slices": [
+            "vi_diacritics",
+            "vi_no_diacritics"
+          ],
+          "gains": {
+            "vi_diacritics": 0.0,
+            "vi_no_diacritics": -0.375
+          }
+        },
+        "per_slice_deltas": {
+          "exact_id": 0.5625,
+          "vi_diacritics": 0.0,
+          "vi_no_diacritics": -0.375,
+          "en": 0.0,
+          "short_query": 0.0,
+          "long_query": 0.0
+        },
+        "reason": "not eligible: non-inferiority violated on vi_no_diacritics (-0.3750); VI superiority not met on vi_diacritics (+0.0000 < +0.02), vi_no_diacritics (-0.3750 < +0.02)"
+      },
+      "mv2_onnx_int8": {
+        "eligible": false,
+        "verdict": "FAIL",
+        "thresholds": {
+          "max_slice_drop_recall@5": 0.02,
+          "min_vi_gain_recall@5": 0.02,
+          "vi_primary_slice": "vi_diacritics",
+          "vi_secondary_slice": "vi_no_diacritics"
+        },
+        "non_inferior": {
+          "passed": false,
+          "failing_slices": [
+            "vi_no_diacritics"
+          ]
+        },
+        "vi_superiority": {
+          "passed": false,
+          "failing_slices": [
+            "vi_diacritics",
+            "vi_no_diacritics"
+          ],
+          "gains": {
+            "vi_diacritics": 0.0,
+            "vi_no_diacritics": -0.375
+          }
+        },
+        "per_slice_deltas": {
+          "exact_id": 0.625,
+          "vi_diacritics": 0.0,
+          "vi_no_diacritics": -0.375,
+          "en": 0.0,
+          "short_query": 0.0,
+          "long_query": 0.0
+        },
+        "reason": "not eligible: non-inferiority violated on vi_no_diacritics (-0.3750); VI superiority not met on vi_diacritics (+0.0000 < +0.02), vi_no_diacritics (-0.3750 < +0.02)"
+      },
+      "mv2_onnx_int8_mrl256": {
+        "eligible": false,
+        "verdict": "FAIL",
+        "thresholds": {
+          "max_slice_drop_recall@5": 0.02,
+          "min_vi_gain_recall@5": 0.02,
+          "vi_primary_slice": "vi_diacritics",
+          "vi_secondary_slice": "vi_no_diacritics"
+        },
+        "non_inferior": {
+          "passed": false,
+          "failing_slices": [
+            "vi_no_diacritics"
+          ]
+        },
+        "vi_superiority": {
+          "passed": false,
+          "failing_slices": [
+            "vi_diacritics",
+            "vi_no_diacritics"
+          ],
+          "gains": {
+            "vi_diacritics": 0.0,
+            "vi_no_diacritics": -0.375
+          }
+        },
+        "per_slice_deltas": {
+          "exact_id": 0.375,
+          "vi_diacritics": 0.0,
+          "vi_no_diacritics": -0.375,
+          "en": 0.0,
+          "short_query": 0.0,
+          "long_query": 0.0
+        },
+        "reason": "not eligible: non-inferiority violated on vi_no_diacritics (-0.3750); VI superiority not met on vi_diacritics (+0.0000 < +0.02), vi_no_diacritics (-0.3750 < +0.02)"
+      }
+    },
+    "eligible_arms": [],
+    "authority": "this artifact never flips a flag: T3 (opt-in LOCAL_EMBED_MODEL=arctic-m-v2) is conditional on an eligible arm, the default stays `arctic` regardless"
+  },
+  "substitutions": {
+    "ranking": "exact cosine top-k in numpy over real vectors, tenant + visibility filtered, sorted (-score, memory_id) — the p2 ExactCosineStore seam; production's Qdrant HNSW approximates this order",
+    "pipeline": "no SQL hydration/refill/rerank: identical for every arm, and the only variable under test is the embedder",
+    "batch_composition_decision": "fixed per arm (T1 parity finding): INT8 arms embed ONE text per call (per-tensor dynamic quantization makes vectors batch-dependent), float32 arms batch — see each arm's config.batch_policy",
+    "reference": "the official custom modeling code, pinned revision, downloaded + sha256-checked + reviewed; classes registered locally, transformers never fetches remote code",
+    "rewrite_modifiers": "identity / uniform by construction (as p2: one captured_at, one salience, no pins)"
+  },
+  "limitations": [
+    "fixture scale (hundreds of memories, 48 queries): the §12.2 budgets are signed at this scale",
+    "generated corpus (the p2 fixture), not user traffic",
+    "the vi_diacritics slice sits at ceiling for BOTH xs (1.0) and every m-v2 arm (1.0) — the signed gate's superiority clause has no headroom there at this scale; what discriminates is the no-diacritics form of the same queries (see cross_checks.vi_query_form_cosine_per_arm)",
+    "exact-cosine ranking, not Qdrant ANN; no SQL hydration/refill/rerank stage",
+    "superseded rows are excluded before the top-k cut (p2's pipeline filtered them after a deeper pool fetch + refill), so recall counts can differ from p2's dense_only arm where superseded near-misses compete (measured: the xs arm reproduces p2's dense_only per-slice recall@5 exactly)",
+    "CPU only; no latency/SLO claim — this artifact is about quality, T4/T5 measure scale",
+    "no LLM query rewrite (identity, as p2)"
+  ],
+  "generated_at": "2026-09-19T01:01:44+00:00"
+}
