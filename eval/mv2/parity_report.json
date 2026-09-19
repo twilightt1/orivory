@@ -1,0 +1,252 @@
+{
+  "artifact": "eval/mv2/parity_report.json",
+  "generated_at": "2026-09-19T00:43:53.574643+00:00",
+  "model": {
+    "repo": "Snowflake/snowflake-arctic-embed-m-v2.0",
+    "revision": "95c2741480856aa9666782eb4afe11959938017f"
+  },
+  "runtime": {
+    "ort_version": "1.30.0",
+    "providers": [
+      "CPUExecutionProvider"
+    ],
+    "python": "3.13.15",
+    "machine": "arm64"
+  },
+  "config": {
+    "pooling": "cls",
+    "dim": 768,
+    "max_tokens": 512,
+    "batch_size": 16,
+    "tolerance": 0.0001,
+    "x86_parity": "not-claimed"
+  },
+  "findings": {
+    "batch_mate_sensitivity": "INT8 vectors depend on batch composition (per-tensor dynamic quantization scale); see each model's batch_mate_envelope check for the measured cosine/drift. Hold batch composition fixed per arm, or embed one text per call, when the exact vector matters.",
+    "pooling": "CLS pooling confirmed against the export's own sentence_embedding output (normalized CLS == sentence_embedding within tolerance)."
+  },
+  "artifacts": {
+    "int8": {
+      "file": "mv2_int8.onnx",
+      "path": "/Users/twilight/.cache/orivory/mv2/mv2_int8.onnx",
+      "sha256": "03d923bb1850ebdccb068e2f3abd8aa43fe81c50d07d037ef103fe3d0fb78e3b",
+      "size_bytes": 310916060,
+      "inputs": [
+        "input_ids",
+        "attention_mask"
+      ],
+      "outputs": [
+        "token_embeddings",
+        "sentence_embedding"
+      ],
+      "output_used": "token_embeddings"
+    },
+    "fp32": {
+      "file": "mv2_fp32.onnx",
+      "path": "/Users/twilight/.cache/orivory/mv2/mv2_fp32.onnx",
+      "sha256": "c0c53d7f49a2db60761b92b7bbf5be87a7b3cf5d92dbbd7f1b5028bd5a40aa39",
+      "size_bytes": 1226099913,
+      "inputs": [
+        "input_ids",
+        "attention_mask"
+      ],
+      "outputs": [
+        "token_embeddings",
+        "sentence_embedding"
+      ],
+      "output_used": "token_embeddings"
+    }
+  },
+  "checks": {
+    "int8": [
+      {
+        "name": "empty_batch_contract",
+        "passed": true,
+        "detail": {}
+      },
+      {
+        "name": "short_batch_shape_norms",
+        "passed": true,
+        "detail": {
+          "shape": [
+            3,
+            768
+          ],
+          "max_norm_error": 5.884583131887666e-08
+        }
+      },
+      {
+        "name": "determinism_repeat_call",
+        "passed": true,
+        "detail": {}
+      },
+      {
+        "name": "identical_batch_mates_bit_exact",
+        "passed": true,
+        "detail": {
+          "max_abs_drift_vs_single": 0.0,
+          "max_abs_drift_vs_mixed_batch": 0.02730729430913925
+        }
+      },
+      {
+        "name": "batch_mate_envelope",
+        "passed": true,
+        "detail": {
+          "rows": [
+            {
+              "row": 0,
+              "cos": 0.9785788427097182,
+              "max_abs_drift": 0.02730729430913925
+            },
+            {
+              "row": 1,
+              "cos": 0.9656196785097083,
+              "max_abs_drift": 0.030883354833349586
+            },
+            {
+              "row": 2,
+              "cos": 0.9528443045065669,
+              "max_abs_drift": 0.03192422166466713
+            }
+          ],
+          "worst_cos": 0.9528443045065669,
+          "worst_max_abs_drift": 0.03192422166466713,
+          "cos_floor": 0.95,
+          "max_abs_tol": null,
+          "why": "per-tensor dynamic quantization: batch mates and padding move the activation scale"
+        }
+      },
+      {
+        "name": "mrl_256_slice_then_renormalize",
+        "passed": true,
+        "detail": {
+          "max_abs_diff": 1.642939270740662e-08
+        }
+      },
+      {
+        "name": "long_input_capped",
+        "passed": true,
+        "detail": {
+          "measured_tokens": 512,
+          "cap": 512
+        }
+      },
+      {
+        "name": "dim_and_pool_contract",
+        "passed": true,
+        "detail": {}
+      },
+      {
+        "name": "prefix_contract",
+        "passed": true,
+        "detail": {}
+      },
+      {
+        "name": "export_pooled_output_is_cls",
+        "passed": true,
+        "detail": {
+          "cos": 1.0,
+          "max_abs_diff": 2.2351741790771484e-08
+        }
+      }
+    ],
+    "fp32": [
+      {
+        "name": "empty_batch_contract",
+        "passed": true,
+        "detail": {}
+      },
+      {
+        "name": "short_batch_shape_norms",
+        "passed": true,
+        "detail": {
+          "shape": [
+            3,
+            768
+          ],
+          "max_norm_error": 3.882063936977431e-08
+        }
+      },
+      {
+        "name": "determinism_repeat_call",
+        "passed": true,
+        "detail": {}
+      },
+      {
+        "name": "identical_batch_mates_bit_exact",
+        "passed": true,
+        "detail": {
+          "max_abs_drift_vs_single": 0.0,
+          "max_abs_drift_vs_mixed_batch": 0.0
+        }
+      },
+      {
+        "name": "batch_mate_envelope",
+        "passed": true,
+        "detail": {
+          "rows": [
+            {
+              "row": 0,
+              "cos": 1.0000000000000002,
+              "max_abs_drift": 0.0
+            },
+            {
+              "row": 1,
+              "cos": 0.9999999999998715,
+              "max_abs_drift": 6.682239472866058e-08
+            },
+            {
+              "row": 2,
+              "cos": 1.0,
+              "max_abs_drift": 0.0
+            }
+          ],
+          "worst_cos": 0.9999999999998715,
+          "worst_max_abs_drift": 6.682239472866058e-08,
+          "cos_floor": null,
+          "max_abs_tol": 0.0001,
+          "why": "float32 reassociation only"
+        }
+      },
+      {
+        "name": "mrl_256_slice_then_renormalize",
+        "passed": true,
+        "detail": {
+          "max_abs_diff": 1.6008749853524407e-08
+        }
+      },
+      {
+        "name": "long_input_capped",
+        "passed": true,
+        "detail": {
+          "measured_tokens": 512,
+          "cap": 512
+        }
+      },
+      {
+        "name": "dim_and_pool_contract",
+        "passed": true,
+        "detail": {}
+      },
+      {
+        "name": "prefix_contract",
+        "passed": true,
+        "detail": {}
+      },
+      {
+        "name": "export_pooled_output_is_cls",
+        "passed": true,
+        "detail": {
+          "cos": 1.0000001192092896,
+          "max_abs_diff": 0.0
+        }
+      }
+    ]
+  },
+  "summary": {
+    "checks": 20,
+    "passed": 20,
+    "failed": 0,
+    "result": "PASS"
+  }
+}
