@@ -45,7 +45,9 @@ async def upload_document(db: AsyncSession, conversation: Conversation, file: Up
     # R38 (P4b/T4): the content hash is computed HERE, from the uploaded bytes.
     # It is the only key that can catch a re-upload of a forgotten file: the
     # new document gets a new id, so ``source_ref`` cannot match.
-    content_hash = hashlib.sha256(content).hexdigest()
+    # Off the loop: up to 50 MiB of SHA-256 is CPU work the event loop must not
+    # sit through (the P2/T1 responsiveness budget).
+    content_hash = await asyncio.to_thread(lambda: hashlib.sha256(content).hexdigest())
 
     doc_id    = str(uuid.uuid4())
     file_path = f"{conversation.id}/{doc_id}_{file.filename}"

@@ -644,7 +644,15 @@ def _memory_provenance(memory: Memory) -> dict[str, Any]:
     it was published with (P4b/T5). A raw memory answers ``derived: False``.
     """
     meta = get_cm(memory)
-    derived_from = list(meta.get(CM_DERIVED_FROM) or [])
+    # ``extra_metadata`` is client-reachable, so nothing here trusts a shape:
+    # a malformed value (``cm_derived_from: 1``, a dict where a list belongs)
+    # must read as absent, not turn a READ into a 500.
+    raw_derived_from = meta.get(CM_DERIVED_FROM)
+    raw_source_revisions = meta.get(CM_SOURCE_REVISIONS)
+    raw_evidence_ids = meta.get("cm_evidence_ids")
+    derived_from = list(raw_derived_from) if isinstance(raw_derived_from, list) else []
+    source_revisions = dict(raw_source_revisions) if isinstance(raw_source_revisions, dict) else {}
+    evidence_ids = list(raw_evidence_ids) if isinstance(raw_evidence_ids, list) else []
     return {
         "state": state_of(memory),
         "assertion": meta.get("cm_assertion", "fact"),
@@ -652,10 +660,10 @@ def _memory_provenance(memory: Memory) -> dict[str, Any]:
         "valid_from": meta.get("cm_valid_from"),
         "supersedes": meta.get("cm_supersedes"),
         "superseded_by": meta.get("cm_superseded_by"),
-        "evidence_ids": list(meta.get("cm_evidence_ids") or []),
+        "evidence_ids": evidence_ids,
         "derived": bool(derived_from),
         "derived_from": derived_from,
-        "source_revisions": dict(meta.get(CM_SOURCE_REVISIONS) or {}),
+        "source_revisions": source_revisions,
         "rule_version": meta.get(CM_RULE_VERSION),
     }
 

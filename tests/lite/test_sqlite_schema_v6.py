@@ -88,20 +88,64 @@ async def _strip_v6_columns(conn) -> None:
             await conn.execute(text(f"ALTER TABLE memory_suppressions DROP COLUMN {column}"))
 
 
+async def _strip_v7_columns(conn) -> None:
+    """Downgrade a create_all ``users`` table to the v6 shape (no retention).
+
+    Without this the fixture's create_all leaves the v7 pair in place, the
+    v6→v7 DDL becomes a no-op the test never notices, and the "v5 install"
+    would silently be a v7 schema stamped 5 (OCR fidelity fix).
+    """
+    have = await conn.run_sync(
+        lambda c: {col["name"] for col in sa_inspect(c).get_columns("users")})
+    for column in ("retention_enabled", "retention_days"):
+        if column in have:
+            await conn.execute(text(f"ALTER TABLE users DROP COLUMN {column}"))
+
+
 @pytest_asyncio.fixture
 async def v5_db(tmp_path, monkeypatch):
-    """A real v5 install: the current schema minus the v6 columns, rows, stamped 5."""
+    """A real v5 install: the current schema minus the v6 + v7 columns, rows, stamped 5."""
     eng = await _engine(tmp_path, "v5.sqlite")
     monkeypatch.setattr(database, "engine", eng)
     monkeypatch.setattr(database, "IS_SQLITE", True)
     async with eng.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         await _strip_v6_columns(conn)
+        await _strip_v7_columns(conn)
         await _user(conn, TENANT_A)
         await _suppression(conn, SUPPRESSION_ID, TENANT_A)
         await conn.execute(text("PRAGMA user_version = 5"))
     yield eng, tmp_path
     await eng.dispose()
+
+
+async def test_a_pinned_v5_binary_never_runs_a_newer_step(tmp_path, monkeypatch):
+    """OCR fix (P4b review): every ladder step gated on the STARTING version
+    only, so a pinned v5 binary (the P4a gate's stand-in for an older install)
+    still ran v5→v6 and v6→v7 on boot — a v7 schema stamped 5. A step now also
+    requires the target stamp (``SQLITE_SCHEMA_VERSION``)."""
+    eng = await _engine(tmp_path, "pin5.sqlite")
+    monkeypatch.setattr(database, "engine", eng)
+    monkeypatch.setattr(database, "IS_SQLITE", True)
+    monkeypatch.setattr(database, "SQLITE_SCHEMA_VERSION", 5)
+    async with eng.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+        await _strip_v6_columns(conn)
+        await _strip_v7_columns(conn)
+        await conn.execute(text("PRAGMA user_version = 5"))
+
+    await database.bootstrap_sqlite()
+
+    async with eng.connect() as conn:
+        version, _tables = await _schema(conn)
+        ledger_cols = await conn.run_sync(
+            lambda c: {col["name"] for col in sa_inspect(c).get_columns("memory_suppressions")})
+        user_cols = await conn.run_sync(
+            lambda c: {col["name"] for col in sa_inspect(c).get_columns("users")})
+    assert version == 5, "a pinned binary stamps its own terminal version"
+    assert "namespace" not in ledger_cols and "content_hash" not in ledger_cols, (
+        "a v5 binary must not run the v6 DDL")
+    assert "retention_enabled" not in user_cols, "nor the v7 DDL"
 
 
 # ── the ladder: v5 -> v6 ────────────────────────────────────────────────────

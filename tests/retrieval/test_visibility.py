@@ -1105,3 +1105,27 @@ def test_the_hidden_mirror_rejects_another_namespace():
     assert rmod._hidden(mine) is False, (
         "no namespace handed: the lifecycle rule alone (unchanged)")
 
+
+
+# ── OCR review fix: falsy markers read the same on both sides ───────────────
+
+
+async def test_a_falsy_marker_reads_the_same_on_both_sides(db):
+    """OCR fix (P4b review): ``state_of`` read truthiness while every SQL
+    predicate reads PRESENCE (``_has``): a stored ``{"cm_invalidated": false}``
+    made Python answer "current" about a row SQL hid. Both sides read the
+    marker's presence now — one row, one verdict."""
+    owner = await _owner(db)
+    falsy = _mem(owner, "falsy invalidated", meta={"cm_invalidated": False})
+    db.add(falsy)
+    falsy_id = falsy.id  # capture before commit: the instance expires on commit
+    await db.commit()
+
+    served = list((await db.execute(
+        select(Memory.id).where(Memory.id == falsy_id,
+                                current_memory_predicate()))).scalars().all())
+    assert served == [], "SQL hides the row: any non-NULL marker value counts"
+
+    fresh = (await db.execute(select(Memory).where(Memory.id == falsy_id))).scalar_one()
+    assert state_of(fresh) == "invalidated", (
+        "the Python authority must agree with the SQL side: present, not truthy")

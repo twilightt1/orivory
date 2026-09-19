@@ -140,7 +140,7 @@ class RetentionSettingsRequest(BaseModel):
     """
 
     retention_enabled: bool = False
-    retention_days:    int | None = Field(default=None, gt=0)
+    retention_days:    int | None = Field(default=None, gt=0, le=36_500)
 
     @model_validator(mode="after")
     def _enabling_needs_a_window(self) -> RetentionSettingsRequest:

@@ -58,10 +58,14 @@ class _FakeRows:
 
 
 class _FakeDB:
-    """Answers the single dedup select run_import issues."""
+    """Answers the TWO ref-reads run_import issues — kept separate because a
+    ref can be in both: the dedup select (memories) answers ``existing_refs``,
+    the suppression-ledger probe answers ``suppressed_refs`` (and the ledger
+    check runs FIRST: suppression owns the count when both match)."""
 
-    def __init__(self, existing_refs=()):
+    def __init__(self, existing_refs=(), suppressed_refs=()):
         self._existing_refs = list(existing_refs)
+        self._suppressed_refs = list(suppressed_refs)
         self.info: dict = {}  # mirrors Session.info (outbox generation memo)
         self.added = []
         self.committed = 0
@@ -70,6 +74,8 @@ class _FakeDB:
 
     async def execute(self, stmt):
         self.statements.append(stmt)
+        if "memory_suppressions" in str(stmt).lower():
+            return _FakeRows(self._suppressed_refs)
         return _FakeRows(self._existing_refs)
 
     def add(self, obj):
@@ -160,6 +166,21 @@ async def test_run_import_dedups_against_db_and_within_file(indexed):
     assert summary.skipped_duplicates == 2  # c1 in db + c1 repeated in-file
     assert [m.source_ref for m in db.added] == ["c2"]
     assert indexed == db.added           # duplicate never reaches indexing
+
+
+async def test_a_soft_forgotten_ref_is_suppressed_not_a_duplicate(indexed):
+    """OCR fix (P4b review): the suppression branch ran AFTER the duplicate
+    branch — but a soft-forgotten source stays in SQL as an invalidated row, so
+    its ref matches BOTH reads and the summary said ``skipped_duplicates``
+    about a source the user explicitly forgot. Suppression is checked first
+    and owns the count."""
+    db = _FakeDB(existing_refs=["c1"], suppressed_refs=["c1"])
+    summary = await run_import(db, uuid.uuid4(), _payload_bytes(CHATGPT_PAYLOAD), "chatgpt",
+                               requested_by="rest_api")
+    assert summary.suppressed_skipped == 1
+    assert summary.skipped_duplicates == 0, "the ledger's reason outranks 'duplicate'"
+    assert summary.created == 1          # only c2
+    assert [m.source_ref for m in db.added] == ["c2"], "the suppressed ref never lands"
 
 
 async def test_run_import_auto_detects_and_scopes_dedup_by_detected_type(indexed):

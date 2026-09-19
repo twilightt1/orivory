@@ -111,6 +111,31 @@ async def test_soft_forget_invalidates_the_row_and_keeps_provenance_and_evidence
     assert receipt.detail["serving_residual"] == []
 
 
+async def test_soft_forget_processes_overlapping_targets_once(db):
+    """OCR fix (P4b review): forgetting ``[parent, child]`` processed the child
+    twice — the parent's closure already invalidated it, then its own target
+    pass bumped and enqueued it again, and the receipt counted two sources
+    twice. Every row owes exactly ONE refresh; ``suppressed`` counts unique
+    refs."""
+    owner = await _owner(db)
+    parent = _memory(owner, "parent", source_type="file_upload", source_ref="doc-p")
+    child = _memory(owner, "child", source_type="file_upload", source_ref="doc-c",
+                    parent_id=parent.id)
+    db.add_all([parent, child])
+    await db.commit()
+
+    receipt = await soft_forget(db, owner, [parent.id, child.id], requested_by="agent:test")
+
+    assert receipt.status == ERASURE_STATUS_COMPLETED
+    summary = receipt.detail["summary"]
+    assert summary["invalidated"] == 2
+    assert summary["payload_refresh_enqueued"] == 2, (
+        "each row owes ONE refresh intent, not one per target that reached it")
+    assert summary["suppressed"] == 2, "unique source refs, not per-target sums"
+    outbox_rows = await _outbox_rows()
+    assert len(outbox_rows) == 2, f"one upsert intent per row: {[r.entity_id for r in outbox_rows]}"
+
+
 async def test_soft_forget_records_a_foreign_or_missing_id_and_writes_nothing(db):
     owner = await _owner(db)
     other = await _owner(db)

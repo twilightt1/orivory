@@ -144,7 +144,17 @@ async def run_retention(db: AsyncSession, now: datetime | None = None) -> Retent
     users = invalidated = 0
     for user_id, days in await enabled_users(db):
         users += 1
-        invalidated += await _expire_user(db, user_id, days, now)
+        try:
+            invalidated += await _expire_user(db, user_id, days, now)
+        except Exception as exc:
+            # One broken window must not starve the users behind it: roll the
+            # failed pass back (an invalidated row's own commit already stands)
+            # and leave the rest for the next sweep. A persisted window the
+            # schema now refuses (docs: le=36_500) lands here as OverflowError
+            # instead of aborting every later account, every pass.
+            await db.rollback()
+            log.warning("Retention sweep failed for user %s: %s", user_id, exc,
+                        extra={"user_id": str(user_id), "retention_days": days})
     return RetentionReport(users=users, invalidated=invalidated)
 
 
