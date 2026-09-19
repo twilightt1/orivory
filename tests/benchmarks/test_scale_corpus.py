@@ -46,6 +46,10 @@ def test_same_seed_is_byte_identical(tmp_path):
 
     assert a_jsonl.read_bytes() == b_jsonl.read_bytes()
     assert a_manifest == b_manifest
+    # Byte-identical means BOTH files: a formatting-only manifest change would
+    # still break the byte-for-byte contract this test advertises.
+    assert (Path(str(a_jsonl) + ".manifest.json").read_bytes()
+            == Path(str(b_jsonl) + ".manifest.json").read_bytes())
     assert a_manifest["corpus_sha256"] == hashlib.sha256(a_jsonl.read_bytes()).hexdigest()
 
 
@@ -116,13 +120,29 @@ def test_line_separator_in_real_text_does_not_shred_a_row(tmp_path):
     assert any("\u2028" in row["text"] for row in rows), "the real text must survive intact"
 
 
-ARCHETIC_CACHED = pytest.mark.skipif(
-    not __import__("app.retrieval.e5_local", fromlist=["x"]).arctic_files_cached(),
-    reason="local arctic XS model not cached (CI) — the mini ops run needs the real embedder",
+def _arctic_cache_digest_ok() -> bool:
+    """The XS cache must contain the pinned bytes, not merely some files."""
+    from app.retrieval import e5_local
+
+    try:
+        return (
+            e5_local._digest(e5_local.model_dir() / e5_local.ARCTIC_MODEL_FILE)
+            == e5_local.ARCTIC_MODEL_SHA256
+            and e5_local._digest(e5_local.model_dir() / e5_local.ARCTIC_TOKENIZER_FILE)
+            == e5_local.ARCTIC_TOKENIZER_SHA256
+        )
+    except OSError:
+        return False
+
+
+ARCTIC_CACHED = pytest.mark.skipif(
+    not _arctic_cache_digest_ok(),
+    reason="local arctic XS model not cached and digest-valid (CI) — the mini ops run "
+           "needs the real embedder, and a substituted cache must skip, not download",
 )
 
 
-@ARCHETIC_CACHED
+@ARCTIC_CACHED
 def test_mini_ops_run_produces_a_real_artifact(tmp_path):
     """The harness at 300 memories: real stores, real embedder, real drill.
 
@@ -167,10 +187,17 @@ def test_mini_ops_run_produces_a_real_artifact(tmp_path):
 
     concurrent = artifact["concurrent"]
     assert concurrent["recall_calls"] >= 1
+    assert concurrent["recall_calls"] >= concurrent["recall_successful"]
     latency = concurrent["latency_ms"]
     assert latency["p50_ms"] <= latency["p95_ms"] <= latency["p99_ms"]
     assert latency["calls"] == concurrent["recall_calls"]
     assert concurrent["gate"]["p95_le_150ms"] in (True, False)  # recorded, never asserted on
+    # Every advertised worker must have actually done work: a crashed worker is
+    # now re-raised by the harness, but the artifact itself must also witness it.
+    assert concurrent["ops"]["ingested"] >= 1
+    assert concurrent["ops"]["corrected"] >= 1
+    assert concurrent["ops"]["forgotten"] >= 1
+    assert sum(concurrent["forget_statuses"].values()) >= 1
 
     backup = artifact["backup"]
     assert backup["backup_seconds"] > 0 and backup["restore_seconds"] > 0
@@ -180,6 +207,10 @@ def test_mini_ops_run_produces_a_real_artifact(tmp_path):
 
     outbox = artifact["outbox"]
     assert outbox["pending"] == 0
+    # pending alone is not "drained": blocked/failed intents are terminal too
+    # and would hide correction/delete failures behind matching counts.
+    assert outbox["blocked"] == 0
+    assert outbox["failed"] == 0
     assert outbox["acked"] >= 1
 
     assert artifact["disk"]["memories_db_bytes"] > 0
@@ -190,3 +221,59 @@ def test_mini_ops_run_produces_a_real_artifact(tmp_path):
     assert artifact["counts_run2"]["memories_sql"] == counts["memories_sql"], (
         "the reuse pass must see the same store it left behind")
     assert artifact["cold_process"]["first_recall_ms"] > 0
+    # open_plus is boot PLUS first recall — it can never be smaller than boot alone.
+    assert (artifact["cold_process"]["open_plus_first_recall_ms"]
+            >= artifact["cold_process"]["open_seconds"] * 1000.0)
+
+
+def test_generate_refuses_to_overwrite_its_dataset(tmp_path):
+    """`--out` pointing at the dataset would destroy the only real source."""
+    from eval.scale.gen_corpus import CorpusError, generate
+
+    dataset = tmp_path / "dataset.json"
+    dataset.write_text("[]", encoding="utf-8")
+    with pytest.raises(CorpusError):
+        generate(rows=4, seed=7, dataset=dataset, out=dataset)
+    assert dataset.read_text(encoding="utf-8") == "[]", "the dataset must be untouched"
+
+
+def test_forced_lang_repair_keeps_label_and_text_consistent():
+    """A repair row generated FOR a language must actually be in that language.
+
+    The old behavior relabeled a random-language row, so `lang` could claim
+    `vi` while the text was an English template. 20 draws make a regression
+    (the language becoming random again) failure-certain.
+    """
+    import random
+
+    from eval.scale.gen_corpus import _synthetic_row
+
+    for lang in ("vi", "en"):
+        rows = [_synthetic_row(7, index, random.Random(7 + index), lang=lang)
+                for index in range(20)]
+        assert all(row["lang"] == lang for row in rows), rows[:3]
+
+
+def test_merge_counts_aggregate_rounds_not_invocations():
+    """`_merge` must add a drain report's own `rounds`, not one per merge call."""
+    from eval.scale.run_10k import _merge
+
+    totals = {"rounds": 0, "claimed": 0, "applied": 0, "skipped": 0, "blocked": 0, "failed": 0}
+    _merge({"claimed": 5, "applied": 5, "rounds": 7}, totals)   # an aggregated drain report
+    _merge({"claimed": 1, "applied": 1}, totals)                # a single drain_once report
+    assert totals["rounds"] == 8
+    assert totals["claimed"] == 6 and totals["applied"] == 6
+
+
+def test_self_check_treats_workdir_as_parent_and_cleans_up(tmp_path):
+    """`--self-check --workdir <path>` must never delete or clobber the caller's path."""
+    from eval.scale.filtered_ann import self_check
+
+    workdir = tmp_path / "caller-dir"
+    workdir.mkdir()
+    marker = workdir / "precious.txt"
+    marker.write_text("keep me", encoding="utf-8")
+
+    assert self_check(workdir) == 0
+    assert marker.read_text(encoding="utf-8") == "keep me"
+    assert list(workdir.iterdir()) == [marker], "the scratch child must be cleaned up"

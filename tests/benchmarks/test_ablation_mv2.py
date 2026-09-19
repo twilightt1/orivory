@@ -153,7 +153,17 @@ def test_corpus_documents_mirror_production_shape():
 
 # ── the tiny REAL run (cached artifacts only; never downloads) ───────────────
 
-_ONNX_READY = mv2.mv2_files_cached("int8", "fp32", "tokenizer")
+_ONNX_READY = False
+if mv2.mv2_files_cached("int8", "fp32", "tokenizer"):
+    try:
+        abl._verify_cached_digests({
+            mv2.model_dir() / mv2.INT8_FILE: mv2.INT8_SHA256,
+            mv2.model_dir() / mv2.FP32_FILE: mv2.FP32_SHA256,
+            mv2.model_dir() / mv2.TOKENIZER_FILE: mv2.TOKENIZER_SHA256,
+        })
+        _ONNX_READY = True
+    except RuntimeError:
+        _ONNX_READY = False  # cached but substituted/stale: skip, never download
 TINY_TEXTS = [
     "Tôi đã gặp Huy ở quán cà phê gần hồ Tây vào chiều thứ Sáu.",
     "the app crashed when i tapped export after the update",
@@ -194,3 +204,18 @@ def test_tiny_real_run_int8_solo_fp32_batch():
     sliced = np.asarray(mrl.embed_passages(TINY_TEXTS), dtype=float)
     assert sliced.shape == (len(TINY_TEXTS), 256)
     assert np.allclose(np.linalg.norm(sliced, axis=1), 1.0, atol=1e-4)
+
+
+def test_gate_rejects_non_finite_deltas():
+    """NaN comparisons are False, so a NaN delta would pass as 'not failing'."""
+    clean = {name: 0.0 for name in abl.SLICES}
+    clean[abl.VI_PRIMARY] = 0.02      # ≥ +0.02 on both VI slices -> eligible
+    clean[abl.VI_SECONDARY] = 0.02
+    verdict = abl.evaluate_gate(clean)
+    assert verdict["eligible"] is True, verdict  # the clean map is eligible by construction
+
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        poisoned = dict(clean)
+        poisoned[abl.SLICES[0]] = bad
+        with pytest.raises(ValueError):
+            abl.evaluate_gate(poisoned)
