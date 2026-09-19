@@ -3,7 +3,7 @@
   "rss_ceiling": "1500MB_service_side_10k (user-signed 2026-09-19)",
   "generated_at": "2026-09-19T04:24:17+00:00",
   "role": "run-1 (fresh install, full ingest, 100k milestone)",
-  "rss_ceiling_note": "Signed D4 ceiling, scoped by its own signing note to the SERVICE-SIDE 10K workload on this class of box: RSS <= 1.5GB (1.5e9 bytes, decimal MB; the 10K artifact reports decimal MB too). This harness is the IN-PROCESS variant (it holds the corpus in memory) and the signed note explicitly does NOT cover it, so `rss_ceiling_comparison` below is recorded for envelope context only — never a gate, and no new ceiling is invented here.",
+  "rss_ceiling_note": "Signed D4 ceiling, scoped by its own signing note to the SERVICE-SIDE 10K workload on this class of box: RSS <= 1.5GB (1.5e9 bytes, decimal MB). THIS RUN IS SERVICE-SIDE: it was launched with --corpus (a pre-generated corpus file), so the 277MB dataset was never parsed into this process — directly comparable to the 10K canonical run, which used the same mode. The signed note excludes only the in-process corpus-parse variant (the 10K run measured that variant at 2647MB peak); generating the corpus in-process for 100K would add its own footprint on top of the numbers below.",
   "fingerprint": {
     "git": {
       "head": "2eb1991e1c17a4ab3227edb846879f1ee68561be",
@@ -569,7 +569,7 @@
   "one_m_decision": {
     "rule": "signed D2: run 1M only if 100K has NOT hit a budget",
     "decision": "not-run",
-    "reason": "100K already breached two signed/recorded budgets on this box: concurrent+steady recall latency (warm p95 1202.8ms, concurrent p95 in the same band — the signed p95<=150ms gate fails by ~8x) and RSS (peak 3.94GB vs the 1.5GB service-side 10K ceiling, ~2.6x). Ingest alone took 1374s for 99K rows; a 1M run would need ~4h wall + roughly an order of magnitude more payload RAM. Grinding it out would only re-confirm a ceiling already measured, which the spec explicitly says not to do ('Stop som khi gap ceiling').",
+    "reason": "100K already breached two signed/recorded budgets on this box: concurrent+steady recall latency (warm p95 1202.8ms -> ~8x the signed p95<=150ms gate; concurrent p95 2883ms -> ~19x) and RSS (peak 3.94GB vs the 1.5GB service-side 10K ceiling, ~2.6x, same scoping). Ingest alone took 1374s for 99K rows; a 1M run would need ~4h wall and roughly 10x the 100K payload — the measured points (10K: 948MB peak, 100K: 3.94GB peak) do NOT establish a scaling law, they only establish that the local envelope is already exceeded at 100K. Grinding out 1M would re-confirm a ceiling already measured, which the spec explicitly says not to do (spec: 'Stop sớm khi gặp ceiling').",
     "envelope_note": "vector/payload storage scales with N; this run does NOT establish a scaling law — it establishes that the local envelope is already exceeded at 100K on this hardware class."
   }
 }
