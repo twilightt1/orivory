@@ -8,7 +8,7 @@ repo (~/.cache/orivory/mv2); populate it once with ``python eval/mv2/parity.py``
 One measured reality is baked in below, not assumed (parity report holds the
 exact numbers): the INT8 export quantizes activations with a per-TENSOR dynamic
 scale, so a row's vector shifts when its batch mates (or padding) change the
-tensor scale — cos 0.96–0.99 vs the same row embedded alone. Identical batches
+tensor scale — cos 0.95–0.98 vs the same row embedded alone. Identical batches
 and repeated calls are bit-exact. :data:`BATCH_MATE_COS_FLOOR` is an envelope
 that fails loudly if a future artifact degrades beyond it; it is not a quality
 gate (that is T2's ablation).

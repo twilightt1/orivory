@@ -1,6 +1,6 @@
 {
   "artifact": "eval/mv2/parity_report.json",
-  "generated_at": "2026-09-19T00:43:53.574643+00:00",
+  "generated_at": "2026-09-19T00:47:59.055158+00:00",
   "model": {
     "repo": "Snowflake/snowflake-arctic-embed-m-v2.0",
     "revision": "95c2741480856aa9666782eb4afe11959938017f"
@@ -31,6 +31,9 @@
       "path": "/Users/twilight/.cache/orivory/mv2/mv2_int8.onnx",
       "sha256": "03d923bb1850ebdccb068e2f3abd8aa43fe81c50d07d037ef103fe3d0fb78e3b",
       "size_bytes": 310916060,
+      "opset_import": [
+        14
+      ],
       "inputs": [
         "input_ids",
         "attention_mask"
@@ -46,6 +49,9 @@
       "path": "/Users/twilight/.cache/orivory/mv2/mv2_fp32.onnx",
       "sha256": "c0c53d7f49a2db60761b92b7bbf5be87a7b3cf5d92dbbd7f1b5028bd5a40aa39",
       "size_bytes": 1226099913,
+      "opset_import": [
+        14
+      ],
       "inputs": [
         "input_ids",
         "attention_mask"

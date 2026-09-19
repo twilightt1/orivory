@@ -15,7 +15,7 @@ Measured reality this harness records (do not "fix" it silently)
 ----------------------------------------------------------------
 The INT8 export quantizes activations with a per-TENSOR dynamic scale, so a
 row's vector depends on the other rows in its batch (and on padding): measured
-cosine ~0.96–0.99 vs the same row embedded alone. FP32 is batch-invariant up to
+cosine ~0.95–0.98 vs the same row embedded alone. FP32 is batch-invariant up to
 float reassociation. Repeats and identical batch mates are bit-exact. The T2
 ablation should therefore hold batch composition fixed per arm (or embed one
 text per call) — this report exists so that is a recorded decision, not a
@@ -218,6 +218,74 @@ def _collect(runner, label: str, path: Path) -> list[dict]:
     return checks
 
 
+def _read_varint(f) -> int:
+    shift = 0
+    val = 0
+    while True:
+        b = f.read(1)
+        if not b:
+            raise EOFError("truncated varint")
+        b = b[0]
+        val |= (b & 0x7F) << shift
+        if not (b & 0x80):
+            return val
+        shift += 7
+
+
+def _read_opset_imports(path) -> list[int]:
+    """Top-level ModelProto scan for field 8 (opset_import), seeking past the
+    graph payload (field 7) instead of parsing it. Minimal wire-format reader —
+    ModelProto top-level fields only; versions in file order."""
+    opsets: list[int] = []
+    with open(path, "rb") as f:
+        while True:
+            tag = f.read(1)
+            if not tag:
+                break
+            field, wire = tag[0] >> 3, tag[0] & 7
+            if wire == 0:
+                _read_varint(f)
+            elif wire == 1:
+                f.seek(8, 1)
+            elif wire == 5:
+                f.seek(4, 1)
+            elif wire == 2:
+                length = _read_varint(f)
+                if field != 8:
+                    f.seek(length, 1)
+                    continue
+                payload = f.read(length)
+                i = 0  # repeated OperatorSetIdProto {1: domain string, 2: version varint}
+                while i < len(payload):
+                    t = payload[i]
+                    i += 1
+                    if t >> 3 == 2 and t & 7 == 0:
+                        v = sh = 0
+                        while True:
+                            b = payload[i]
+                            i += 1
+                            v |= (b & 0x7F) << sh
+                            if not (b & 0x80):
+                                break
+                            sh += 7
+                        opsets.append(v)
+                    elif t & 7 == 2:
+                        ln = sh = 0
+                        while True:
+                            b = payload[i]
+                            i += 1
+                            ln |= (b & 0x7F) << sh
+                            if not (b & 0x80):
+                                break
+                            sh += 7
+                        i += ln
+                    else:
+                        break
+            else:
+                break
+    return opsets
+
+
 def main() -> int:
     import onnxruntime as ort
 
@@ -264,6 +332,7 @@ def main() -> int:
             "path": str(path),
             "sha256": mv2._digest(path),
             "size_bytes": path.stat().st_size,
+            "opset_import": _read_opset_imports(path),
             "inputs": [i.name for i in runner._sess.get_inputs()],
             "outputs": [o.name for o in runner._sess.get_outputs()],
             "output_used": runner.output_name or "first",
