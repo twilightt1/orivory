@@ -229,7 +229,7 @@
       "failed": 0,
       "batches": 90
     },
-    "method": "rows + durable upsert intents committed in batches of 100; embedding performed by the real outbox drain (drain_once \u2192 drain_pending, batch 50); nothing acks the intents on the write path, so every point in the store came through it"
+    "method": "rows + durable upsert intents committed in batches of 100; embedding performed by the real outbox drain (drain_once → drain_pending, batch 50); nothing acks the intents on the write path, so every point in the store came through it"
   },
   "startup": {
     "boot": {
@@ -279,7 +279,7 @@
     "recall_errors": {
       "IndexFreshnessTimeout": 9
     },
-    "recall_errors_note": "typed failures (e.g. IndexFreshnessTimeout) are real 503s from the freshness barrier, recorded, never dropped",
+    "recall_errors_note": "typed failures (e.g. IndexFreshnessTimeout) are real 503s from the freshness barrier, recorded, never dropped. recall_calls counts only calls that returned a result; the typed errors above are EXCLUDED from it (and from the percentile series), and 3 warmup calls are discarded before measurement — read the two together.",
     "latency_ms": {
       "calls": 1899,
       "p50_ms": 110.7022090582177,
@@ -326,12 +326,13 @@
       "p95_ms": 121.36900005862117,
       "p95_le_150ms": true,
       "recorded_not_asserted": true,
-      "authority": "D4 (signed): p95 <= 150ms \u2014 RECORDED here, no assert, no code path depends on it"
+      "authority": "D4 (signed): p95 <= 150ms — RECORDED here, no assert, no code path depends on it"
     },
     "feed": {
       "ingest_rows": 1000,
       "queries": 60
-    }
+    },
+    "recall_calls_note": "successful recalls only — see recall_errors_note"
   },
   "backup": {
     "backup_seconds": 0.01848454202990979,
@@ -340,7 +341,7 @@
     "restored_memories": 9981,
     "restored_points": 9981,
     "verified": true,
-    "method": "PRAGMA wal_checkpoint(TRUNCATE) \u2192 file copy of the SQLite db + the embedded-Qdrant folder \u2192 copy back into a fresh dir \u2192 re-open (sqlite3 + QdrantClient) and count. Restore timing INCLUDES the verification reads."
+    "method": "PRAGMA wal_checkpoint(TRUNCATE) → file copy of the SQLite db + the embedded-Qdrant folder → copy back into a fresh dir → re-open (sqlite3 + QdrantClient) and count. Restore timing INCLUDES the verification reads."
   },
   "final_drain": {
     "rounds": 1,
@@ -375,8 +376,8 @@
   "seams": {
     "rewrite_stubbed": 2103,
     "graph_builds_suppressed": 0,
-    "llm_rewrite": "identity (paid API forbidden in this run) \u2014 counted above",
-    "graph_builds": "suppressed (LLM extraction) \u2014 counted above",
+    "llm_rewrite": "identity (paid API forbidden in this run) — counted above",
+    "graph_builds": "suppressed (LLM extraction) — counted above",
     "cold_page_cache": "NOT dropped (no root): the cold number is a fresh PROCESS on the same store (--reuse), not a cold page cache",
     "backup": "file-level copy + re-open verify, not a backup product, not a cross-machine restore",
     "recall_concurrency": "ONE sequential recall loop against concurrent writers (the P2 gate's shape), not a parallel-recall load test"
@@ -456,7 +457,7 @@
       }
     },
     "run2": {
-      "role": "run-2 (--reuse: fresh process, same store \u2014 the cold-process proxy)",
+      "role": "run-2 (--reuse: fresh process, same store — the cold-process proxy)",
       "generated_at": "2026-09-19T03:32:33+00:00",
       "cold_process": {
         "open_seconds": 0.6918802919099107,
