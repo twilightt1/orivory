@@ -45,7 +45,6 @@ import asyncio
 import json
 import math
 import os
-import shutil
 import sys
 import tempfile
 import time
@@ -382,19 +381,26 @@ def _server_wait_until_ready(client, collection: str, expected: int, timeout: fl
     """Wait for the copy to be complete and the HNSW build to settle."""
     deadline = time.perf_counter() + timeout
     count, ok, status_text = 0, None, None
+    indexed, collection_status = 0, "unknown"
     while time.perf_counter() < deadline:
         info = client.get_collection(collection)
         count = int(info.points_count or 0)
+        indexed = int(info.indexed_vectors_count or 0)
         status = getattr(info, "optimizer_status", None)
         ok = status if isinstance(status, bool) else getattr(status, "ok", None)
         status_text = str(getattr(status, "value", status))
-        if count >= expected and ok is not False:
-            return {"points_count": count, "optimizer_ok": ok,
+        collection_status = str(getattr(info.status, "value", info.status)).lower()
+        # Ready means copied AND indexed: points visible before the HNSW build
+        # finishes would measure a half-built index.
+        if count == expected and indexed >= expected and collection_status == "green":
+            return {"points_count": count, "indexed_vectors_count": indexed,
+                    "collection_status": collection_status, "optimizer_ok": ok,
                     "optimizer_status": status_text,
                     "waited_seconds": timeout - (deadline - time.perf_counter())}
         time.sleep(1.0)
     raise TimeoutError(f"server collection {collection} not ready in {timeout}s "
-                       f"(count={count}, optimizer_status={status_text})")
+                       f"(count={count}, indexed={indexed}, status={collection_status}, "
+                       f"optimizer_status={status_text})")
 
 
 def run_server_arm(*, local_client, generation: str, user_id: str, namespace: str,
@@ -414,10 +420,18 @@ def run_server_arm(*, local_client, generation: str, user_id: str, namespace: st
         except Exception:  # a leaner server may not answer info()
             pass
         if client.collection_exists(collection):
-            client.delete_collection(collection)
+            raise RuntimeError(
+                f"refusing to replace existing collection {collection!r} — this harness only "
+                f"creates its own; drop stale benchmark collections yourself"
+            )
         client.create_collection(
             collection_name=collection,
             vectors_config=qm.VectorParams(size=len(embeddings[0]), distance=qm.Distance.COSINE),
+            # Force the HNSW path even for tiny filtered subsets: with the
+            # client default full_scan_threshold, selective buckets fall back to
+            # exact scans and their "ANN" recall would be a full scan in
+            # disguise (recorded in the artifact's collection_info).
+            hnsw_config=qm.HnswConfigDiff(full_scan_threshold=0),
         )
         # The app's SERVER-mode payload index set for the fields this filter
         # reads (vector_backend._PAYLOAD_INDEXES): without them, filtered search
@@ -510,16 +524,24 @@ def run_server_arm(*, local_client, generation: str, user_id: str, namespace: st
 
 
 def self_check(workdir: Path | None) -> int:
-    """The harness's own check: exact store in, exact store out, recall == 1.0."""
+    """The harness's own check: exact store in, exact store out, recall == 1.0.
+
+    ``--workdir`` is treated as a PARENT for a fresh scratch child: the
+    harness never deletes a caller-supplied path — a mistyped scale workdir
+    would take the corpus, store and artifacts down with it. The scratch child
+    is always cleaned up.
+    """
+    parent = Path(workdir) if workdir is not None else None
+    if parent is not None:
+        parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="filtered-ann-selfcheck-", dir=parent) as tmp:
+        return _self_check_at(Path(tmp))
+
+
+def _self_check_at(path: Path) -> int:
     from qdrant_client import QdrantClient
     from qdrant_client import models as qm
 
-    if workdir is None:
-        path = Path(tempfile.mkdtemp(prefix="filtered-ann-selfcheck-"))
-    else:
-        shutil.rmtree(workdir, ignore_errors=True)
-        workdir.mkdir(parents=True, exist_ok=True)
-        path = workdir
     rng = np.random.default_rng(7)
     dim, n = 16, 64
     base = datetime(2026, 9, 1, 9, 0, tzinfo=UTC)
@@ -541,11 +563,14 @@ def self_check(workdir: Path | None) -> int:
                 qm.FieldCondition(key="namespace", match=qm.MatchValue(value="personal"))]
 
         # (1) the store's own query == client-side exact, on the whole fixture.
+        # Explicit checks, not asserts: `python -O` strips asserts and would
+        # print success without validating anything.
         response = client.query_points("self", query=query.tolist(),
                                        query_filter=qm.Filter(must=must), limit=10)
         ann_ids = [str(point.id) for point in response.points]
         exact = exact_top_k(vectors, query, 10, ids)
-        assert recall_at_k(ann_ids, exact, 10) == 1.0, (ann_ids, exact)
+        if recall_at_k(ann_ids, exact, 10) != 1.0:
+            raise RuntimeError(f"self-check: whole-fixture recall != 1.0: ann={ann_ids}")
 
         # (2) a selective window: counts must agree and the subset must shrink.
         start = window_start(stamps[-1], (stamps[-1] - stamps[0]).total_seconds(), 0.25)
@@ -553,7 +578,8 @@ def self_check(workdir: Path | None) -> int:
             key="captured_at", range=qm.DatetimeRange(gte=start))])
         selected = [index for index, stamp in enumerate(stamps) if stamp >= start]
         count = client.count("self", count_filter=filtered).count
-        assert count == len(selected) == 16, (count, len(selected))
+        if not (count == len(selected) == 16):
+            raise RuntimeError(f"self-check: window count mismatch: {count} vs {len(selected)} vs 16")
         response = client.query_points("self", query=query.tolist(),
                                        query_filter=filtered, limit=10)
         ann_ids = [str(point.id) for point in response.points]
@@ -561,8 +587,10 @@ def self_check(workdir: Path | None) -> int:
         subset_ids = [ids[index] for index in range(n)
                       if predicate({"captured_at": stamps[index].isoformat()})]
         exact = exact_top_k(vectors[selected], query, 10, subset_ids)
-        assert recall_at_k(ann_ids, exact, 10) == 1.0, (ann_ids, exact)
-        assert recall_at_k(ann_ids[1:], exact, 10) == 0.9, "the metric must be able to move"
+        if recall_at_k(ann_ids, exact, 10) != 1.0:
+            raise RuntimeError(f"self-check: selective recall != 1.0: ann={ann_ids}")
+        if recall_at_k(ann_ids[1:], exact, 10) != 0.9:
+            raise RuntimeError("self-check: the metric must be able to move (0.9 expected)")
     finally:
         client.close()
 
@@ -582,8 +610,26 @@ async def run_experiment(opts) -> dict:
     workdir = Path(opts.workdir).resolve()
     local = await run_local_arm(workdir=workdir, query_count=opts.queries, k_max=max(K_VALUES))
     inputs = local["server_inputs"]
+    local_buckets = local["artifact"]["buckets"]
+    counts_ok = all(bucket["counts_agree"] for bucket in local_buckets)
+    recall_all_one = all(
+        all(value == 1.0 for value in (bucket["recall"] or {}).values())
+        for bucket in local_buckets
+    )
     artifact = {
-        "status": "complete",
+        # Counts disagreeing on the exact store is a filter-translation bug —
+        # the artifact is not evidence of anything. Recall below 1.0 alone is
+        # NOT invalid: with duplicated texts the top-k cut falls inside an
+        # exact tie group and the store picks different (equal-score) members
+        # than id-order; the per-bucket mismatch counts record it.
+        "status": "complete" if counts_ok else "invalid",
+        "local_validation": {
+            "counts_agree_every_bucket": counts_ok,
+            "recall_1.0_every_bucket": recall_all_one,
+            "note": "the local arm runs against an EXACT store — counts must agree everywhere; "
+                    "recall < 1.0 is expected only at exact-tie boundaries (duplicate texts), "
+                    "see exact_order_mismatches per bucket",
+        },
         "role": "filtered ANN vs exact subset — 100K milestone store",
         "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
         "workdir": str(workdir),
@@ -620,18 +666,30 @@ async def run_experiment(opts) -> dict:
         from app.retrieval.vector_backend import close_clients, get_sync_client
 
         local_client = get_sync_client()
-        artifact["server_arm"] = run_server_arm(
-            local_client=local_client, generation=inputs["generation"],
-            user_id=inputs["user_id"], namespace=inputs["namespace"],
-            embeddings=inputs["embeddings"], local_buckets=inputs["buckets"],
-            server_url=opts.server_url, collection=opts.server_collection)
-        artifact["server_vs_local"] = {
-            "counts_match_every_bucket": all(b["counts_agree"]
-                                             for b in artifact["server_arm"]["buckets"]),
-            "note": "server counts are re-counted on the server with the same filter — a "
-                    "disagreement means the copy lost points, not a tolerance",
-        }
-        await close_clients()
+        try:
+            artifact["server_arm"] = run_server_arm(
+                local_client=local_client, generation=inputs["generation"],
+                user_id=inputs["user_id"], namespace=inputs["namespace"],
+                embeddings=inputs["embeddings"], local_buckets=inputs["buckets"],
+                server_url=opts.server_url, collection=opts.server_collection)
+        except Exception as exc:  # unreachable/ill server: record, keep the local arm
+            artifact["server_arm"] = {
+                "status": "not-run",
+                "reason": f"{type(exc).__name__}: {exc}",
+            }
+        finally:
+            await close_clients()
+        if artifact["server_arm"].get("status") != "not-run":
+            counts_match = all(b["counts_agree"]
+                               for b in artifact["server_arm"]["buckets"])
+            artifact["server_vs_local"] = {
+                "counts_match_every_bucket": counts_match,
+                "note": "server counts are re-counted on the server with the same filter — a "
+                        "disagreement means the copy lost points, not a tolerance",
+            }
+            if not counts_match:
+                artifact["status"] = "invalid"
+                artifact["server_arm"]["status"] = "invalid-count-mismatch"
     else:
         from app.retrieval.vector_backend import close_clients
 
@@ -655,7 +713,14 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="filtered recall vs the exact subset, on a run_10k store")
     parser.add_argument("--workdir", help="the finished run's workdir (has corpus.jsonl)")
-    parser.add_argument("--queries", type=int, default=40)
+
+    def positive_int(raw: str) -> int:
+        value = int(raw)
+        if value <= 0:
+            raise argparse.ArgumentTypeError("must be a positive integer")
+        return value
+
+    parser.add_argument("--queries", type=positive_int, default=40)
     parser.add_argument("--server-url", default=None, help="e.g. http://127.0.0.1:6333")
     parser.add_argument("--server-collection", default=None)
     parser.add_argument("--out", default=None)

@@ -41,7 +41,13 @@ TEXTS = [
 
 @pytest.fixture(scope="module")
 def runner():
-    return mv2.Mv2Onnx(mv2.model_dir() / mv2.INT8_FILE)
+    model = mv2.model_dir() / mv2.INT8_FILE
+    tokenizer = mv2.model_dir() / mv2.TOKENIZER_FILE
+    # Existence was the old guard; a substituted-but-loadable export would then
+    # silently feed the parity claims. Digests, never downloads (CI stays offline).
+    assert mv2._digest(model) == mv2.INT8_SHA256, "cached INT8 export is not the pinned artifact"
+    assert mv2._digest(tokenizer) == mv2.TOKENIZER_SHA256, "cached tokenizer is not the pinned artifact"
+    return mv2.Mv2Onnx(model, tokenizer_path=tokenizer)
 
 
 def _as_array(vectors) -> np.ndarray:

@@ -123,10 +123,12 @@ def _collect(runner, label: str, path: Path) -> list[dict]:
         rows.append(
             {
                 "row": i,
+                "finite": bool(np.isfinite(single).all()),
                 "cos": _cos(short[i], single),
                 "max_abs_drift": float(np.abs(short[i] - single).max()),
             }
         )
+    singles_finite = all(r["finite"] for r in rows)
     worst_cos = min(r["cos"] for r in rows)
     worst_abs = max(r["max_abs_drift"] for r in rows)
     gated = (
@@ -136,8 +138,9 @@ def _collect(runner, label: str, path: Path) -> list[dict]:
     )
     add(
         "batch_mate_envelope",
-        gated and bool(np.isfinite(short).all()),
+        gated and singles_finite and bool(np.isfinite(short).all()),
         rows=rows,
+        singles_finite=singles_finite,
         worst_cos=worst_cos,
         worst_max_abs_drift=worst_abs,
         cos_floor=envelope["cos_floor"],

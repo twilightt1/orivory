@@ -62,6 +62,7 @@ tiny real run skips when the model cache is absent).
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import platform
@@ -94,7 +95,7 @@ _GATE_EPS = 1e-9
 
 TOP_K = 10
 SLICES = p2.SLICES
-METRIC_KEYS = p2.METRIC_KEYS
+METRIC_KEYS = ("recall@1", "recall@5", "recall@10", "mrr@10")
 # Re-exported slice names (the gate's own tests and any consumer read them here).
 SLICE_EXACT_ID = p2.SLICE_EXACT_ID
 SLICE_VI = p2.SLICE_VI
@@ -145,6 +146,12 @@ def evaluate_gate(
             f"slice ({list(SLICES)})"
         )
     deltas = {name: float(per_slice_deltas[name]) for name in SLICES}
+    non_finite = [name for name, value in deltas.items() if not np.isfinite(value)]
+    if non_finite:
+        raise ValueError(
+            f"non-finite slice deltas {non_finite!r} — NaN comparisons would read as "
+            f"'not failing' and could falsely pass the signed gate"
+        )
     failing = sorted(name for name in SLICES if deltas[name] < -max_slice_drop - _GATE_EPS)
     gains = {VI_PRIMARY: deltas[VI_PRIMARY], VI_SECONDARY: deltas[VI_SECONDARY]}
     vi_failing = [
@@ -197,6 +204,22 @@ corpus_hash = p2.corpus_hash
 query_set_hash = p2.query_set_hash
 
 
+def visibility_hash(fixture: dict) -> str:
+    """sha256 over every ranking-relevant field, INCLUDING ``superseded``.
+
+    ``p2.corpus_hash`` covers id/tenant/title/content only; flipping a row's
+    visibility changes recall while that hash stays equal. This one pins the
+    served set too, next to the corpus hash.
+    """
+    digest = hashlib.sha256()
+    for row in sorted(fixture["rows"], key=lambda r: str(r["memory_id"])):
+        digest.update(
+            f"{row['memory_id']}\t{row['user_id']}\t{row['title']}\t{row['content']}\t"
+            f"{1 if row['superseded'] else 0}\n".encode()
+        )
+    return f"sha256:{digest.hexdigest()}"
+
+
 def corpus_documents(rows: list[dict]) -> list[str]:
     """The text every arm embeds (``vector_store._memory_to_document``, as p2)."""
     return p2._corpus_documents(rows)
@@ -235,11 +258,13 @@ def query_metrics(served: list[str], golds: list[str]) -> dict:
         return sum(1 for gold in golds if gold in served[:k]) / len(golds)
 
     rank = next((i + 1 for i, sid in enumerate(served) if sid in golds), None)
+    # `served` is the TOP_K-length ranking, so this is mrr@10 by construction —
+    # a gold outside the served list counts 0, exactly like recall@10.
     return {
         "recall@1": recall(1),
         "recall@5": recall(5),
         "recall@10": recall(10),
-        "mrr": 0.0 if rank is None else 1.0 / rank,
+        "mrr@10": 0.0 if rank is None else 1.0 / rank,
     }
 
 
@@ -263,12 +288,29 @@ class Mv2SoloText(mv2.Mv2Onnx):
         return out
 
 
+def _verify_cached_digests(pairs: dict[Path, str]) -> None:
+    """Digest-check cached artifacts before anything constructs a session.
+
+    Existence was the old guard; a substituted-but-loadable export would then
+    silently feed the signed gate. Digests, never downloads (CI stays offline).
+    """
+    from eval.mv2 import runner as _mv2
+
+    for path, expected in pairs.items():
+        if not path.exists():
+            raise RuntimeError(f"cached artifact missing: {path}")
+        actual = _mv2._digest(path)
+        if actual != expected:
+            raise RuntimeError(f"cached artifact digest mismatch for {path}: {actual} != {expected}")
+
+
 def _onnx_embedders(artifact: str, dim: int, *, solo: bool):
-    if not mv2.mv2_files_cached(artifact, "tokenizer"):
-        raise RuntimeError(
-            f"m-v2 {artifact} export is not cached on this box and this artifact never "
-            f"downloads one silently — fetch it first (python eval/mv2/parity.py)"
-        )
+    model_dir = mv2.model_dir()
+    _verify_cached_digests({
+        model_dir / (mv2.INT8_FILE if artifact == "int8" else mv2.FP32_FILE):
+            mv2.INT8_SHA256 if artifact == "int8" else mv2.FP32_SHA256,
+        model_dir / mv2.TOKENIZER_FILE: mv2.TOKENIZER_SHA256,
+    })
     path = mv2.model_dir() / (mv2.INT8_FILE if artifact == "int8" else mv2.FP32_FILE)
     embedding_class = Mv2SoloText if solo else mv2.Mv2Onnx
     embedder = embedding_class(path, dim=dim, prefix=mv2.QUERY_PREFIX)
@@ -279,15 +321,16 @@ def _reference_embedders():
     from eval.mv2 import reference
 
     embedder = reference.ReferenceEmbedder(dim=768)
+    reference.verify_loaded_weights()
     return embedder.embed_queries, embedder.embed_passages
 
 
 def _xs_embedders():
-    if not e5_local.arctic_files_cached():
-        raise RuntimeError(
-            "the local arctic-embed-xs model is not cached on this box and this artifact "
-            "never downloads one silently — fetch it first (the P3 gate's pattern)"
-        )
+    model_dir = e5_local.model_dir()
+    _verify_cached_digests({
+        model_dir / e5_local.ARCTIC_MODEL_FILE: e5_local.ARCTIC_MODEL_SHA256,
+        model_dir / e5_local.ARCTIC_TOKENIZER_FILE: e5_local.ARCTIC_TOKENIZER_SHA256,
+    })
     return e5_local.arctic_embed_queries, e5_local.arctic_embed_passages
 
 
@@ -296,21 +339,21 @@ ARM_SPECS: dict[str, dict] = {
         "model": "arctic-embed-xs ONNX (the shipped local default)",
         "dim": 384,
         "pooling": "cls",
-        "batch_policy": "batched (e5_local _BATCH=128, longest-padded)",
+        "batch_policy": "passages batched (e5_local _BATCH=128, longest-padded); queries singleton",
         "build": _xs_embedders,
     },
     ARM_REFERENCE: {
         "model": "official custom code, pinned revision (eval/mv2/reference.py)",
         "dim": 768,
         "pooling": "cls",
-        "batch_policy": f"batched (torch CPU float32, batch={16})",
+        "batch_policy": f"passages batched (torch CPU float32, batch={16}); queries singleton",
         "build": _reference_embedders,
     },
     ARM_ONNX_FP: {
         "model": f"{mv2.FP32_FILE} (onnx/model.onnx, pinned revision)",
         "dim": 768,
         "pooling": "cls",
-        "batch_policy": f"batched (Mv2Onnx _BATCH={mv2._BATCH})",
+        "batch_policy": f"passages batched (Mv2Onnx _BATCH={mv2._BATCH}); queries singleton",
         "build": lambda: _onnx_embedders("fp32", 768, solo=False),
     },
     ARM_ONNX_INT8: {
@@ -336,14 +379,28 @@ def run_arm(fixture: dict, embed_queries, embed_passages) -> dict:
     tenants = np.array([str(row["user_id"]) for row in rows])
     visible = np.array([not row["superseded"] for row in rows])
     documents = np.asarray(embed_passages(corpus_documents(rows)), dtype=np.float64)
-    documents = documents / np.linalg.norm(documents, axis=1, keepdims=True).clip(min=1e-12)
+    if (documents.ndim != 2 or documents.shape[0] != len(rows)
+            or not np.isfinite(documents).all()):
+        raise ValueError(
+            f"invalid passage embedding array: shape={documents.shape}, expected "
+            f"({len(rows)}, dim) with finite values"
+        )
+    document_norms = np.linalg.norm(documents, axis=1, keepdims=True)
+    if np.any(document_norms <= 0.0):
+        raise ValueError("passage embeddings contain zero-norm rows")
+    documents = documents / document_norms
 
     records: list[dict] = []
     queries = np.zeros((len(fixture["queries"]), documents.shape[1]), dtype=np.float64)
     for index, query in enumerate(fixture["queries"]):
         golds = [str(p2._memory_id(key)) for key in query["golds"]]
-        vector = np.asarray(embed_queries([query["text"]]), dtype=np.float64)[0]
-        queries[index] = vector / max(float(np.linalg.norm(vector)), 1e-12)
+        embedded = np.asarray(embed_queries([query["text"]]), dtype=np.float64)
+        if embedded.shape != (1, documents.shape[1]) or not np.isfinite(embedded).all():
+            raise ValueError(f"invalid query embedding array: shape={embedded.shape}")
+        norm = float(np.linalg.norm(embedded[0]))
+        if norm <= 0.0:
+            raise ValueError(f"query {index} embedding has zero norm")
+        queries[index] = embedded[0] / norm
         served = exact_cosine_topk(
             queries[index], documents, ids, tenants,
             visible=visible, user_id=str(p2.TENANT_A), top_k=TOP_K,
@@ -675,6 +732,7 @@ def run_ablation(*, arms_requested: list[str] | None = None) -> dict:
             "source": "eval/ablation_retrieval_p2.py:build_fixture() — imported, not copied",
             "seed": fixture["seed"],
             "corpus_hash": corpus_hash(fixture),
+            "visibility_hash": visibility_hash(fixture),
             "query_set_hash": query_set_hash(fixture),
             "slices": list(SLICES),
             "slice_definitions": _SLICE_DEFINITIONS,

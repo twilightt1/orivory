@@ -222,7 +222,8 @@ def hardware_note() -> dict:
         "cpu": _sysctl("machdep.cpu.brand_string") or platform.processor(),
         "cpu_count": os.cpu_count(),
         "ram_bytes": int(_sysctl("hw.memsize") or 0) or None,
-        "note": "one local macOS box; single process; NO page-cache drops (no root)",
+        "note": f"one local {platform.system()} box; single process; NO page-cache drops "
+                f"(no root)",
     }
 
 
@@ -425,7 +426,9 @@ async def enqueue_batch(rows: list[dict], user_id: uuid.UUID, start_index: int,
 def _merge(report: dict, totals: dict) -> None:
     for key in ("claimed", "applied", "skipped", "blocked", "failed"):
         totals[key] += int(report.get(key, 0))
-    totals["rounds"] += 1
+    # A drain_once report has no "rounds" (one round per call); the aggregate
+    # report from drain_until_empty() carries its own count — merge that, not 1.
+    totals["rounds"] += int(report.get("rounds", 1))
 
 
 async def drain_until_empty(*, deadline: float | None = None) -> dict:
@@ -554,6 +557,12 @@ async def backup_drill(workdir: Path, generation: str) -> dict:
     backup_dir = workdir / "backup"
     shutil.rmtree(backup_dir, ignore_errors=True)
     backup_dir.mkdir(parents=True)
+    # The embedded store writes through an open client; a folder copy taken
+    # while it is live is not atomic. Close it first — nothing after this point
+    # in the run needs the client.
+    from app.retrieval.vector_backend import close_clients
+
+    await close_clients()
     t0 = time.perf_counter()
     shutil.copy2(db_path, backup_dir / db_path.name)
     wal = db_path.with_name(db_path.name + "-wal")
@@ -588,10 +597,10 @@ async def backup_drill(workdir: Path, generation: str) -> dict:
         "restored_memories": int(restored_memories),
         "restored_points": int(restored_points),
         "verified": None,  # filled by the caller, which knows the live counts
-        "method": "PRAGMA wal_checkpoint(TRUNCATE) → file copy of the SQLite db + the "
-                  "embedded-Qdrant folder → copy back into a fresh dir → re-open "
-                  "(sqlite3 + QdrantClient) and count. Restore timing INCLUDES the "
-                  "verification reads.",
+        "method": "PRAGMA wal_checkpoint(TRUNCATE) → close the vector client → file copy "
+                  "of the SQLite db + the embedded-Qdrant folder → copy back into a fresh "
+                  "dir → re-open (sqlite3 + QdrantClient) and count. Restore timing INCLUDES "
+                  "the verification reads.",
     }
 
 
@@ -625,6 +634,11 @@ def build_queries(rows: list[dict], count: int = QUERY_COUNT) -> list[str]:
 
 async def run_full(opts) -> dict:
     workdir: Path = opts.workdir
+    if (workdir / "memories.db").exists() or (workdir / "qdrant").exists():
+        raise SystemExit(
+            f"fresh run requires an empty workdir: {workdir} already holds a store "
+            f"(run-1 role is a fresh install); use --reuse to reopen it"
+        )
     workdir.mkdir(parents=True, exist_ok=True)
     configure_environment(workdir)
     seams = install_seams()
@@ -705,15 +719,27 @@ async def run_full(opts) -> dict:
         "stage_ms_median": {key: percentile(values, 0.5) for key, values in warm_stages.items()},
         "note": "second pass in the SAME process: page cache warm by construction",
     }
-    print(f"warm recall: p50={warm['latency_ms']['p50_ms']:.1f}ms "
-          f"p95={warm['latency_ms']['p95_ms']:.1f}ms")
+    warm_latency = warm["latency_ms"]
+    if warm_latency["p50_ms"] is None:
+        raise RuntimeError(f"warm recall produced no successful samples: {warm_errors}")
+    print(f"warm recall: p50={warm_latency['p50_ms']:.1f}ms "
+          f"p95={warm_latency['p95_ms']:.1f}ms")
 
     # ── phase 3: concurrent phase ───────────────────────────────────────────
     mixed = await mixed_phase(user_id=user_id, tail=tail, start_index=len(bulk),
                               correction_ids=[uuid.UUID(row["memory_id"]) for row in bulk[:40]],
                               queries=queries, seconds=opts.concurrent_seconds)
-    print(f"mixed: recalls={mixed['recall_calls']} p50={mixed['latency_ms']['p50_ms']:.1f}ms "
-          f"p95={mixed['latency_ms']['p95_ms']:.1f}ms "
+    if mixed["ops"]["ingested"] != len(tail):
+        raise RuntimeError(
+            f"mixed phase ingested {mixed['ops']['ingested']}/{len(tail)} tail rows — the "
+            f"phase (--concurrent-seconds {opts.concurrent_seconds}) is too short for the "
+            f"advertised workload; refusing to write a reduced-workload artifact"
+        )
+    mixed_latency = mixed["latency_ms"]
+    if mixed_latency["p50_ms"] is None:
+        raise RuntimeError(f"mixed phase produced no successful recall samples: {mixed['recall_errors']}")
+    print(f"mixed: recalls={mixed['recall_calls']} p50={mixed_latency['p50_ms']:.1f}ms "
+          f"p95={mixed_latency['p95_ms']:.1f}ms "
           f"gate={'PASS' if mixed['gate']['p95_le_150ms'] else 'FAIL'}")
 
     # ── phase 4: quiesce + backup drill + final numbers ─────────────────────
@@ -724,6 +750,24 @@ async def run_full(opts) -> dict:
         backup["restored_memories"] == final_counts["memories_sql"]
         and backup["restored_points"] == final_counts["memory_points"]
     )
+    # A "complete" artifact must mean the stores agree and the drill verified:
+    # pending/blocked intents or a count mismatch would let a smaller index
+    # make the gate pass on a lie.
+    outbox_status = final_counts["outbox_by_status"]
+    if final_counts["memory_points"] != final_counts["memories_sql"]:
+        raise RuntimeError(
+            f"SQL holds {final_counts['memories_sql']} memories but the store has "
+            f"{final_counts['memory_points']} points — index and source disagree"
+        )
+    unfinished = {k: outbox_status.get(k, 0) for k in ("pending", "blocked", "failed")}
+    if any(unfinished.values()):
+        raise RuntimeError(f"outbox has unfinished intents: {unfinished}")
+    if not backup["verified"]:
+        raise RuntimeError(
+            f"backup drill failed verification: restored {backup['restored_memories']}/"
+            f"{backup['restored_points']} vs live {final_counts['memories_sql']}/"
+            f"{final_counts['memory_points']}"
+        )
 
     startup = {
         "boot": boot_info,
@@ -798,7 +842,8 @@ async def mixed_phase(*, user_id, tail, correction_ids, start_index, queries, se
 
     deadline = time.perf_counter() + seconds
     stop = asyncio.Event()
-    latencies: list[float] = []
+    latencies: list[float] = []   # successful calls only (stage timings)
+    attempted: list[float] = []   # EVERY measured call, errors included — the gate's series
     errors: dict[str, int] = {}
     stages: dict[str, list[float]] = defaultdict(list)
     ops = {"ingested": 0, "corrected": 0, "forgotten": 0}
@@ -814,15 +859,22 @@ async def mixed_phase(*, user_id, tail, correction_ids, start_index, queries, se
 
     async def ingest_worker():
         index = start_index
-        for start in range(0, len(tail), ENQUEUE_BATCH):
+        batches = max(1, -(-len(tail) // ENQUEUE_BATCH))
+        for b, start in enumerate(range(0, len(tail), ENQUEUE_BATCH)):
             if stop.is_set():
                 return
             batch = tail[start:start + ENQUEUE_BATCH]
             await enqueue_batch(batch, user_id, index + start)
             ops["ingested"] += len(batch)
-            await asyncio.sleep(2.0)
+            # Pace the tail across the WHOLE phase: a burst that finishes in 20s
+            # leaves 220s of "mixed" load with no ingest to overlap, and the
+            # gate's p95 would describe an idle store.
+            remaining = batches - b - 1
+            if remaining and not stop.is_set():
+                await sleep_or_stop(stop, max(0.0, (deadline - time.perf_counter()) / remaining))
 
     candidates = [uuid.UUID(row["memory_id"]) for row in tail[: min(len(tail), 40)]]
+    candidates = candidates or correction_ids
     corrections = correction_ids or candidates
     forget_start_delay = min(5.0, max(0.5, seconds / 10.0))
 
@@ -835,6 +887,8 @@ async def mixed_phase(*, user_id, tail, correction_ids, start_index, queries, se
             await sleep_or_stop(stop, CORRECT_INTERVAL)
 
     async def forget_worker():
+        if not candidates:
+            return  # a 1-row corpus has nothing forgettable
         # The tail rows exist only after the ingest worker's first commit: wait
         # a moment (scaled to the phase) so a forget targets a real row.
         await sleep_or_stop(stop, forget_start_delay)
@@ -856,6 +910,7 @@ async def mixed_phase(*, user_id, tail, correction_ids, start_index, queries, se
             if measured < RECALL_WARMUP_DISCARD:
                 measured += 1
                 continue
+            attempted.append(result["ms"])
             if result["error"]:
                 errors[result["error"]] = errors.get(result["error"], 0) + 1
             else:
@@ -868,15 +923,24 @@ async def mixed_phase(*, user_id, tail, correction_ids, start_index, queries, se
     while time.perf_counter() < deadline:
         await asyncio.sleep(0.1)
     stop.set()
-    await asyncio.gather(*tasks, return_exceptions=True)
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    failures = [r for r in results if isinstance(r, BaseException)]
+    if failures:
+        raise RuntimeError(
+            "worker task(s) failed during the mixed phase: "
+            + "; ".join(f"{type(f).__name__}: {f}" for f in failures)
+            + " — the workload below is reduced and its numbers would be a lie"
+        )
 
-    latency = latency_block(latencies)
+    latency = latency_block(attempted)
     return {
         "seconds": seconds,
-        "recall_calls": len(latencies),
+        "recall_calls": len(attempted),
+        "recall_successful": len(latencies),
         "recall_errors": errors,
         "recall_errors_note": "typed failures (e.g. IndexFreshnessTimeout) are real 503s "
-                              "from the freshness barrier, recorded, never dropped",
+                              "from the freshness barrier — recorded, and their latencies "
+                              "COUNT toward the gate",
         "latency_ms": latency,
         "stage_ms_median": {key: percentile(values, 0.5) for key, values in stages.items()},
         "ops": ops,
@@ -914,8 +978,8 @@ async def run_reuse(opts) -> dict:
 
     t0 = time.perf_counter()
     boot_info = await boot(workdir)
-    user_id = await ensure_user()
     open_seconds = time.perf_counter() - t0
+    user_id = await ensure_user()
 
     queries = run1["queries"]
     t0 = time.perf_counter()
@@ -953,10 +1017,12 @@ async def run_reuse(opts) -> dict:
             "first_recall_seconds": first_recall_seconds,
             "first_recall_ms": first["ms"],
             "first_recall_error": first["error"],
-            "open_plus_first_recall_ms": first_recall_seconds * 1000.0,
+            "open_plus_first_recall_ms": (open_seconds + first_recall_seconds) * 1000.0,
             "note": "open = app boot on the EXISTING store (schema ladder check + embedder "
-                    "warmup + store touch) + the first real recall. Fresh process, warm page "
-                    "cache: the honest border of what this box can measure without root.",
+                    "warmup + store touch). The first real recall is timed separately "
+                    "(first_recall_seconds); their sum is open_plus_first_recall_ms. Fresh "
+                    "process, warm page cache: the honest border of what this box can "
+                    "measure without root.",
         },
         "warm_recall": warm,
         "counts": current,
