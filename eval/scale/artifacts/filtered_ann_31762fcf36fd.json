@@ -1,0 +1,409 @@
+{
+  "status": "complete",
+  "role": "filtered ANN vs exact subset — 100K milestone store",
+  "generated_at": "2026-09-19T06:24:51+00:00",
+  "workdir": "/private/tmp/orivory-scale-100k",
+  "git": {
+    "head": "2eb1991e1c17a4ab3227edb846879f1ee68561be",
+    "branch": "model-scale-gates",
+    "dirty": "M eval/scale/gen_corpus.py\n M eval/scale/run_10k.py\n M tests/benchmarks/test_scale_corpus.py\n?? .superpowers/\n?? eval/scale/artifacts/100k_31762fcf36fd.json\n?? eval/scale/filtered_ann.py\n?? tests/benchmarks/test_scale_100k.py"
+  },
+  "corpus": {
+    "sha256": "31762fcf36fddeda266c476f236930dd99d1f903c7b9b6baa25387d8c61d2d9d",
+    "queries": 40
+  },
+  "model": {
+    "id": "arctic-xs",
+    "file": "/Users/twilight/.cache/orivory/e5/arctic_model.onnx",
+    "model_sha256": "cf2698d30ff05da02c70a088313bad56e5c2f401d734cb24a8390d446111936c",
+    "declared_model_sha256": "cf2698d30ff05da02c70a088313bad56e5c2f401d734cb24a8390d446111936c",
+    "dim": 384,
+    "pooling": "cls",
+    "query_prefix": "Represent this sentence for searching relevant passages: ",
+    "embedding_contract": {
+      "model_id": "Snowflake/snowflake-arctic-embed-xs",
+      "model_revision": "d8c86521100d3556476a063fc2342036d45c106f",
+      "revision": "d8c86521100d3556476a063fc2342036d45c106f",
+      "artifact_digest": "cf2698d30ff05da02c70a088313bad56e5c2f401d734cb24a8390d446111936c",
+      "tokenizer_digest": "91f1def9b9391fdabe028cd3f3fcc4efd34e5d1f08c3bf2de513ebb5911a1854",
+      "graph_outputs": [
+        "last_hidden_state"
+      ],
+      "pooling": "cls",
+      "query_prefix": "Represent this sentence for searching relevant passages: ",
+      "passage_prefix": "",
+      "max_tokens": 512,
+      "truncation": "head",
+      "padding": "batch-longest-zero",
+      "normalize": true,
+      "dim": 384,
+      "precision": "float32",
+      "provider": "onnxruntime-cpu",
+      "doc_format": "title-content-v1"
+    }
+  },
+  "local_arm": {
+    "generation": "orivory_memories__af5e01c0",
+    "generation_manifest_fingerprint": "af5e01c0cb5435f289ecec91443caec0c7b246de007d141fc75c96adbcab2945",
+    "user_id": "b9e9f52e-2390-55e0-a5d0-d4d236b2af2f",
+    "namespace": "personal",
+    "queries": [
+      "The farmer needs to transport a fox, a",
+      "I'm trying to stay on top of my",
+      "I've also been tracking my blood pressure regularly",
+      "I'm also experimenting with essential oils for stress",
+      "I've been meaning to get a flu shot,",
+      "Pretend you are a teacher lecturing a class",
+      "please continue, provide 10 additional examples, different from",
+      "I've been thinking about starting my own business",
+      "That's a great list! I'll definitely check some",
+      "I've also been listening to some comedy podcasts,",
+      "I think it was a combination of their",
+      "I'm actually looking for recommendations for both Luna",
+      "I'm thinking of getting a new leash for",
+      "Luna is loving her new pet bed! She's",
+      "What are some of the main predators of",
+      "That's really interesting. Do all mussel species have",
+      "I had no idea that mussels could produce",
+      "What kinds of luxury cruise ships are available",
+      "Explain bitcoin like I'm 10",
+      "How do they know that they solved the",
+      "Who specify what is the target hash?",
+      "What constitutes a valid transaction? What is the",
+      "I'm thinking of planning a trip to Europe,",
+      "I'm thinking of a 7-10 day trip to",
+      "I'm looking for some BBQ sauce recipes that",
+      "I remember Alex telling me that his grandfather's",
+      "I'm planning to try out Smokey's this weekend",
+      "I think I'll call ahead to check the",
+      "I'm looking for some recommendations for similar bands",
+      "I'm positive it was The Electric Storm, I",
+      "I was wondering if you can also recommend",
+      "I've been to a few venues recently, actually.",
+      "I'm still looking for some recommendations for similar",
+      "What factors influence the decision-making process of consumers",
+      "It seems like there are a lot of",
+      "I've looked at some reviews and compared prices,",
+      "Your tips have really made the decision-making process",
+      "I'm excited to receive my new product and",
+      "Wow, those all sound like interesting flavor combinations",
+      "These are some great ideas for incorporating the"
+    ],
+    "captured_at_span_seconds": 5999940.0,
+    "first_captured_at": "2026-09-01T09:00:00+00:00",
+    "last_captured_at": "2026-11-09T19:39:00+00:00",
+    "timings": {
+      "embedder_warmup_seconds": 0.3112402920378372,
+      "query_embed_seconds": 0.09883670904673636,
+      "scroll_all_seconds": 18.88099474995397
+    },
+    "buckets": [
+      {
+        "fraction": 1.0,
+        "where": null,
+        "subset_size": 99984,
+        "store_count_with_filter": 99984,
+        "predicate_count": 99984,
+        "counts_agree": true,
+        "exact": "client-side cosine top-k over the subset of the ONE scrolled pass (numpy, float64)",
+        "ann": "app search_memories (EMBEDDED Qdrant = EXACT brute force, 99984 points)",
+        "recall": {
+          "recall@1": 1.0,
+          "recall@5": 0.9949999999999999,
+          "recall@10": 0.9925
+        },
+        "exact_order_mismatches": 5,
+        "search_latency_ms": {
+          "calls": 40,
+          "p50_ms": 892.0924590202048,
+          "p95_ms": 937.0005830423906,
+          "max_ms": 945.5893330741674
+        },
+        "stage_seconds": {
+          "count": 0.7763895420357585,
+          "exact": 6.964313625008799,
+          "search": 35.834101292071864
+        }
+      },
+      {
+        "fraction": 0.5,
+        "where": {
+          "captured_at": {
+            "$gte": "2026-10-06T02:19:30+00:00"
+          }
+        },
+        "subset_size": 49984,
+        "store_count_with_filter": 49984,
+        "predicate_count": 49984,
+        "counts_agree": true,
+        "exact": "client-side cosine top-k over the subset of the ONE scrolled pass (numpy, float64)",
+        "ann": "app search_memories (EMBEDDED Qdrant = EXACT brute force, 49984 points)",
+        "recall": {
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0
+        },
+        "exact_order_mismatches": 0,
+        "search_latency_ms": {
+          "calls": 40,
+          "p50_ms": 5398.183583049104,
+          "p95_ms": 5506.684708991088,
+          "max_ms": 5786.915583070368
+        },
+        "stage_seconds": {
+          "count": 5.377002499997616,
+          "exact": 3.1123785000527278,
+          "search": 216.62541412503924
+        }
+      },
+      {
+        "fraction": 0.1,
+        "where": {
+          "captured_at": {
+            "$gte": "2026-11-02T20:59:06+00:00"
+          }
+        },
+        "subset_size": 9984,
+        "store_count_with_filter": 9984,
+        "predicate_count": 9984,
+        "counts_agree": true,
+        "exact": "client-side cosine top-k over the subset of the ONE scrolled pass (numpy, float64)",
+        "ann": "app search_memories (EMBEDDED Qdrant = EXACT brute force, 9984 points)",
+        "recall": {
+          "recall@1": 0.975,
+          "recall@5": 1.0,
+          "recall@10": 0.9650000000000001
+        },
+        "exact_order_mismatches": 10,
+        "search_latency_ms": {
+          "calls": 40,
+          "p50_ms": 5241.438917000778,
+          "p95_ms": 5324.786750017665,
+          "max_ms": 5604.878042009659
+        },
+        "stage_seconds": {
+          "count": 5.170721124974079,
+          "exact": 0.5360776250017807,
+          "search": 210.3915115420241
+        }
+      },
+      {
+        "fraction": 0.01,
+        "where": {
+          "captured_at": {
+            "$gte": "2026-11-09T02:59:00.600000+00:00"
+          }
+        },
+        "subset_size": 984,
+        "store_count_with_filter": 984,
+        "predicate_count": 984,
+        "counts_agree": true,
+        "exact": "client-side cosine top-k over the subset of the ONE scrolled pass (numpy, float64)",
+        "ann": "app search_memories (EMBEDDED Qdrant = EXACT brute force, 984 points)",
+        "recall": {
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 0.9974999999999999
+        },
+        "exact_order_mismatches": 1,
+        "search_latency_ms": {
+          "calls": 40,
+          "p50_ms": 5209.4887079438195,
+          "p95_ms": 5281.69387509115,
+          "max_ms": 5600.226417067461
+        },
+        "stage_seconds": {
+          "count": 5.306140833999962,
+          "exact": 0.04364604200236499,
+          "search": 209.20815070800018
+        }
+      },
+      {
+        "fraction": 0.001,
+        "where": {
+          "captured_at": {
+            "$gte": "2026-11-09T17:59:00.060000+00:00"
+          }
+        },
+        "subset_size": 100,
+        "store_count_with_filter": 100,
+        "predicate_count": 100,
+        "counts_agree": true,
+        "exact": "client-side cosine top-k over the subset of the ONE scrolled pass (numpy, float64)",
+        "ann": "app search_memories (EMBEDDED Qdrant = EXACT brute force, 100 points)",
+        "recall": {
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0
+        },
+        "exact_order_mismatches": 0,
+        "search_latency_ms": {
+          "calls": 40,
+          "p50_ms": 5230.244833044708,
+          "p95_ms": 5621.320582926273,
+          "max_ms": 5854.037541081198
+        },
+        "stage_seconds": {
+          "count": 5.122885457938537,
+          "exact": 0.0030892089707776904,
+          "search": 212.8174918750301
+        }
+      }
+    ]
+  },
+  "selectivity_note": "captured_at windows are the only varied payload field on this workload: P4a has ONE namespace per user and this run writes ONE user, so tenant/namespace selectivity cannot be varied here (recorded, not silently substituted)",
+  "methodology": {
+    "exact": "client-side cosine top-k (numpy, float64, L2-normalized defensively) over the SAME filtered subset the store returns; ties break on id",
+    "local_ann": "app's own search_memories through build_filter — an EXACT store, so recall 1.0 is the expected number and any miss is a bug found",
+    "server_ann": "same points+payloads in a Qdrant server collection (default HNSW), same filters, same embedded queries"
+  },
+  "seams": {
+    "tenant_selectivity": "not measurable here (single user, one namespace) — see selectivity_note",
+    "naive_payload_timestamps": "payload captured_at stamps read back through SQLite are offset-less; the arm normalizes the filter bound AND the client-side predicate to UTC (the app's filter builder refuses naive bounds on purpose)",
+    "warm_cache": "every query runs in-process after a warmup; no page-cache drops",
+    "hnsw_params": "server defaults (m=16, ef_construct=100, default ef search) — no tuning was swept and no tuned number is claimed"
+  },
+  "rss": {
+    "peak_rss_bytes": 3388866560,
+    "current_rss_bytes": 1216495616,
+    "ru_maxrss_raw": 3388866560,
+    "method": "resource.getrusage(RUSAGE_SELF).ru_maxrss (peak, process-wide, CONTAMINATED by everything the process loaded before the stores) + ps -o rss= at measurement time (current)"
+  },
+  "server_arm": {
+    "url": "http://127.0.0.1:6333",
+    "version": "1.19.1",
+    "collection": "orivory_scale_filtered_31762fcf36fd",
+    "points_copied": 99984,
+    "copy_seconds": 47.61702929192688,
+    "ready": {
+      "points_count": 99984,
+      "optimizer_ok": null,
+      "optimizer_status": "ok",
+      "waited_seconds": 1.043322250014171
+    },
+    "collection_info": {
+      "points_count": 99984,
+      "dim": 384,
+      "distance": "Cosine",
+      "optimizer_status": "ok"
+    },
+    "buckets": [
+      {
+        "fraction": 1.0,
+        "where": null,
+        "subset_size": 99984,
+        "server_count_with_filter": 99984,
+        "counts_agree": true,
+        "ann": "Qdrant SERVER filtered HNSW (default m/ef_construct), 99984 points, collection=orivory_scale_filtered_31762fcf36fd",
+        "recall": {
+          "recall@1": 0.75,
+          "recall@5": 0.805,
+          "recall@10": 0.8175000000000001
+        },
+        "search_latency_ms": {
+          "calls": 40,
+          "p50_ms": 11.800583102740347,
+          "p95_ms": 19.105374929495156,
+          "max_ms": 27.70458289887756
+        }
+      },
+      {
+        "fraction": 0.5,
+        "where": {
+          "captured_at": {
+            "$gte": "2026-10-06T02:19:30+00:00"
+          }
+        },
+        "subset_size": 49984,
+        "server_count_with_filter": 49984,
+        "counts_agree": true,
+        "ann": "Qdrant SERVER filtered HNSW (default m/ef_construct), 99984 points, collection=orivory_scale_filtered_31762fcf36fd",
+        "recall": {
+          "recall@1": 0.65,
+          "recall@5": 0.6849999999999999,
+          "recall@10": 0.6900000000000001
+        },
+        "search_latency_ms": {
+          "calls": 40,
+          "p50_ms": 13.348749955184758,
+          "p95_ms": 27.36991597339511,
+          "max_ms": 86.94216702133417
+        }
+      },
+      {
+        "fraction": 0.1,
+        "where": {
+          "captured_at": {
+            "$gte": "2026-11-02T20:59:06+00:00"
+          }
+        },
+        "subset_size": 9984,
+        "server_count_with_filter": 9984,
+        "counts_agree": true,
+        "ann": "Qdrant SERVER filtered HNSW (default m/ef_construct), 99984 points, collection=orivory_scale_filtered_31762fcf36fd",
+        "recall": {
+          "recall@1": 0.8,
+          "recall@5": 0.925,
+          "recall@10": 0.9724999999999999
+        },
+        "search_latency_ms": {
+          "calls": 40,
+          "p50_ms": 14.007832971401513,
+          "p95_ms": 27.242165990173817,
+          "max_ms": 31.834749970585108
+        }
+      },
+      {
+        "fraction": 0.01,
+        "where": {
+          "captured_at": {
+            "$gte": "2026-11-09T02:59:00.600000+00:00"
+          }
+        },
+        "subset_size": 984,
+        "server_count_with_filter": 984,
+        "counts_agree": true,
+        "ann": "Qdrant SERVER filtered HNSW (default m/ef_construct), 99984 points, collection=orivory_scale_filtered_31762fcf36fd",
+        "recall": {
+          "recall@1": 0.9,
+          "recall@5": 0.9949999999999999,
+          "recall@10": 0.9974999999999999
+        },
+        "search_latency_ms": {
+          "calls": 40,
+          "p50_ms": 3.3926250180229545,
+          "p95_ms": 13.608083012513816,
+          "max_ms": 19.86262493301183
+        }
+      },
+      {
+        "fraction": 0.001,
+        "where": {
+          "captured_at": {
+            "$gte": "2026-11-09T17:59:00.060000+00:00"
+          }
+        },
+        "subset_size": 100,
+        "server_count_with_filter": 100,
+        "counts_agree": true,
+        "ann": "Qdrant SERVER filtered HNSW (default m/ef_construct), 99984 points, collection=orivory_scale_filtered_31762fcf36fd",
+        "recall": {
+          "recall@1": 1.0,
+          "recall@5": 1.0,
+          "recall@10": 1.0
+        },
+        "search_latency_ms": {
+          "calls": 40,
+          "p50_ms": 6.252916995435953,
+          "p95_ms": 17.899833037517965,
+          "max_ms": 20.561333978548646
+        }
+      }
+    ],
+    "method": "the same points+payloads copied from the embedded store into a server collection with payload indexes for the filtered fields; queries are the SAME embedded vectors, compared against the SAME exact lists"
+  },
+  "server_vs_local": {
+    "counts_match_every_bucket": true,
+    "note": "server counts are re-counted on the server with the same filter — a disagreement means the copy lost points, not a tolerance"
+  }
+}

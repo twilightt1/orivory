@@ -1,5 +1,9 @@
 #!/usr/bin/env python
-"""Deterministic scale-workload generator: a 10K-memory corpus, in two parts.
+"""Deterministic scale-workload generator: a scale-memory corpus, in two parts.
+
+Milestones (10K / 100K / 1M) differ only in ``--rows``; the seed policy and the
+split arithmetic are shared, and the split is recorded as MEASURED (a pool
+smaller than the requested real part saturates — see ``split_counts``).
 
 What it produces
 ----------------
@@ -117,8 +121,31 @@ def real_pool(dataset: Path) -> tuple[list[dict], dict]:
     }
 
 
-def _real_rows(dataset: Path, seed: int, target: int) -> tuple[list[dict], dict]:
-    """Sample ``target`` turns off the file-ordered pool, seeded and stable.
+def split_counts(rows: int, real_share: float, pool_size: int) -> dict:
+    """The real/synthetic split arithmetic, before anything is drawn.
+
+    ``requested_real`` is what the share asks for; ``selected_real`` is what the
+    pool can actually fill (a pool smaller than the request SATURATES and the
+    shortfall moves to the synthetic part — the 1M milestone's shape, recorded
+    rather than silently absorbed). ``pool_share_used`` says how deep into the
+    dataset the draw goes: the 10K run used 5% of the LongMemEval-S pool, the
+    100K run 50% — neither saturates, so the artifact must not claim it does.
+    """
+    requested_real = round(rows * real_share)
+    selected_real = min(max(requested_real, 0), pool_size)
+    return {
+        "requested_real": requested_real,
+        "selected_real": selected_real,
+        "requested_synthetic": rows - requested_real,
+        "selected_synthetic": rows - selected_real,
+        "pool_turns": pool_size,
+        "pool_share_used": (selected_real / pool_size) if pool_size else 0.0,
+        "pool_saturated": selected_real >= pool_size,
+    }
+
+
+def _real_rows(dataset: Path, seed: int, rows: int, real_share: float) -> tuple[list[dict], dict]:
+    """Sample the real turns off the file-ordered pool, seeded and stable.
 
     The sample is drawn with ``random.Random(seed).sample`` over the pool and
     then put back in file order, so the corpus row order does not depend on the
@@ -126,10 +153,11 @@ def _real_rows(dataset: Path, seed: int, target: int) -> tuple[list[dict], dict]
     a small pool cannot fill a large share, and that is not a silent change.
     """
     pool, stats = real_pool(dataset)
-    selected = min(max(target, 0), len(pool))
+    split = split_counts(rows, real_share, len(pool))
+    selected = split["selected_real"]
     rng = random.Random(seed)
     indices = sorted(rng.sample(range(len(pool)), selected)) if selected else []
-    rows = [
+    selected_rows = [
         {
             "memory_id": _row_id(seed, "real", index),
             "part": "real",
@@ -144,8 +172,10 @@ def _real_rows(dataset: Path, seed: int, target: int) -> tuple[list[dict], dict]
         }
         for index, i in enumerate(indices)
     ]
-    stats["requested_real"] = target
-    return rows, stats
+    stats.update({key: split[key] for key in
+                  ("requested_real", "selected_real", "pool_turns", "pool_share_used",
+                   "pool_saturated")})
+    return selected_rows, stats
 
 
 # ── part (ii): synthetic capacity fill (fixed seed, VI + EN) ────────────────
@@ -277,8 +307,7 @@ def generate(*, rows: int = ROWS, seed: int = SEED, dataset: Path = DEFAULT_DATA
     if not 0.0 <= real_share <= 1.0:
         raise CorpusError(f"real_share must be within [0, 1], got {real_share}")
 
-    real_target = round(rows * real_share)
-    real_rows, stats = _real_rows(Path(dataset), seed, real_target)
+    real_rows, stats = _real_rows(Path(dataset), seed, rows, real_share)
     synthetic_rows = _synthetic_rows(rows - len(real_rows), seed)
     corpus = real_rows + synthetic_rows
     if len(corpus) != rows:
@@ -310,6 +339,13 @@ def generate(*, rows: int = ROWS, seed: int = SEED, dataset: Path = DEFAULT_DATA
             "dropped_filtered": stats["dropped_filtered"],
             "filter_chars": [MIN_TURN_CHARS, MAX_TURN_CHARS],
             "requested_real": stats["requested_real"],
+            # The split arithmetic as measured, not as assumed: `selected_real`
+            # is what the pool could fill, `pool_saturated` says whether the
+            # request hit the pool's ceiling (it did not at 10K/100K; it does
+            # at 1M) and `pool_share_used` is how deep the draw went.
+            "selected_real": stats["selected_real"],
+            "pool_share_used": stats["pool_share_used"],
+            "pool_saturated": stats["pool_saturated"],
         },
         "parts": {
             "real": {

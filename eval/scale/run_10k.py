@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""The 10K ops run: a real local stack, measured, honest about its seams.
+"""The scale ops run (10K/100K milestones; 1M only per the signed D2 rule).
 
 What runs here
 --------------
@@ -49,6 +49,24 @@ Run::
 
 The second call is the cold-process measurement; the first writes
 ``<workdir>/run1.json`` and an artifact you can read on its own.
+
+Milestones
+----------
+10K and 100K are the same command with ``--rows``; the corpus manifest records
+the real/synthetic split and whether the LongMemEval-S pool saturated (it does
+NOT at either milestone — at share 0.6 the pool only saturates from ~200K rows
+up; at 1M it does, producing a synthetic-dominant corpus BY CONSTRUCTION, which
+the manifest records). 1M runs only if 100K has not already breached a signed
+budget (D2); 10M is a declared blocker — never run, envelope extrapolated from
+the measured milestones without claiming linearity.
+
+RSS ceiling
+-----------
+D4 (user-signed 2026-09-19): the SERVICE-SIDE 10K workload keeps RSS <= 1.5GB
+(1.5e9 bytes, decimal MB) on this class of box. This harness is the IN-PROCESS
+variant (it holds the corpus rows in memory), which the signed note explicitly
+does NOT cover — so the artifact records ``rss_ceiling_comparison`` for
+envelope context and never treats it as a gate.
 """
 from __future__ import annotations
 
@@ -80,6 +98,16 @@ from eval.scale.gen_corpus import DEFAULT_DATASET, REAL_SHARE, SEED, generate, l
 ARTIFACTS_DIR = ROOT / "eval" / "scale" / "artifacts"
 RUN1_NAME = "run1.json"
 GATE_P95_MS = 150.0
+RSS_CEILING = "1500MB_service_side_10k (user-signed 2026-09-19)"
+RSS_CEILING_NOTE = (
+    "Signed D4 ceiling, scoped by its own signing note to the SERVICE-SIDE 10K "
+    "workload on this class of box: RSS <= 1.5GB (1.5e9 bytes, decimal MB; the "
+    "10K artifact reports decimal MB too). This harness is the IN-PROCESS "
+    "variant (it holds the corpus in memory) and the signed note explicitly "
+    "does NOT cover it, so `rss_ceiling_comparison` below is recorded for "
+    "envelope context only — never a gate, and no new ceiling is invented here."
+)
+RSS_CEILING_BYTES = 1_500_000_000
 CONCURRENT_SECONDS = 240.0
 WARM_CALLS = 200
 QUERY_COUNT = 60
@@ -705,13 +733,13 @@ async def run_full(opts) -> dict:
                 "so the page cache is warm. The cold-PROCESS measurement is the --reuse run "
                 "(recorded under cold_process).",
     }
+    rss = rss_block(os.getpid())
     run1 = {
         "status": "run1-complete",
-        "rss_ceiling": "pending-user",
+        "rss_ceiling": RSS_CEILING,
         "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
-        "role": "run-1 (fresh install, full ingest)",
-        "rss_ceiling_note": "D4: the RSS ceiling is the user's to set after these numbers; "
-                            "this artifact deliberately does not choose one",
+        "role": f"run-1 (fresh install, full ingest, {milestone_label(len(rows))} milestone)",
+        "rss_ceiling_note": RSS_CEILING_NOTE,
         "fingerprint": fingerprint(settings, manifest, corpus_sha, workdir),
         "corpus": {**{k: manifest[k] for k in ("corpus_file", "corpus_sha256", "rows", "seed",
                                                "real_share", "parts", "dataset")},
@@ -725,7 +753,8 @@ async def run_full(opts) -> dict:
         "backup": backup,
         "final_drain": final_drain,
         "disk": disk_block(workdir),
-        "rss": rss_block(os.getpid()),
+        "rss": rss,
+        "rss_ceiling_comparison": rss_ceiling_comparison(rss),
         "outbox": {
             "pending": final_counts["outbox_by_status"].get("pending", 0),
             "acked": final_counts["outbox_by_status"].get("done", 0),
@@ -914,6 +943,7 @@ async def run_reuse(opts) -> dict:
     current = await counts(user_id)
 
 
+    rss2 = rss_block(os.getpid())
     run2 = {
         "role": "run-2 (--reuse: fresh process, same store — the cold-process proxy)",
         "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
@@ -931,7 +961,8 @@ async def run_reuse(opts) -> dict:
         "warm_recall": warm,
         "counts": current,
         "disk": disk_block(workdir),
-        "rss": rss_block(os.getpid()),
+        "rss": rss2,
+        "rss_ceiling_comparison": rss_ceiling_comparison(rss2),
         "seams": {"llm_rewrite": "identity", "graph_builds": "suppressed", **seams},
     }
 
@@ -952,8 +983,30 @@ async def run_reuse(opts) -> dict:
     return artifact
 
 
-def default_artifact_path(corpus_sha: str) -> Path:
-    return ARTIFACTS_DIR / f"10k_{corpus_sha[:12]}.json"
+def milestone_label(rows: int) -> str:
+    """The artifact prefix for a milestone: ``10k`` / ``100k`` / ``1m``, else rows."""
+    if rows >= 1_000_000 and rows % 1_000_000 == 0:
+        return f"{rows // 1_000_000}m"
+    if rows >= 1000 and rows % 1000 == 0:
+        return f"{rows // 1000}k"
+    return str(rows)
+
+
+def default_artifact_path(corpus_sha: str, rows: int) -> Path:
+    return ARTIFACTS_DIR / f"{milestone_label(rows)}_{corpus_sha[:12]}.json"
+
+
+def rss_ceiling_comparison(rss: dict) -> dict:
+    """Peak RSS against the SIGNED 10K ceiling — recorded, scoped, never a gate."""
+    peak = rss.get("peak_rss_bytes")
+    return {
+        "ceiling": RSS_CEILING,
+        "ceiling_bytes": RSS_CEILING_BYTES,
+        "peak_rss_bytes": peak,
+        "exceeds_10k_ceiling": (peak is not None and peak > RSS_CEILING_BYTES),
+        "recorded_not_asserted": True,
+        "scope_note": RSS_CEILING_NOTE,
+    }
 
 
 def write_artifact(payload: dict, out: Path) -> None:
@@ -985,6 +1038,12 @@ def summarize(artifact: dict) -> None:
     print(f"rss peak={rss['peak_rss_bytes'] / 1e6:.0f}MB current={rss['current_rss_bytes']}B "
           f"db={artifact['disk']['memories_db_bytes'] / 1e6:.1f}MB "
           f"wal={artifact['disk']['wal_bytes']}B qdrant={artifact['disk']['qdrant_dir_bytes'] / 1e6:.1f}MB")
+    ceiling = artifact.get("rss_ceiling_comparison") or {}
+    if ceiling:
+        print(f"rss vs signed 10K ceiling: peak {ceiling['peak_rss_bytes'] / 1e6:.0f}MB vs "
+              f"{ceiling['ceiling_bytes'] / 1e6:.0f}MB -> "
+              f"{'EXCEEDS' if ceiling['exceeds_10k_ceiling'] else 'within'} "
+              f"(recorded, not a gate: {ceiling['ceiling']})")
     outbox = artifact["outbox"]
     print(f"outbox: pending={outbox['pending']} acked={outbox['acked']} "
           f"blocked={outbox['blocked']} failed={outbox['failed']}")
@@ -994,8 +1053,12 @@ def summarize(artifact: dict) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="10K ops run against the real local stack")
-    parser.add_argument("--rows", type=int, default=10_000)
+    parser = argparse.ArgumentParser(
+        description="scale ops run (10K/100K milestones; 1M only per the signed D2 rule) "
+                    "against the real local stack")
+    parser.add_argument("--rows", type=int, default=10_000,
+                        help="corpus rows — milestones: 10000 (default), 100000; "
+                             "1000000 only per the signed D2 rule")
     parser.add_argument("--seed", type=int, default=SEED)
     parser.add_argument("--real-share", type=float, default=REAL_SHARE)
     parser.add_argument("--dataset", default=str(DEFAULT_DATASET))
@@ -1010,14 +1073,16 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.reuse:
         artifact = asyncio.run(run_reuse(args))
-        default_out = default_artifact_path(artifact["fingerprint"]["corpus"]["sha256"])
+        corpus = artifact["fingerprint"]["corpus"]
+        default_out = default_artifact_path(corpus["sha256"], corpus["rows"])
     else:
         if not args.workdir:
             stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
             args.workdir = Path(f"/tmp/orivory-scale-{stamp}-{os.getpid()}")
         args.workdir = Path(args.workdir)
         artifact = asyncio.run(run_full(args))
-        default_out = default_artifact_path(artifact["fingerprint"]["corpus"]["sha256"])
+        corpus = artifact["fingerprint"]["corpus"]
+        default_out = default_artifact_path(corpus["sha256"], corpus["rows"])
     out = Path(args.out) if args.out else default_out
 
     write_artifact(artifact, out)

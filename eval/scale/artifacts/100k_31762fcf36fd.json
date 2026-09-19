@@ -1,0 +1,575 @@
+{
+  "status": "complete",
+  "rss_ceiling": "1500MB_service_side_10k (user-signed 2026-09-19)",
+  "generated_at": "2026-09-19T04:24:17+00:00",
+  "role": "run-1 (fresh install, full ingest, 100k milestone)",
+  "rss_ceiling_note": "Signed D4 ceiling, scoped by its own signing note to the SERVICE-SIDE 10K workload on this class of box: RSS <= 1.5GB (1.5e9 bytes, decimal MB; the 10K artifact reports decimal MB too). This harness is the IN-PROCESS variant (it holds the corpus in memory) and the signed note explicitly does NOT cover it, so `rss_ceiling_comparison` below is recorded for envelope context only — never a gate, and no new ceiling is invented here.",
+  "fingerprint": {
+    "git": {
+      "head": "2eb1991e1c17a4ab3227edb846879f1ee68561be",
+      "branch": "model-scale-gates",
+      "dirty": "M eval/scale/gen_corpus.py\n M eval/scale/run_10k.py\n M tests/benchmarks/test_scale_corpus.py\n?? .superpowers/\n?? eval/scale/filtered_ann.py\n?? tests/benchmarks/test_scale_100k.py"
+    },
+    "corpus": {
+      "sha256": "31762fcf36fddeda266c476f236930dd99d1f903c7b9b6baa25387d8c61d2d9d",
+      "seed": 20260919,
+      "rows": 100000,
+      "parts": {
+        "real": 60000,
+        "synthetic": 40000
+      },
+      "dataset": {
+        "dropped_filtered": 2364,
+        "file": "longmemeval_s_cleaned.json",
+        "filter_chars": [
+          20,
+          4000
+        ],
+        "instances": 500,
+        "pool_saturated": false,
+        "pool_share_used": 0.49978342718155466,
+        "pool_user_turns": 120052,
+        "requested_real": 60000,
+        "selected_real": 60000,
+        "sha256": "d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442"
+      }
+    },
+    "model": {
+      "id": "arctic-xs",
+      "file": "/Users/twilight/.cache/orivory/e5/arctic_model.onnx",
+      "model_sha256": "cf2698d30ff05da02c70a088313bad56e5c2f401d734cb24a8390d446111936c",
+      "declared_model_sha256": "cf2698d30ff05da02c70a088313bad56e5c2f401d734cb24a8390d446111936c",
+      "tokenizer_sha256": "91f1def9b9391fdabe028cd3f3fcc4efd34e5d1f08c3bf2de513ebb5911a1854",
+      "declared_tokenizer_sha256": "91f1def9b9391fdabe028cd3f3fcc4efd34e5d1f08c3bf2de513ebb5911a1854",
+      "dim": 384,
+      "pooling": "cls",
+      "query_prefix": "Represent this sentence for searching relevant passages: ",
+      "embedding_contract": {
+        "model_id": "Snowflake/snowflake-arctic-embed-xs",
+        "model_revision": "d8c86521100d3556476a063fc2342036d45c106f",
+        "revision": "d8c86521100d3556476a063fc2342036d45c106f",
+        "artifact_digest": "cf2698d30ff05da02c70a088313bad56e5c2f401d734cb24a8390d446111936c",
+        "tokenizer_digest": "91f1def9b9391fdabe028cd3f3fcc4efd34e5d1f08c3bf2de513ebb5911a1854",
+        "graph_outputs": [
+          "last_hidden_state"
+        ],
+        "pooling": "cls",
+        "query_prefix": "Represent this sentence for searching relevant passages: ",
+        "passage_prefix": "",
+        "max_tokens": 512,
+        "truncation": "head",
+        "padding": "batch-longest-zero",
+        "normalize": true,
+        "dim": 384,
+        "precision": "float32",
+        "provider": "onnxruntime-cpu",
+        "doc_format": "title-content-v1"
+      }
+    },
+    "runtime": {
+      "python": "3.13.15",
+      "onnxruntime": "1.30.0",
+      "qdrant_client": "1.19.0",
+      "numpy": "2.5.3",
+      "sqlalchemy": "2.0.54"
+    },
+    "hardware": {
+      "platform": "macOS-15.6.1-arm64-arm-64bit-Mach-O",
+      "machine": "arm64",
+      "cpu": "Apple M1 Pro",
+      "cpu_count": 10,
+      "ram_bytes": 34359738368,
+      "note": "one local macOS box; single process; NO page-cache drops (no root)"
+    },
+    "config": {
+      "ENVIRONMENT": "staging",
+      "DATABASE_URL": "sqlite+aiosqlite:////tmp/orivory-scale-100k/memories.db",
+      "QDRANT_MODE": "local",
+      "QDRANT_LOCAL_PATH": "/tmp/orivory-scale-100k/qdrant",
+      "USE_LOCAL_EMBEDDINGS": true,
+      "USE_JINA_EMBEDDINGS": false,
+      "LOCAL_EMBED_MODEL": "arctic",
+      "EMBED_BATCH_SIZE": 64,
+      "EMBED_EXECUTOR_WORKERS": 2,
+      "EMBED_ORT_INTRA_OP_THREADS": 0,
+      "RETRIEVAL_HYBRID_ENABLED": false,
+      "RETRIEVAL_SEMANTIC_RERANK": false,
+      "RETRIEVAL_RERANK_POOL_MULTIPLIER": 2.0,
+      "RECALL_FRESHNESS_BUDGET_SECONDS": 2.0,
+      "OUTBOX_DRAIN_ENABLED": true,
+      "OUTBOX_DRAIN_INTERVAL_SECONDS": 5.0,
+      "OUTBOX_DRAIN_BATCH_SIZE": 50
+    },
+    "measurement": {
+      "top_k": 10,
+      "concurrency": "one recall loop + one drain worker + one ingest worker + one correct worker + one forget worker, in ONE process",
+      "recall_warmup_discarded": 3,
+      "workdir": "/tmp/orivory-scale-100k",
+      "run2_open_seconds": 5.427453082986176
+    }
+  },
+  "corpus": {
+    "corpus_file": "corpus.jsonl",
+    "corpus_sha256": "31762fcf36fddeda266c476f236930dd99d1f903c7b9b6baa25387d8c61d2d9d",
+    "rows": 100000,
+    "seed": 20260919,
+    "real_share": 0.6,
+    "parts": {
+      "real": {
+        "count": 60000,
+        "language": "en",
+        "source": "LongMemEval-S user turns (haystack_sessions)"
+      },
+      "synthetic": {
+        "count": 40000,
+        "languages": {
+          "en": 20147,
+          "vi": 19853
+        },
+        "source": "templates.v1 (fixed seed)"
+      }
+    },
+    "dataset": {
+      "dropped_filtered": 2364,
+      "file": "longmemeval_s_cleaned.json",
+      "filter_chars": [
+        20,
+        4000
+      ],
+      "instances": 500,
+      "pool_saturated": false,
+      "pool_share_used": 0.49978342718155466,
+      "pool_user_turns": 120052,
+      "requested_real": 60000,
+      "selected_real": 60000,
+      "sha256": "d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442"
+    },
+    "path": "/private/tmp/orivory-100k-corpus/corpus.jsonl"
+  },
+  "queries": [
+    "The farmer needs to transport a fox, a",
+    "I'm trying to stay on top of my",
+    "I've also been tracking my blood pressure regularly",
+    "I'm also experimenting with essential oils for stress",
+    "I've been meaning to get a flu shot,",
+    "Pretend you are a teacher lecturing a class",
+    "please continue, provide 10 additional examples, different from",
+    "I've been thinking about starting my own business",
+    "That's a great list! I'll definitely check some",
+    "I've also been listening to some comedy podcasts,",
+    "I think it was a combination of their",
+    "I'm actually looking for recommendations for both Luna",
+    "I'm thinking of getting a new leash for",
+    "Luna is loving her new pet bed! She's",
+    "What are some of the main predators of",
+    "That's really interesting. Do all mussel species have",
+    "I had no idea that mussels could produce",
+    "What kinds of luxury cruise ships are available",
+    "Explain bitcoin like I'm 10",
+    "How do they know that they solved the",
+    "Who specify what is the target hash?",
+    "What constitutes a valid transaction? What is the",
+    "I'm thinking of planning a trip to Europe,",
+    "I'm thinking of a 7-10 day trip to",
+    "I'm looking for some BBQ sauce recipes that",
+    "I remember Alex telling me that his grandfather's",
+    "I'm planning to try out Smokey's this weekend",
+    "I think I'll call ahead to check the",
+    "I'm looking for some recommendations for similar bands",
+    "I'm positive it was The Electric Storm, I",
+    "I was wondering if you can also recommend",
+    "I've been to a few venues recently, actually.",
+    "I'm still looking for some recommendations for similar",
+    "What factors influence the decision-making process of consumers",
+    "It seems like there are a lot of",
+    "I've looked at some reviews and compared prices,",
+    "Your tips have really made the decision-making process",
+    "I'm excited to receive my new product and",
+    "Wow, those all sound like interesting flavor combinations",
+    "These are some great ideas for incorporating the",
+    "Yeah, I must've gotten that wrong. Anyway, that's",
+    "I think he's definitely a top contender, but",
+    "I'm looking for some advice on how to",
+    "I'm also planning to take my tennis racket",
+    "I've also been meaning to get my yoga",
+    "You're already mirroring your yoga days by trying",
+    "Wait, I apologize for the mistake again. I",
+    "create the focal, sub-ordinate and super-ordinate goals based",
+    "How can customer centric AR Marketing design be",
+    "content analysis of the 9 interviews and provide",
+    "What can be done in future to increase",
+    "I'm also thinking of using cashback apps like",
+    "That's really helpful! I've been using Ibotta for",
+    "I'm happy to share that I usually use",
+    "I like this routine, but I'm worried about",
+    "I think this revised routine is more realistic",
+    "which pigment gives yellow color to lemon",
+    "How can I make tender and flavorful chicken",
+    "These marinade recipes sound great! I think I'll",
+    "These side dish suggestions all sound great! I"
+  ],
+  "counts": {
+    "memories_sql": 99984,
+    "memory_points": 99984,
+    "chunks": 0,
+    "chunk_points": null,
+    "collection": "orivory_memories__af5e01c0",
+    "outbox_by_status": {
+      "done": 100045
+    },
+    "note": "canonical memories (SQL) vs vector points (Qdrant) vs chunks are counted separately; the workload is memory-only, so the chunk family is 0 and its collection may not exist",
+    "corpus_rows": 100000
+  },
+  "ingest": {
+    "memories": 99000,
+    "tail_held_for_concurrent_phase": 1000,
+    "batches": 990,
+    "seconds": 1374.3626293750713,
+    "memories_per_min": 4322.003431293053,
+    "drain": {
+      "rounds": 990,
+      "claimed": 99000,
+      "applied": 99000,
+      "skipped": 0,
+      "blocked": 0,
+      "failed": 0,
+      "batches": 990
+    },
+    "method": "rows + durable upsert intents committed in batches of 100; embedding performed by the real outbox drain (drain_once → drain_pending, batch 50); nothing acks the intents on the write path, so every point in the store came through it"
+  },
+  "startup": {
+    "boot": {
+      "schema_seconds": 0.04908475000411272,
+      "embedder_warmup_seconds": 0.2026329169748351,
+      "store_open_seconds": 0.03272091702092439,
+      "generation": "orivory_memories__af5e01c0",
+      "generation_manifest_fingerprint": "af5e01c0cb5435f289ecec91443caec0c7b246de007d141fc75c96adbcab2945",
+      "points_at_boot": null
+    },
+    "first_recall_after_ingest_ms": 1461.4080000901595,
+    "first_recall_error": null,
+    "note": "this run's own open+first recall: the same store just wrote every point, so the page cache is warm. The cold-PROCESS measurement is the --reuse run (recorded under cold_process)."
+  },
+  "warm_recall": {
+    "calls": 200,
+    "latency_ms": {
+      "calls": 200,
+      "p50_ms": 1115.589417051524,
+      "p95_ms": 1202.7879160596058,
+      "p99_ms": 1397.4061670014635,
+      "max_ms": 1528.9667081087828,
+      "mean_ms": 1126.274771442986,
+      "method": "nearest-rank percentile over per-call wall time (time.perf_counter around one MemoryRetriever.recall call, SQL session acquisition excluded)"
+    },
+    "errors": {},
+    "stage_ms_median": {
+      "context": 39.60916702635586,
+      "queue_wait": 116.31991702597588,
+      "rewrite_ms": 0.001625041477382183,
+      "embed_ms": 2.7175419963896275,
+      "embed_compute": 2.7175419963896275,
+      "search_ms": 919.7819579858333,
+      "hydrate_ms": 34.19933305121958,
+      "lexical": 0.0,
+      "rerank": 0.0,
+      "eligibility": 0.03229198046028614,
+      "score": 0.05550007335841656,
+      "serialization": 0.30845904257148504,
+      "total": 1115.5016670236364
+    },
+    "note": "second pass in the SAME process: page cache warm by construction"
+  },
+  "concurrent": {
+    "seconds": 240.0,
+    "recall_calls": 166,
+    "recall_errors": {
+      "IndexFreshnessTimeout": 10
+    },
+    "recall_errors_note": "typed failures (e.g. IndexFreshnessTimeout) are real 503s from the freshness barrier, recorded, never dropped",
+    "latency_ms": {
+      "calls": 166,
+      "p50_ms": 1124.3557080160826,
+      "p95_ms": 2883.320500026457,
+      "p99_ms": 3148.543332936242,
+      "max_ms": 3157.586125074886,
+      "mean_ms": 1290.1542597507823,
+      "method": "nearest-rank percentile over per-call wall time (time.perf_counter around one MemoryRetriever.recall call, SQL session acquisition excluded)"
+    },
+    "stage_ms_median": {
+      "context": 40.81195802427828,
+      "queue_wait": 119.23729197587818,
+      "rewrite_ms": 0.0016669509932398796,
+      "embed_ms": 2.764292061328888,
+      "embed_compute": 2.764292061328888,
+      "search_ms": 924.6295419288799,
+      "hydrate_ms": 34.98200001195073,
+      "lexical": 0.0,
+      "rerank": 0.0,
+      "eligibility": 0.032250070944428444,
+      "score": 0.05479191895574331,
+      "serialization": 0.2969170454889536,
+      "total": 1124.292999971658
+    },
+    "ops": {
+      "ingested": 1000,
+      "corrected": 29,
+      "forgotten": 16
+    },
+    "forget_statuses": {
+      "completed": 16
+    },
+    "drain": {
+      "rounds": 1654,
+      "claimed": 580,
+      "applied": 580,
+      "skipped": 0,
+      "blocked": 0,
+      "failed": 0
+    },
+    "gate": {
+      "metric": "p95 of sequential recall calls while ingest/correct/forget run",
+      "threshold_ms": 150.0,
+      "p95_ms": 2883.320500026457,
+      "p95_le_150ms": false,
+      "recorded_not_asserted": true,
+      "authority": "D4 (signed): p95 <= 150ms — RECORDED here, no assert, no code path depends on it"
+    },
+    "feed": {
+      "ingest_rows": 1000,
+      "queries": 60
+    }
+  },
+  "backup": {
+    "backup_seconds": 0.4818762500071898,
+    "restore_seconds": 4.33411974995397,
+    "backup_bytes": 844096060,
+    "restored_memories": 99984,
+    "restored_points": 99984,
+    "verified": true,
+    "method": "PRAGMA wal_checkpoint(TRUNCATE) → file copy of the SQLite db + the embedded-Qdrant folder → copy back into a fresh dir → re-open (sqlite3 + QdrantClient) and count. Restore timing INCLUDES the verification reads."
+  },
+  "final_drain": {
+    "rounds": 1,
+    "claimed": 0,
+    "applied": 0,
+    "skipped": 0,
+    "blocked": 0,
+    "failed": 0
+  },
+  "disk": {
+    "workdir_bytes": 2532353716,
+    "memories_db_bytes": 247898112,
+    "wal_bytes": 0,
+    "qdrant_dir_bytes": 596197948
+  },
+  "rss": {
+    "peak_rss_bytes": 3941548032,
+    "current_rss_bytes": 2030436352,
+    "ru_maxrss_raw": 3941548032,
+    "method": "resource.getrusage(RUSAGE_SELF).ru_maxrss (peak, process-wide, CONTAMINATED by everything the process loaded before the stores) + ps -o rss= at measurement time (current)"
+  },
+  "rss_ceiling_comparison": {
+    "ceiling": "1500MB_service_side_10k (user-signed 2026-09-19)",
+    "ceiling_bytes": 1500000000,
+    "peak_rss_bytes": 3941548032,
+    "exceeds_10k_ceiling": true,
+    "recorded_not_asserted": true,
+    "scope_note": "Signed D4 ceiling, scoped by its own signing note to the SERVICE-SIDE 10K workload on this class of box: RSS <= 1.5GB (1.5e9 bytes, decimal MB; the 10K artifact reports decimal MB too). This harness is the IN-PROCESS variant (it holds the corpus in memory) and the signed note explicitly does NOT cover it, so `rss_ceiling_comparison` below is recorded for envelope context only — never a gate, and no new ceiling is invented here."
+  },
+  "outbox": {
+    "pending": 0,
+    "acked": 100045,
+    "blocked": 0,
+    "failed": 0,
+    "by_status": {
+      "done": 100045
+    },
+    "note": "acked = status 'done'; the write path acks its own intent, this run's ingest never did, so 'acked' here is the drain's own accounting"
+  },
+  "seams": {
+    "rewrite_stubbed": 368,
+    "graph_builds_suppressed": 0,
+    "llm_rewrite": "identity (paid API forbidden in this run) — counted above",
+    "graph_builds": "suppressed (LLM extraction) — counted above",
+    "cold_page_cache": "NOT dropped (no root): the cold number is a fresh PROCESS on the same store (--reuse), not a cold page cache",
+    "backup": "file-level copy + re-open verify, not a backup product, not a cross-machine restore",
+    "recall_concurrency": "ONE sequential recall loop against concurrent writers (the P2 gate's shape), not a parallel-recall load test"
+  },
+  "cold_process": {
+    "open_seconds": 5.427453082986176,
+    "open_boot": {
+      "schema_seconds": 1.2483948749722913,
+      "embedder_warmup_seconds": 0.20025762496516109,
+      "store_open_seconds": 3.977148749982007,
+      "generation": "orivory_memories__af5e01c0",
+      "generation_manifest_fingerprint": "af5e01c0cb5435f289ecec91443caec0c7b246de007d141fc75c96adbcab2945",
+      "points_at_boot": 99984
+    },
+    "first_recall_seconds": 1.060237625031732,
+    "first_recall_ms": 1059.9933329503983,
+    "first_recall_error": null,
+    "open_plus_first_recall_ms": 1060.237625031732,
+    "note": "open = app boot on the EXISTING store (schema ladder check + embedder warmup + store touch) + the first real recall. Fresh process, warm page cache: the honest border of what this box can measure without root."
+  },
+  "runs": {
+    "run1": {
+      "role": "run-1 (fresh install, full ingest, 100k milestone)",
+      "generated_at": "2026-09-19T04:24:17+00:00",
+      "counts": {
+        "memories_sql": 99984,
+        "memory_points": 99984,
+        "chunks": 0,
+        "chunk_points": null,
+        "collection": "orivory_memories__af5e01c0",
+        "outbox_by_status": {
+          "done": 100045
+        },
+        "note": "canonical memories (SQL) vs vector points (Qdrant) vs chunks are counted separately; the workload is memory-only, so the chunk family is 0 and its collection may not exist",
+        "corpus_rows": 100000
+      },
+      "disk": {
+        "workdir_bytes": 2532353716,
+        "memories_db_bytes": 247898112,
+        "wal_bytes": 0,
+        "qdrant_dir_bytes": 596197948
+      },
+      "rss": {
+        "peak_rss_bytes": 3941548032,
+        "current_rss_bytes": 2030436352,
+        "ru_maxrss_raw": 3941548032,
+        "method": "resource.getrusage(RUSAGE_SELF).ru_maxrss (peak, process-wide, CONTAMINATED by everything the process loaded before the stores) + ps -o rss= at measurement time (current)"
+      },
+      "warm_recall": {
+        "calls": 200,
+        "latency_ms": {
+          "calls": 200,
+          "p50_ms": 1115.589417051524,
+          "p95_ms": 1202.7879160596058,
+          "p99_ms": 1397.4061670014635,
+          "max_ms": 1528.9667081087828,
+          "mean_ms": 1126.274771442986,
+          "method": "nearest-rank percentile over per-call wall time (time.perf_counter around one MemoryRetriever.recall call, SQL session acquisition excluded)"
+        },
+        "errors": {},
+        "stage_ms_median": {
+          "context": 39.60916702635586,
+          "queue_wait": 116.31991702597588,
+          "rewrite_ms": 0.001625041477382183,
+          "embed_ms": 2.7175419963896275,
+          "embed_compute": 2.7175419963896275,
+          "search_ms": 919.7819579858333,
+          "hydrate_ms": 34.19933305121958,
+          "lexical": 0.0,
+          "rerank": 0.0,
+          "eligibility": 0.03229198046028614,
+          "score": 0.05550007335841656,
+          "serialization": 0.30845904257148504,
+          "total": 1115.5016670236364
+        },
+        "note": "second pass in the SAME process: page cache warm by construction"
+      }
+    },
+    "run2": {
+      "role": "run-2 (--reuse: fresh process, same store — the cold-process proxy)",
+      "generated_at": "2026-09-19T04:28:09+00:00",
+      "cold_process": {
+        "open_seconds": 5.427453082986176,
+        "open_boot": {
+          "schema_seconds": 1.2483948749722913,
+          "embedder_warmup_seconds": 0.20025762496516109,
+          "store_open_seconds": 3.977148749982007,
+          "generation": "orivory_memories__af5e01c0",
+          "generation_manifest_fingerprint": "af5e01c0cb5435f289ecec91443caec0c7b246de007d141fc75c96adbcab2945",
+          "points_at_boot": 99984
+        },
+        "first_recall_seconds": 1.060237625031732,
+        "first_recall_ms": 1059.9933329503983,
+        "first_recall_error": null,
+        "open_plus_first_recall_ms": 1060.237625031732,
+        "note": "open = app boot on the EXISTING store (schema ladder check + embedder warmup + store touch) + the first real recall. Fresh process, warm page cache: the honest border of what this box can measure without root."
+      },
+      "warm_recall": {
+        "calls": 200,
+        "latency_ms": {
+          "calls": 200,
+          "p50_ms": 1089.9344170466065,
+          "p95_ms": 1123.1162080075592,
+          "p99_ms": 1161.5224999841303,
+          "max_ms": 1481.9861249998212,
+          "mean_ms": 1094.6310085360892,
+          "method": "nearest-rank percentile over per-call wall time (time.perf_counter around one MemoryRetriever.recall call, SQL session acquisition excluded)"
+        },
+        "errors": {},
+        "stage_ms_median": {
+          "context": 40.16787500586361,
+          "queue_wait": 117.71999998018146,
+          "rewrite_ms": 0.0014170072972774506,
+          "embed_ms": 2.7318750508129597,
+          "embed_compute": 2.7318750508129597,
+          "search_ms": 892.1682080253959,
+          "hydrate_ms": 34.76770897395909,
+          "lexical": 0.0,
+          "rerank": 0.0,
+          "eligibility": 0.034207943826913834,
+          "score": 0.05625002086162567,
+          "serialization": 0.3131669946014881,
+          "total": 1089.855541009456
+        }
+      },
+      "counts": {
+        "memories_sql": 99984,
+        "memory_points": 99984,
+        "chunks": 0,
+        "chunk_points": null,
+        "collection": "orivory_memories__af5e01c0",
+        "outbox_by_status": {
+          "done": 100045
+        },
+        "note": "canonical memories (SQL) vs vector points (Qdrant) vs chunks are counted separately; the workload is memory-only, so the chunk family is 0 and its collection may not exist"
+      },
+      "disk": {
+        "workdir_bytes": 2532341162,
+        "memories_db_bytes": 247898112,
+        "wal_bytes": 4152,
+        "qdrant_dir_bytes": 596197948
+      },
+      "rss": {
+        "peak_rss_bytes": 3237773312,
+        "current_rss_bytes": 3237527552,
+        "ru_maxrss_raw": 3237773312,
+        "method": "resource.getrusage(RUSAGE_SELF).ru_maxrss (peak, process-wide, CONTAMINATED by everything the process loaded before the stores) + ps -o rss= at measurement time (current)"
+      },
+      "rss_ceiling_comparison": {
+        "ceiling": "1500MB_service_side_10k (user-signed 2026-09-19)",
+        "ceiling_bytes": 1500000000,
+        "peak_rss_bytes": 3237773312,
+        "exceeds_10k_ceiling": true,
+        "recorded_not_asserted": true,
+        "scope_note": "Signed D4 ceiling, scoped by its own signing note to the SERVICE-SIDE 10K workload on this class of box: RSS <= 1.5GB (1.5e9 bytes, decimal MB; the 10K artifact reports decimal MB too). This harness is the IN-PROCESS variant (it holds the corpus in memory) and the signed note explicitly does NOT cover it, so `rss_ceiling_comparison` below is recorded for envelope context only — never a gate, and no new ceiling is invented here."
+      },
+      "seams": {
+        "llm_rewrite": "identity",
+        "graph_builds": "suppressed",
+        "rewrite_stubbed": 201,
+        "graph_builds_suppressed": 0
+      }
+    }
+  },
+  "counts_run2": {
+    "memories_sql": 99984,
+    "memory_points": 99984,
+    "chunks": 0,
+    "chunk_points": null,
+    "collection": "orivory_memories__af5e01c0",
+    "outbox_by_status": {
+      "done": 100045
+    },
+    "note": "canonical memories (SQL) vs vector points (Qdrant) vs chunks are counted separately; the workload is memory-only, so the chunk family is 0 and its collection may not exist"
+  },
+  "one_m_decision": {
+    "rule": "signed D2: run 1M only if 100K has NOT hit a budget",
+    "decision": "not-run",
+    "reason": "100K already breached two signed/recorded budgets on this box: concurrent+steady recall latency (warm p95 1202.8ms, concurrent p95 in the same band — the signed p95<=150ms gate fails by ~8x) and RSS (peak 3.94GB vs the 1.5GB service-side 10K ceiling, ~2.6x). Ingest alone took 1374s for 99K rows; a 1M run would need ~4h wall + roughly an order of magnitude more payload RAM. Grinding it out would only re-confirm a ceiling already measured, which the spec explicitly says not to do ('Stop som khi gap ceiling').",
+    "envelope_note": "vector/payload storage scales with N; this run does NOT establish a scaling law — it establishes that the local envelope is already exceeded at 100K on this hardware class."
+  }
+}

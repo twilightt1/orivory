@@ -148,7 +148,11 @@ def test_mini_ops_run_produces_a_real_artifact(tmp_path):
 
     artifact = json.loads(out.read_text(encoding="utf-8"))
     assert artifact["status"] == "complete"
-    assert artifact["rss_ceiling"] == "pending-user"
+    assert artifact["rss_ceiling"].startswith("1500MB_service_side_10k")
+    ceiling = artifact["rss_ceiling_comparison"]
+    assert ceiling["ceiling_bytes"] == 1_500_000_000
+    assert ceiling["peak_rss_bytes"] == artifact["rss"]["peak_rss_bytes"]
+    assert ceiling["exceeds_10k_ceiling"] in (True, False)  # recorded, never asserted on
 
     counts = artifact["counts"]
     assert counts["memories_sql"] >= 1
