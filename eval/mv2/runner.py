@@ -15,7 +15,12 @@ Contract (spec §3.3/§3.4)
 - Tokenization is capped at 512 tokens (``MAX_TOKENS``) regardless of the 8192
   the checkpoint declares; 8192 is deliberately NOT enabled until measured.
 - Batch: encode together, pad to the longest truncated sequence, attention mask
-  respected; row i's vector does not depend on its batch mates (tests + parity).
+  respected. Padding fills with the tokenizer's real ``<pad>`` id (1 for this
+  export family — filling with 0 would seed ``<s>`` at every padded position).
+  FP32 is batch-invariant within parity tolerance; **INT8 vectors depend on
+  their batch mates** (per-tensor dynamic quantization scales; parity measured
+  cos 0.95-0.98 between a solo and a batched embedding) — use one text per call
+  (``Mv2SoloText``) when exact INT8 vectors must stay stable.
 
 Cache (outside the repo, same pattern as the XS cache under ~/.cache/orivory/e5)
 -------------------------------------------------------------------------------
@@ -203,6 +208,10 @@ class Mv2Onnx:
             providers=["CPUExecutionProvider"],
         )
         self._tok = Tokenizer.from_file(str(tokenizer_path))
+        pad_id = self._tok.token_to_id("<pad>")
+        if pad_id is None:
+            raise ValueError("tokenizer has no <pad> token — padded batches would be wrong")
+        self._pad_id = int(pad_id)
         outputs = {o.name for o in self._sess.get_outputs()}
         # Prefer the token-level output by name; a pooled-first export would
         # otherwise mis-slice silently (e5_local raises instead of guessing —
@@ -223,7 +232,7 @@ class Mv2Onnx:
         for i in range(0, len(texts), _BATCH):
             enc = self._tok.encode_batch(texts[i : i + _BATCH])
             seq = max(min(len(e.ids), MAX_TOKENS) for e in enc)
-            ids = np.zeros((len(enc), seq), dtype=np.int64)
+            ids = np.full((len(enc), seq), self._pad_id, dtype=np.int64)
             mask = np.zeros((len(enc), seq), dtype=np.int64)
             for r, e in enumerate(enc):
                 take = min(len(e.ids), MAX_TOKENS)
