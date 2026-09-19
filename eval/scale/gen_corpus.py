@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import itertools
 import json
 import random
 import sys
@@ -91,11 +92,25 @@ def real_pool(dataset: Path) -> tuple[list[dict], dict]:
 
     pool: list[dict] = []
     dropped = 0
-    for instance in instances:
+    for instance_index, instance in enumerate(instances):
+        if not isinstance(instance, dict):
+            raise CorpusError(f"invalid instance at index {instance_index}: expected an object")
         question_id = instance.get("question_id")
-        for session_index, session in enumerate(instance.get("haystack_sessions") or []):
-            for turn_index, turn in enumerate(session or []):
-                if (turn or {}).get("role") != "user":
+        sessions = instance.get("haystack_sessions") or []
+        if not isinstance(sessions, list):
+            raise CorpusError(f"invalid haystack_sessions at instance {instance_index}")
+        for session_index, session in enumerate(sessions):
+            if not isinstance(session, list):
+                raise CorpusError(
+                    f"invalid session at instance {instance_index}, index {session_index}"
+                )
+            for turn_index, turn in enumerate(session):
+                if not isinstance(turn, dict):
+                    raise CorpusError(
+                        f"invalid turn at instance {instance_index}, session {session_index}, "
+                        f"index {turn_index}"
+                    )
+                if turn.get("role") != "user":
                     continue
                 text = (turn.get("content") or "").strip()
                 if MIN_TURN_CHARS <= len(text) <= MAX_TURN_CHARS:
@@ -238,12 +253,12 @@ _EN_LONG = (
     "Working conclusion is to keep the current configuration and measure again after {date}. "
     "If nothing moves, {topic_extra} goes to next quarter. Code {code}.",
 )
-_MONTHS = ("tháng một", "tháng ba", "tháng sáu", "tháng chín", "tháng mười hai")
 _DAYS = ("03", "07", "12", "17", "21", "26", "30")
 
 
-def _synthetic_row(seed: int, index: int, rng: random.Random) -> dict:
-    vi = rng.random() < 0.5
+def _synthetic_row(seed: int, index: int, rng: random.Random, *,
+                   lang: str | None = None) -> dict:
+    vi = rng.random() < 0.5 if lang is None else (lang == "vi")
     topic = rng.choice(_VI_TOPICS if vi else _EN_TOPICS)
     topic_extra = rng.choice(_VI_TOPICS if vi else _EN_TOPICS)
     doc = ("bản nháp " if vi else "draft ") + topic
@@ -286,8 +301,8 @@ def _synthetic_rows(count: int, seed: int) -> list[dict]:
         langs = {row["lang"] for row in rows}
         for missing, index in (("vi", 0), ("en", 1)):
             if missing not in langs:
-                row = _synthetic_row(seed, count + index, random.Random(seed + index))
-                row["lang"], row["memory_id"] = missing, _row_id(seed, "synthetic", count + index)
+                row = _synthetic_row(seed, count + index, random.Random(seed + index),
+                                     lang=missing)
                 rows[index] = row
     return rows
 
@@ -309,25 +324,35 @@ def generate(*, rows: int = ROWS, seed: int = SEED, dataset: Path = DEFAULT_DATA
 
     real_rows, stats = _real_rows(Path(dataset), seed, rows, real_share)
     synthetic_rows = _synthetic_rows(rows - len(real_rows), seed)
-    corpus = real_rows + synthetic_rows
-    if len(corpus) != rows:
-        raise CorpusError(f"generated {len(corpus)} rows for a {rows}-row request")
-
-    payload = "".join(
-        json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n" for row in corpus
-    ).encode("utf-8")
-    digest = hashlib.sha256(payload).hexdigest()
+    if len(real_rows) + len(synthetic_rows) != rows:
+        raise CorpusError(
+            f"generated {len(real_rows) + len(synthetic_rows)} rows for a {rows}-row request"
+        )
 
     out = Path(out)
+    manifest_path = out.parent / (out.name + ".manifest.json")
+    if Path(dataset).resolve() in {out.resolve(), manifest_path.resolve()}:
+        raise CorpusError(f"output path would overwrite the dataset: {dataset}")
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_bytes(payload)
+
+    # Stream the rows to disk while hashing: joining a 1M-row payload in memory
+    # (before the runner reloads it again) reached multiple GB and would OOM
+    # before any measurement starts.
+    digest = hashlib.sha256()
+    tmp_out = out.with_name(out.name + ".part")
+    with tmp_out.open("wb") as sink:
+        for row in itertools.chain(real_rows, synthetic_rows):
+            line = (json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8")
+            sink.write(line)
+            digest.update(line)
+    digest_hex = digest.hexdigest()
 
     synthetic_langs: dict[str, int] = {}
     for row in synthetic_rows:
         synthetic_langs[row["lang"]] = synthetic_langs.get(row["lang"], 0) + 1
     manifest = {
         "corpus_file": out.name,  # a name, not a path: two runs in different dirs must be byte-identical
-        "corpus_sha256": digest,
+        "corpus_sha256": digest_hex,
         "rows": rows,
         "seed": seed,
         "real_share": real_share,
@@ -368,9 +393,14 @@ def generate(*, rows: int = ROWS, seed: int = SEED, dataset: Path = DEFAULT_DATA
         },
     }
     manifest_path = out.parent / (out.name + ".manifest.json")
-    manifest_path.write_bytes(
+    tmp_manifest = manifest_path.with_name(manifest_path.name + ".part")
+    tmp_manifest.write_bytes(
         (json.dumps(manifest, ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode("utf-8")
     )
+    # Both files land together, only after every byte and digest succeeded —
+    # an interrupted write must not leave a new corpus with a stale manifest.
+    tmp_out.replace(out)
+    tmp_manifest.replace(manifest_path)
     return manifest
 
 
@@ -390,6 +420,18 @@ def load_corpus(path: Path) -> tuple[list[dict], dict]:
     # which json.dumps does not escape — real turns contain U+2028 (7 of them in
     # the LongMemEval-S sample), and a splitline there shreds a valid JSONL row.
     rows = [json.loads(line) for line in path.read_text(encoding="utf-8").split("\n") if line]
+    if len(rows) != manifest.get("rows"):
+        raise CorpusError(
+            f"corpus has {len(rows)} rows but its manifest says {manifest.get('rows')}: {path}"
+        )
+    parts = manifest.get("parts") or {}
+    for part in ("real", "synthetic"):
+        expected = (parts.get(part) or {}).get("count")
+        actual = sum(1 for row in rows if row.get("part") == part)
+        if expected is not None and actual != expected:
+            raise CorpusError(
+                f"corpus part {part!r} has {actual} rows but its manifest says {expected}: {path}"
+            )
     return rows, manifest
 
 
@@ -404,8 +446,9 @@ def main(argv: list[str] | None = None) -> int:
                         help="regenerate into a temp dir and compare digests")
     args = parser.parse_args(argv)
 
+    out_path = Path(args.out)
     manifest = generate(rows=args.rows, seed=args.seed, dataset=Path(args.dataset),
-                        out=Path(args.out), real_share=args.real_share)
+                        out=out_path, real_share=args.real_share)
     print(f"corpus: {args.out} rows={manifest['rows']} sha256={manifest['corpus_sha256']}")
     parts = manifest["parts"]
     print(f"  real={parts['real']['count']} (of {manifest['dataset']['requested_real']} requested) "
@@ -413,9 +456,15 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.self_check:
         with tempfile.TemporaryDirectory(prefix="scale-corpus-selfcheck-") as tmp:
+            again_out = Path(tmp) / "corpus.jsonl"
             again = generate(rows=args.rows, seed=args.seed, dataset=Path(args.dataset),
-                             out=Path(tmp) / "corpus.jsonl", real_share=args.real_share)
-        same = again["corpus_sha256"] == manifest["corpus_sha256"]
+                             out=again_out, real_share=args.real_share)
+            same = (
+                again["corpus_sha256"] == manifest["corpus_sha256"]
+                and again_out.read_bytes() == out_path.read_bytes()
+                and (again_out.parent / (again_out.name + ".manifest.json")).read_bytes()
+                == (out_path.parent / (out_path.name + ".manifest.json")).read_bytes()
+            )
         print(f"self-check: same seed -> {'byte-identical' if same else 'DIFFERENT'} "
               f"({again['corpus_sha256']})")
         return 0 if same else 1
