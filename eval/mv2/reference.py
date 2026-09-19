@@ -30,8 +30,9 @@ Review of ``configuration_hf_alibaba_nlp_gte.py`` (144 lines, sha256 pinned belo
   ``__init__.py`` itself.
 
 Two recorded deviations on this box (both inference-efficiency switches in the
-published config, empirically required to run at all — see the artifact's
-``arms.mv2_fp_reference.config.deviations``)
+published config, empirically required to run at all — see
+:attr:`ReferenceEmbedder.deviations`, populated at load time, and the
+"FP reference deviations" note in ``eval/ablation_retrieval_mv2.py``)
 -------------------------------------------------------------------------------
 - ``config.json`` ships ``"unpad_inputs": "true"`` and
   ``"use_memory_efficient_attention": "true"`` as STRINGS (truthy). The
