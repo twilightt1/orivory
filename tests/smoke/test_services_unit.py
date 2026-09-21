@@ -1,14 +1,12 @@
 """Unit tests for smoke-test assertion logic (no infra needed).
 
-The CI smoke job runs tests/smoke/test_services.py against live compose
-services, but its assertions must match the REAL vendor APIs. These tests
-drive the same test functions with stubbed HTTP so the assertions are
-pinned without Docker:
-- Qdrant /readyz returns 200 with plain text "all shards are ready"
-- Qdrant root returns {"title": "qdrant - vector search engine", "version": …}
-- MinIO S3 port answers 400 on the console route (reachable, wrong route)
-- Unreachable services must SKIP, not crash (requests has no TimeoutError
-  attribute — handlers must catch requests.exceptions.RequestException)
+The CI smoke job runs ``tests/smoke/test_services.py`` against the live lite
+compose stack, so its assertions are driven here with stubbed HTTP and pinned
+without Docker:
+- a healthy ``/ready`` payload is accepted,
+- a DEGRADED payload FAILS (it must never read as a skip),
+- an unreachable API SKIPS, never crashes (``requests`` has no TimeoutError
+  attribute — the handler must catch ``requests.exceptions.RequestException``).
 """
 import pytest
 
@@ -28,35 +26,56 @@ class _Resp:
 
 
 @pytest.fixture
-def _live(monkeypatch):
-    monkeypatch.setattr(svc, "DOCKER_AVAILABLE", True)
+def _get(monkeypatch):
+    def _stub(response):
+        import requests
+
+        monkeypatch.setattr(requests, "get", lambda *a, **k: response)
+
+    return _stub
 
 
-def test_qdrant_readyz_accepts_real_payload(_live, monkeypatch):
-    import requests
-
-    monkeypatch.setattr(
-        requests, "get", lambda *a, **k: _Resp(200, text="all shards are ready")
-    )
-    svc.TestQdrantHealth().test_qdrant_is_ready({})
-
-
-def test_qdrant_version_accepts_real_payload(_live, monkeypatch):
-    import requests
-
-    payload = {"title": "qdrant - vector search engine", "version": "1.19.1"}
-    monkeypatch.setattr(requests, "get", lambda *a, **k: _Resp(200, payload))
-    svc.TestQdrantHealth().test_qdrant_version({})
+def _healthy_payload() -> dict:
+    return {
+        "status": "ok",
+        "checks": {
+            "sqlite": {"status": "ok", "latency_ms": 0.4},
+            "redis": {"status": "ok", "latency_ms": 0.1},
+            "storage": {"status": "ok", "latency_ms": 0.2},
+            "qdrant": {"status": "ok", "latency_ms": 1.2},
+            "mcp_hub": {"status": "ok", "latency_ms": 0.3},
+        },
+    }
 
 
-def test_minio_api_accepts_400_as_reachable(_live, monkeypatch):
-    import requests
-
-    monkeypatch.setattr(requests, "get", lambda *a, **k: _Resp(400, None))
-    svc.TestMinIOHealth().test_minio_api({})
+def test_health_accepts_real_payload(_get):
+    _get(_Resp(200, {"status": "healthy"}))
+    svc.test_lite_health_endpoint({})
 
 
-def test_unreachable_service_skips_not_crashes(_live, monkeypatch):
+def test_ready_accepts_a_healthy_payload(_get):
+    _get(_Resp(200, _healthy_payload()))
+    svc.test_lite_ready_reports_every_dependency_ok({})
+
+
+def test_degraded_readiness_fails_not_skips(_get):
+    payload = _healthy_payload()
+    payload["status"] = "degraded"
+    payload["checks"]["qdrant"] = {"status": "failed", "error": "store down"}
+    _get(_Resp(503, payload))
+    with pytest.raises(AssertionError):
+        svc.test_lite_ready_reports_every_dependency_ok({})
+
+
+def test_a_resurrected_full_stack_check_fails(_get):
+    payload = _healthy_payload()
+    payload["checks"]["postgres"] = {"status": "ok", "latency_ms": 1.0}
+    _get(_Resp(200, payload))
+    with pytest.raises(AssertionError):
+        svc.test_lite_ready_reports_every_dependency_ok({})
+
+
+def test_unreachable_api_skips_not_crashes(monkeypatch):
     import requests
 
     def boom(*a, **k):
@@ -64,10 +83,8 @@ def test_unreachable_service_skips_not_crashes(_live, monkeypatch):
 
     monkeypatch.setattr(requests, "get", boom)
     with pytest.raises(pytest.skip.Exception):
-        svc.TestQdrantHealth().test_qdrant_is_ready({})
+        svc.test_lite_health_endpoint({})
     with pytest.raises(pytest.skip.Exception):
-        svc.TestQdrantHealth().test_qdrant_version({})
+        svc.test_lite_ready_reports_every_dependency_ok({})
     with pytest.raises(pytest.skip.Exception):
-        svc.TestMinIOHealth().test_minio_health({})
-    with pytest.raises(pytest.skip.Exception):
-        svc.TestMinIOHealth().test_minio_api({})
+        svc.test_api_docs_accessible({})

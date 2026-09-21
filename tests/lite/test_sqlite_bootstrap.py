@@ -32,7 +32,7 @@ async def test_bootstrap_creates_all_hub_tables(_tables):
         "users", "memories", "agent_clients", "memory_access_logs",
         "erasure_receipts", "conversations", "messages", "documents",
         "document_chunks", "entities", "relations", "sources",
-        "user_quotas", "insight_cards", "workspaces",
+        "user_quotas",
     }
     missing = expected - names
     assert not missing, f"missing tables: {missing}"

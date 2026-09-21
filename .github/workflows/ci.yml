@@ -38,10 +38,10 @@ jobs:
         run: python -m ruff check app tests eval scripts
 
       - name: Run API tests
-        run: python -m pytest --confcutdir=tests/api tests/api/test_health_api.py tests/api/test_sse.py tests/api/test_admin_diagnostics.py -q
+        run: python -m pytest --confcutdir=tests/api tests/api/test_health_api.py tests/api/test_admin_diagnostics.py -q
 
       - name: Run service tests
-        run: python -m pytest --confcutdir=tests/services tests/services/test_health_service.py tests/services/test_diagnostics_service.py tests/services/test_referral_service.py tests/services/test_storage_fs.py -q
+        run: python -m pytest --confcutdir=tests/services tests/services/test_health_service.py tests/services/test_diagnostics_service.py tests/services/test_storage_fs.py -q
 
       - name: Run RAG tests
         run: python -m pytest --confcutdir=tests/rag tests/rag -q
@@ -49,14 +49,14 @@ jobs:
       - name: Run evaluation tests
         run: python -m pytest --confcutdir=tests/eval tests/eval/test_eval_metrics.py tests/eval/test_live_api_eval.py tests/eval/test_llm_judge_provenance.py -q
 
-      - name: Run schema-fidelity tests (migrations vs models, DB-free)
-        run: python -m pytest --confcutdir=tests/migrations tests/migrations -q
-
       - name: Run middleware unit tests (DB-free)
         run: python -m pytest --confcutdir=tests/middleware tests/middleware -q
 
       - name: Run script unit tests (DB-free)
         run: python -m pytest --confcutdir=tests/scripts tests/scripts -q
+
+      - name: Run smoke unit tests (Docker-free)
+        run: python -m pytest --confcutdir=tests/smoke tests/smoke/test_services_unit.py -q
 
       - name: Run agent unit tests (DB-free)
         run: python -m pytest --confcutdir=tests/agents tests/agents/test_llm_client_loop.py -q
@@ -78,16 +78,11 @@ jobs:
         env:
           # Lite semantics, same as the P1a gate step: every module here opens
           # its own private SQLite file + private embedded-Qdrant folder, so no
-          # compose service is involved. tests/migration's rollback module
-          # self-skips on the missing chromadb (it runs from the isolated
-          # requirements-rollback.txt venv, not from CI's runtime env), and the
-          # Postgres cutover smoke self-skips without a PG DATABASE_URL (the
-          # integration job runs it).
+          # compose service is involved.
           DATABASE_URL: sqlite+aiosqlite:////tmp/p1b_ci.db
         run: |
           python -m pytest --confcutdir=tests/retrieval tests/retrieval/test_qdrant_backend.py tests/retrieval/test_qdrant_parity.py tests/retrieval/test_chunk_index.py tests/retrieval/test_cls_cutover.py tests/retrieval/test_p1b_gate.py -q
           python -m pytest --confcutdir=tests/lite tests/lite/test_readiness_lite.py -q
-          python -m pytest --confcutdir=tests/migration tests/migration -q
 
       - name: Run P3 background-indexing suites (temp SQLite, no services)
         env:
@@ -144,7 +139,7 @@ jobs:
         run: |
           python -m pytest --confcutdir=tests/retrieval tests/retrieval/test_p4a_gate.py tests/retrieval/test_namespace_acl.py tests/retrieval/test_correction.py -q
           python -m pytest --confcutdir=tests/lite tests/lite/test_sqlite_schema_v5.py -q
-          python -m pytest --confcutdir=tests/api tests/api/test_dormant_router_acl.py tests/api/test_erasure_router.py tests/api/test_memories_router.py -q
+          python -m pytest --confcutdir=tests/api tests/api/test_erasure_router.py tests/api/test_memories_router.py -q
           python -m pytest --confcutdir=tests/services tests/services/test_compression_service.py tests/services/test_import_service.py -q
 
       - name: Run P4b lifecycle gate suites (temp SQLite, no services)
@@ -323,21 +318,23 @@ jobs:
           retention-days: 30
 
   integration:
-    name: Live service integration tests
+    name: Live lite stack integration tests
     runs-on: ubuntu-latest
 
     env:
       RUN_LIVE_INTEGRATION: "1"
-      DATABASE_URL: postgresql+asyncpg://postgres:password@localhost:55432/ragdb
-      POSTGRES_PORT: "55432"
-      DATABASE_POOL_SIZE: "5"
-      DATABASE_MAX_OVERFLOW: "5"
-      # Slim core: Redis/MinIO services were dropped — in-process Redis + fs storage.
+      # The lite shape — on the host side too: SQLite + embedded Qdrant + fs
+      # storage, i.e. the one container this job boots on :8000.
+      LITE_MODE: "1"
+      DATABASE_URL: sqlite+aiosqlite:////tmp/orivory-ci-lite.db
       REDIS_URL: ""
       JWT_SECRET_KEY: test-secret-key-change-in-production
       STORAGE_BACKEND: fs
       FS_STORAGE_PATH: /tmp/orivory-ci-storage
-      QDRANT_URL: http://localhost:6333
+      QDRANT_MODE: local
+      QDRANT_LOCAL_PATH: /tmp/orivory-ci-qdrant
+      # Where the app under test is published (test_qdrant_live reads /ready there).
+      API_BASE_URL: http://localhost:8000
       OPENROUTER_API_KEY: test-openrouter-key
       OPENROUTER_BASE_URL: https://openrouter.ai/api/v1
       LLM_MODEL: openai/gpt-4o-mini
@@ -377,88 +374,65 @@ jobs:
           python -m pip install -r requirements.txt -r requirements-dev.txt
 
       - name: Prepare Docker Compose env
-        run: cp .env.test.example .env
+        # The bind-mounted data dir is written by the image's `app` user, which
+        # needs an explicitly writable host directory on a Linux runner.
+        run: |
+          cp .env.test.example .env
+          mkdir -p data && chmod 777 data
 
-      - name: Start live services
-        run: docker compose up -d postgres qdrant
+      - name: Boot the lite stack
+        run: docker compose up -d --wait
 
-      - name: Wait for live services
+      - name: Wait for the lite API
         shell: bash
         run: |
           set -euo pipefail
           for i in {1..60}; do
-            docker compose exec -T postgres pg_isready -U postgres -d ragdb \
-              && curl -fsS http://localhost:6333/readyz >/dev/null \
-              && exit 0
+            if curl -fsS http://localhost:8000/health >/dev/null \
+              && curl -fsS http://localhost:8000/ready >/dev/null; then
+              echo "The lite stack is up."
+              exit 0
+            fi
+            echo "Waiting for the lite stack... ($i/60)"
             sleep 2
           done
           docker compose ps
-          docker compose logs postgres qdrant
+          docker compose logs app
           exit 1
-
-      - name: Run migrations
-        run: docker compose run --rm migrate
 
       - name: Run live integration tests
         run: python -m pytest --confcutdir=tests/integration tests/integration -q
 
-      - name: Run P1b Postgres cutover smoke
-        # The one path the SQLite suites cannot reach: scripts/migrate_qdrant.py
-        # against Postgres, where database.activate_generations IS the expand and
-        # cutover is the pointer flip. Skips silently without a PG DATABASE_URL.
-        run: python -m pytest --confcutdir=tests/migration tests/migration/test_p1b_pg_smoke.py -q
-
-      - name: Run P1b Qdrant parity against the live server
-        # The module the infra-free step runs against an embedded folder, here
-        # in server mode against the compose qdrant service (QDRANT_URL from the
-        # job env): the real HTTP data path — payload indexes + guard reads —
-        # that the local mode cannot exercise. The env fixture takes the mode
-        # from QDRANT_MODE/QDRANT_URL, so no test edit is needed here.
-        env:
-          DATABASE_URL: sqlite+aiosqlite:////tmp/p1b_parity_server.db
-          QDRANT_MODE: server
+      - name: Run the Qdrant parity suite (embedded store, temp SQLite)
+        # The lite stack owns Qdrant IN-PROCESS, so the embedded-folder half is
+        # the only half that has a store to run against (no server to point at).
         run: python -m pytest --confcutdir=tests/retrieval tests/retrieval/test_qdrant_parity.py -q
 
-      - name: Stop live services
+      - name: Stop the lite stack
         if: always()
         run: docker compose down -v
 
   smoke-tests:
-    name: Smoke tests (Docker Compose services)
+    name: Smoke tests (lite compose stack)
     runs-on: ubuntu-latest
     if: github.event_name == 'push' || contains(github.event.pull_request.title, 'smoke') || contains(github.event.pull_request.title, 'infrastructure')
 
     env:
-      DATABASE_URL: postgresql+asyncpg://postgres:password@localhost:5432/ragdb
-      POSTGRES_PORT: "5432"
-      DATABASE_POOL_SIZE: "5"
-      DATABASE_MAX_OVERFLOW: "5"
-      # Slim core: Redis/MinIO services were dropped — in-process Redis + fs storage.
+      # The smoke suite talks to the API the compose stack publishes; these
+      # host-side values are the same lite shape (there are no Postgres/Redis/
+      # MinIO/Qdrant services to point at any more).
+      LITE_MODE: "1"
+      DATABASE_URL: sqlite+aiosqlite:////tmp/orivory-ci-smoke.db
       REDIS_URL: ""
       JWT_SECRET_KEY: test-secret-key-change-in-production
       STORAGE_BACKEND: fs
       FS_STORAGE_PATH: /tmp/orivory-ci-storage
-      QDRANT_URL: http://localhost:6333
+      QDRANT_MODE: local
+      QDRANT_LOCAL_PATH: /tmp/orivory-ci-qdrant
+      ORIVORY_SMOKE_API: http://localhost:8000
       OPENROUTER_API_KEY: test-openrouter-key
       OPENROUTER_BASE_URL: https://openrouter.ai/api/v1
-      LLM_MODEL: openai/gpt-4o-mini
-      LLM_TEMPERATURE: "0.3"
-      LLM_MAX_TOKENS: "512"
       OPENAI_API_KEY: test-openai-key
-      EMBED_MODEL: text-embedding-3-small
-      EMBED_DIMENSIONS: "1536"
-      EMBED_BATCH_SIZE: "64"
-      JINA_API_KEY: test-jina-key
-      JINA_RERANKER_MODEL: jina-reranker-v2-base-multilingual
-      # R13: the per-call CAP, kept at the shipped default — CI is not a
-      # deployment, and a pre-R13 5 here is the same stale default the
-      # example files carried.
-      JINA_RERANKER_TOP_N: "20"
-      EVALUATOR_FAILURE_MODE: warn_only
-      RATE_LIMIT_PER_MINUTE: "600"
-      RATE_LIMIT_PER_DAY: "10000"
-      FRONTEND_URL: http://localhost:5173
-      ALLOWED_ORIGINS: http://localhost:5173,http://localhost:3000
       ENVIRONMENT: test
       LOG_LEVEL: INFO
 
@@ -476,43 +450,39 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt -r requirements-dev.txt
-          python -m pip install psycopg2-binary requests
 
       - name: Prepare Docker Compose env
-        run: cp .env.test.example .env
+        run: |
+          cp .env.test.example .env
+          mkdir -p data && chmod 777 data
 
-      - name: Start services
-        # The compose flow starts postgres + qdrant, then the one-shot
-        # `migrate` service, then `app` (depends_on: migrate completed). The
-        # smoke job must run the whole stack: TestAPIHealth's checks against
-        # localhost:8000 were a silent skip while only the two data services
-        # came up.
-        run: docker compose up -d
+      - name: Start the lite stack
+        # ONE service: the API with its MCP hub, SQLite store, embedded Qdrant
+        # and filesystem uploads. There is no migrate step and no data service
+        # to start first (the SQLite ladder runs at boot).
+        run: docker compose up -d --wait
 
-      - name: Wait for services to be healthy
+      - name: Wait for the lite API
         shell: bash
         run: |
           set -euo pipefail
           for i in {1..90}; do
-            if docker compose exec -T postgres pg_isready -U postgres -d ragdb 2>/dev/null && \
-               curl -fsS http://localhost:6333/readyz >/dev/null 2>&1 && \
-               curl -fsS http://localhost:8000/health >/dev/null 2>&1; then
-              echo "All services healthy!"
+            if curl -fsS http://localhost:8000/health >/dev/null 2>&1 && \
+               curl -fsS http://localhost:8000/ready >/dev/null 2>&1; then
+              echo "The lite stack is up."
               exit 0
             fi
-            echo "Waiting for services... ($i/90)"
+            echo "Waiting for the lite stack... ($i/90)"
             sleep 2
           done
           echo "Service startup timeout"
           docker compose ps
-          docker compose logs postgres qdrant migrate app
+          docker compose logs app
           exit 1
 
       - name: Run smoke tests
         run: python -m pytest tests/smoke -v -m smoke --tb=short
-        env:
-          DATABASE_URL: postgresql+asyncpg://postgres:password@postgres:5432/ragdb
 
-      - name: Stop services
+      - name: Stop the lite stack
         if: always()
         run: docker compose down -v

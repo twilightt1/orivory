@@ -729,29 +729,3 @@ async def test_a_reconcile_failure_is_logged_and_the_loop_keeps_going(monkeypatc
         await asyncio.wait_for(task, timeout=5)
 
     assert ("warning", "erasure receipt reconcile failed") in captured
-
-
-# ── R18: the admin endpoint is the same dict, admin-only ────────────────────
-
-
-async def test_the_admin_endpoint_returns_the_function_dict(monkeypatch):
-    """R18: `POST /admin/erasure/reconcile` follows the `/memories/reindex` shape."""
-    from app.api.v1 import admin
-
-    calls: list[dict] = []
-
-    async def fake_reconcile(**kwargs):
-        calls.append(kwargs)
-        return {"checked": 3, "upgraded": 2, "still_unverified": 1}
-
-    monkeypatch.setattr(erasure_service, "reconcile_erasure_receipts", fake_reconcile)
-
-    route = next(r for r in admin.router.routes
-                 if getattr(r, "path", None) == "/admin/erasure/reconcile")
-    assert "POST" in route.methods
-    # require_admin is wired as a dependency, never left to annotation resolution.
-    assert any(d.call.__name__ == "require_admin" for d in route.dependant.dependencies)
-
-    body = await route.endpoint(admin_user=SimpleNamespace(id=uuid.uuid4()))
-    assert body.model_dump() == {"checked": 3, "upgraded": 2, "still_unverified": 1}
-    assert calls == [{}]  # the endpoint passes no extra knobs

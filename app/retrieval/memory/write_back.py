@@ -13,8 +13,7 @@ embed is dropped, the reindex helper (``app.retrieval.memory.reindex``) can
 replay it from Postgres later.
 
 Centralizing these here removes the duplicate ``_safe_*`` helpers that
-previously lived in both ``api/v1/memories.py`` and ``ingestion/dispatcher.py``
-and could drift out of sync.
+previously lived in more than one write path and could drift out of sync.
 """
 from __future__ import annotations
 

@@ -1,8 +1,8 @@
 """Secret-safety of the diagnostics payload builder.
 
-NOTE (slim branch): the /api/v1/admin/* routes are unmounted, so the two
-HTTP-level tests that lived here were deleted with the route. This test
-stays: it guards the payload shape independent of any route.
+NOTE: the admin routes went with the full-stack surface, so the two
+HTTP-level tests that lived here were deleted with them. This test stays:
+it guards the payload shape independent of any route.
 """
 import json
 

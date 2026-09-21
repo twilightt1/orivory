@@ -183,7 +183,8 @@ async def setup_db():
         warnings.warn(
             f"Postgres unavailable at {TEST_DATABASE_URL} ({e}); "
             f"DB-backed tests will skip, unit tests still run. "
-            f"Start it with: docker compose up -d postgres",
+            f"The lite stack ships no Postgres service, so point "
+            f"TEST_DATABASE_URL at your own instance if you need them.",
             stacklevel=2,
         )
         yield

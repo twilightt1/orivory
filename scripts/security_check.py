@@ -27,6 +27,11 @@ class SecurityCheckFailure(RuntimeError):
     pass
 
 
+# The full-stack services the lite product no longer runs: none of them may
+# reappear in the prod override, and none may host-publish a port if one does.
+INTERNAL_SERVICES = ("postgres", "redis", "qdrant", "minio", "flower")
+
+
 def _read(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
 
@@ -105,9 +110,10 @@ def check_internal_ports_removed() -> CheckResult:
     file is a Compose merge no-op, so grepping the YAML can report PASS while
     the exposure persists — this check would have caught that class of bug.
 
-    When docker is unavailable, falls back to asserting the override file
-    uses merge-replacing `!override []` syntax (which at least cannot pass
-    with the no-op form).
+    The lite stack has no internal services at all — the single `app` service
+    publishes 8000 on purpose — so the merged rendering only has to prove it
+    keeps no host bind mount on app. When docker is unavailable, the override
+    file is checked statically for the same two properties.
     """
     import shutil
     import subprocess
@@ -132,17 +138,19 @@ def check_internal_ports_removed() -> CheckResult:
             pass  # fall through to the static syntax check below
 
     prod_text = _read("docker-compose.prod.yml")
-    if "!override []" in prod_text or "!reset []" in prod_text:
+    declared = [name for name in INTERNAL_SERVICES if re.search(rf"(?m)^  {name}:", prod_text)]
+    if not declared and "type: bind" not in prod_text:
         return CheckResult(
             "production internal ports",
             "PASS",
-            "docker unavailable — override file uses merge-replacing syntax",
+            "docker unavailable — prod override declares no internal service "
+            "and no host bind mount",
         )
     return CheckResult(
         "production internal ports",
         "FAIL",
-        "docker unavailable and override file lacks `!override []` — "
-        "plain `ports: []` is a Compose merge no-op",
+        f"docker unavailable and the prod override leaks: "
+        f"{declared or 'a host bind mount'}",
     )
 
 
@@ -154,7 +162,7 @@ def check_merged_prod_config(merged_yaml: str) -> CheckResult:
     retain a host `bind` mount (dev bind-mounts must not survive
     into prod). Pure function of the rendered text — unit-testable.
     """
-    internal = ["postgres", "redis", "qdrant", "minio", "flower"]
+    internal = list(INTERNAL_SERVICES)
     app_tier = ["app", "frontend"]
     leaks: list[str] = []
 
@@ -192,14 +200,6 @@ def check_flower_ops_profile() -> CheckResult:
     if "profiles:" in block and "- ops" in block:
         return CheckResult("flower ops profile", "PASS", "Flower is behind the ops profile in prod override")
     return CheckResult("flower ops profile", "FAIL", "Flower is not isolated behind the ops profile")
-
-
-def check_admin_diagnostics_auth() -> CheckResult:
-    admin_py = _read("app/api/v1/admin.py")
-    pattern = r'@router\.get\("/diagnostics".*?async def get_diagnostics\(.*?Depends\(require_admin\)'
-    if re.search(pattern, admin_py, flags=re.DOTALL):
-        return CheckResult("admin diagnostics auth", "PASS", "Diagnostics endpoint depends on require_admin")
-    return CheckResult("admin diagnostics auth", "FAIL", "Diagnostics endpoint does not clearly require admin auth")
 
 
 def check_diagnostics_summary_safe() -> CheckResult:
@@ -257,7 +257,6 @@ def run_checks() -> list[CheckResult]:
         check_provider_keys_required,
         check_internal_ports_removed,
         check_flower_ops_profile,
-        check_admin_diagnostics_auth,
         check_diagnostics_summary_safe,
         check_docs_disabled_in_production,
         check_env_example_placeholders,

@@ -26,7 +26,6 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import NullPool
 
 from app import database
-from app.api.v1 import admin as admin_api
 from app.api.v1.memories import list_memories
 from app.config import settings
 from app.database import Base
@@ -37,7 +36,6 @@ from app.models.memory_access_log import MemoryAccessLog
 from app.models.user import User
 from app.observability.fallbacks import fallback_counts, reset_fallback_counts
 from app.retrieval.memory import lexical_index, namespaces, vector_store
-from app.retrieval.memory import reindex as reindex_module
 from app.retrieval.memory import retriever as rmod
 from app.retrieval.memory.context import fetch_personal_context
 from app.retrieval.memory.correction import (
@@ -674,7 +672,7 @@ async def test_reindex_indexes_current_rows_only(db, monkeypatch):
     assert summary["reindexed"] == 2
 
 
-# ── P4a/T4: the namespace through the MCP tools, recall internals and admin ──
+# ── P4a/T4: the namespace through the MCP tools and the recall internals ─────
 
 TEAM = "team"  # the second namespace P4b brings: seeded directly, never by a client
 
@@ -989,30 +987,6 @@ async def test_reindex_indexes_only_the_callers_namespace(db, monkeypatch):
 
     assert set(indexed) == {str(mine.id)}
     assert summary["scanned"] == 1
-
-
-async def test_admin_reindex_passes_the_namespace_explicitly(db, monkeypatch):
-    """The admin backfill hands the helper the owner's namespace rather than
-    trusting its default (P4a: ``personal``, the only one there is)."""
-    owner = await _owner(db)
-    admin_user = await db.get(User, owner)
-    seen: dict = {}
-
-    def _fake(user_id, only_missing=True, *, namespace=None):
-        seen.update(user_id=user_id, only_missing=only_missing, namespace=namespace)
-        return {"user_id": user_id, "namespace": namespace,
-                "only_missing": only_missing, "scanned": 0,
-                "already_indexed": 0, "reindexed": 0, "pages": 0}
-
-    monkeypatch.setattr(reindex_module, "reindex_user_memories_sync", _fake)
-
-    out = await admin_api.reindex_memories(
-        admin_api.ReindexRequest(user_id=owner), admin_user=admin_user, db=db
-    )
-
-    assert out.queued is True
-    assert seen["user_id"] == str(owner)
-    assert seen["namespace"] == namespaces.personal_namespace(owner)
 
 
 # ── P4a Task 5: the erasure tool, the fallback order, the row-in-hand mirror ──

@@ -8,7 +8,9 @@ pytestmark = [pytest.mark.integration, pytest.mark.requires_infra]
 
 
 @pytest.mark.asyncio
-async def test_live_minio_bucket_put_get_remove():
+async def test_live_storage_bucket_put_get_remove():
+    """The live storage backend round-trips an object (filesystem on the lite
+    stack: STORAGE_BACKEND=fs — the MinIO service was dropped)."""
     object_name = "integration/live-minio-check.txt"
     payload = b"supportmind live minio integration"
 

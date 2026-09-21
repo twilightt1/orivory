@@ -1,9 +1,8 @@
 """P2/T9 — the graph build must really run on the memory write paths.
 
-Both write paths that create a ``Memory`` end in
+The write path that creates a ``Memory`` ends in
 ``write_back.safe_enqueue_graph_build``: the API/MCP path through
-``index_new_memory`` (shared with the importer) and the connector sync through
-``SourceSyncService._index_memories``. Driving that helper *on the event loop*
+``index_new_memory`` (shared with the importer). Driving that helper *on the event loop*
 left the build silently dead — the sync builder drives the extraction with
 ``asyncio.run`` (``app/graph/builder.py``), which raises inside a running loop,
 and the helper's best-effort ``except`` swallowed the ``RuntimeError``: the
@@ -48,7 +47,6 @@ from app.agents import llm_client
 from app.config import settings
 from app.database import sync_session
 from app.graph.builder import build_memory_graph_sync
-from app.ingestion.dispatcher import SourceSyncService
 from app.models.entity import Entity, MemoryEntity, Relation
 from app.models.memory import Memory
 from app.models.user import User
@@ -154,19 +152,6 @@ async def test_api_and_mcp_write_path_builds_the_graph_off_the_loop(store):
     )
 
 
-async def test_connector_sync_write_path_builds_the_graph(store):
-    """The connector-sync path (``_index_memories``), driven from a live loop."""
-    user_id, memory_id = await _seed_memory(store)
-    async with store.sessions() as db:
-        service = SourceSyncService(db)
-        await service._index_memories([str(memory_id)], user_id=user_id)
-    await _settle_graph_builds()
-
-    metadata, entities, links, relations = _graph_state(memory_id)
-    assert metadata.get("graph_extracted_at"), "graph build never ran on the sync path"
-    assert entities >= 1 and links >= 1 and relations >= 1
-
-
 async def test_the_sync_builder_refuses_a_running_loop_with_the_fix(store):
     """The builder cannot be driven from the loop: the error names the fix.
 
@@ -261,10 +246,10 @@ async def test_graph_failure_is_loud_and_never_fails_the_write(store, monkeypatc
         assert "graph store down" in str(record.exc_info[1]), "the traceback lost the cause"
 
 
-async def test_concurrent_syncs_never_exceed_the_llm_concurrency_limit(store, monkeypatch):
-    """N>limit memories synced at once: the shared gate caps the provider burst.
+async def test_concurrent_writes_never_exceed_the_llm_concurrency_limit(store, monkeypatch):
+    """N>limit memories written at once: the shared gate caps the provider burst.
 
-    The connector-sync path SCHEDULES one full extraction per synced memory
+    The write path SCHEDULES one full extraction per written memory
     (the write no longer awaits it, R27(p2)) and extraction used to call
     ``chat.completions.create`` outside ``LLM_MAX_CONCURRENCY`` entirely
     (P2/T9 fix round 1, I1: the gate only wrapped ``complete()`` /
@@ -309,11 +294,12 @@ async def test_concurrent_syncs_never_exceed_the_llm_concurrency_limit(store, mo
 
     seeds = [await _seed_memory(store) for _ in range(limit * 3)]
 
-    async def _sync(user_id, memory_id):
+    async def _write(_user_id, memory_id):
         async with store.sessions() as db:
-            await SourceSyncService(db)._index_memories([str(memory_id)], user_id=user_id)
+            memory = await db.get(Memory, memory_id)
+            await write_back.index_new_memory(memory)
 
-    await asyncio.gather(*(_sync(user_id, memory_id) for user_id, memory_id in seeds))
+    await asyncio.gather(*(_write(user_id, memory_id) for user_id, memory_id in seeds))
     # The writes no longer await the builds (R27(p2)): drain the scheduled
     # tasks so the peak/landing assertions describe the completed work.
     await _settle_graph_builds()

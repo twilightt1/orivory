@@ -6,7 +6,7 @@ endpoint signatures without importing it. Combined with
 annotations and silently registers auth/db dependencies as *query params*,
 meaning the endpoints run unauthenticated (or error) at runtime.
 
-See: app/api/v1/workspaces.py was missing ``from typing import Annotated``.
+Seen in the field: a router module that omitted ``from typing import Annotated``.
 """
 from __future__ import annotations
 
@@ -19,18 +19,12 @@ from fastapi.routing import APIRoute
 from app.main import app
 
 ROUTERS_TO_CHECK = [
-    "app.api.v1.workspaces",
     "app.api.v1.memories",
-    "app.api.v1.entities",
-    "app.api.v1.sources",
-    "app.api.v1.chat",
     "app.api.v1.auth",
-    "app.api.v1.admin",
-    "app.api.v1.analytics",
-    "app.api.v1.referral",
     "app.api.v1.agents",
     "app.api.v1.erasure",
     "app.api.v1.imports",
+    "app.api.v1.users",
 ]
 
 

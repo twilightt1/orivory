@@ -52,7 +52,7 @@ async def run_import(
 
     Raises ``ImportFormatError`` for undecodable JSON or an undetectable
     format; per-item problems are isolated into the ``failed`` counter
-    instead of failing the whole run (house pattern: SourceSyncService).
+    instead of failing the whole run.
     Indexing failures are counted for ordinary transient outages; a typed
     embedding contract failure is raised so the caller cannot miss a data
     integrity/readiness blocker.

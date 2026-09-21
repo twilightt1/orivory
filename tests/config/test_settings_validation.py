@@ -73,6 +73,17 @@ def test_production_rejects_default_minio_credentials():
         _production_settings(MINIO_ACCESS_KEY="minioadmin")
 
 
+def test_production_fs_storage_needs_no_minio_credentials():
+    """The lite prod stack pins STORAGE_BACKEND=fs; the MinIO credential gate
+    must not block a boot that never talks to MinIO."""
+    settings = _production_settings(
+        MINIO_ACCESS_KEY="", MINIO_SECRET_KEY="", STORAGE_BACKEND="fs"
+    )
+
+    assert settings.is_production is True
+    assert settings.STORAGE_BACKEND == "fs"
+
+
 def test_production_rejects_missing_config_encryption_key():
     with pytest.raises(ValidationError, match="CONFIG_ENCRYPTION_KEY"):
         _production_settings(CONFIG_ENCRYPTION_KEY="")
