@@ -426,4 +426,53 @@ def test_openclaw_session_shape():
 def test_detect_openclaw_and_gemini():
     assert detect_format({"memory_entries": [{"session_id": "s"}]}) == "openclaw"
     assert detect_format([{"session_id": "s", "memory_entries": []}]) == "openclaw"
-    assert detect_format({"memories": [], "export_version": "1"}) == "gemini"
+    # A PAM memory store WITHOUT the schema marker: memories + export_version.
+    # It used to be routed to the gemini adapter, which only reads
+    # ``conversations`` — a successful import that persisted ZERO memories.
+    assert detect_format({"memories": [], "export_version": "1"}) == "generic"
+
+
+def test_memories_export_imports_its_memories_not_nothing():
+    """id 348(a): ``{'memories': [...], 'export_version': ...}`` parsed 0 items."""
+    data = {
+        "export_version": "1.0",
+        "memories": [
+            {"id": "m1", "type": "fact", "content": "Alice ships the wave",
+             "temporal": {"created_at": "2026-07-03T08:00:00Z"}},
+            {"id": "m2", "type": "note", "content": "Bob reviews it"},
+        ],
+    }
+
+    items = parse_import(data)  # auto-detected
+
+    assert detect_format(data) == "generic"
+    assert [item.content for item in items] == ["Alice ships the wave", "Bob reviews it"]
+    assert [item.source_ref for item in items] == ["m1", "m2"]
+
+
+def test_gemini_conversations_dict_is_detected_and_parsed():
+    """id 348(b): the documented Gemini shape was ``unknown`` → ImportFormatError."""
+    data = {"conversations": [{"title": "Idea", "created_date": "2026-07-02T09:00:00Z",
+                               "messages": [{"role": "user", "text": "brainstorm"}]}]}
+
+    assert detect_format(data) == "gemini"
+    items = parse_import(data)  # the caller does not have to name the format
+    assert len(items) == 1 and "brainstorm" in items[0].content
+
+
+def test_gemini_lookalike_without_a_text_turn_is_not_gemini():
+    """id 348 follow-up: the detection must not swallow a non-Gemini shape.
+
+    ``{"conversations": [{"messages": [{"author":…, "content": {"parts": […]}}]}]}``
+    is NOT the documented Gemini shape (``messages: [{role, text}]``) and
+    ``parse_gemini`` reads only ``text``: detecting it made ``_safe_item``
+    swallow every conversation and report a SUCCESSFUL import of ZERO memories,
+    where the unknown path fails loudly.
+    """
+    data = {"conversations": [{"title": "Idea", "messages": [
+        {"author": "user", "content": {"parts": ["brainstorm"]}},
+    ]}]}
+
+    assert detect_format(data) == "unknown"
+    with pytest.raises(ImportFormatError, match="could not detect"):
+        parse_import(data)

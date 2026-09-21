@@ -258,7 +258,9 @@ async def test_an_unflipped_upgrade_reads_loud_not_empty(v2_db, tmp_path, monkey
 async def test_an_existing_p1b_backup_is_reused_never_overwritten(v2_db):
     eng, tmp_path = v2_db
     existing = tmp_path / "v2.sqlite.pre-p1b.bak"
-    existing.write_bytes(b"pre-p1b snapshot from the interrupted run")
+    with sqlite3.connect(existing) as conn:  # a REAL snapshot: the reuse path validates it
+        conn.execute("CREATE TABLE interrupted_run_marker (id INTEGER)")
+        conn.commit()
     before = existing.read_bytes()
 
     await database.bootstrap_sqlite()

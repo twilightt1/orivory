@@ -145,6 +145,32 @@ def test_rejects_invalid_reranker_timeout(timeout):
         _base_settings(JINA_RERANKER_TIMEOUT_SECONDS=timeout)
 
 
+def test_environment_whitespace_is_normalized_before_the_production_gate():
+    """`ENVIRONMENT='production '` is an operator typo, not a downgrade.
+
+    Unstripped, the whole production block was skipped silently: no CORS
+    check, no provider-key check, no CONFIG_ENCRYPTION_KEY check (and then
+    the dev fallback key), and the dev MinIO credentials were installed.
+    """
+    settings = _production_settings(ENVIRONMENT="production ")
+
+    assert settings.is_production is True
+    assert settings.ENVIRONMENT == "production"
+
+
+@pytest.mark.parametrize("spelling", ["production", " production", "PRODUCTION\t", "Production\n"])
+def test_production_spellings_with_whitespace_still_validate(spelling):
+    """Whatever the padding, production must still refuse an unsafe install."""
+    assert _production_settings(ENVIRONMENT=spelling).is_production is True
+
+    with pytest.raises(ValidationError, match="CONFIG_ENCRYPTION_KEY"):
+        _production_settings(ENVIRONMENT=spelling, CONFIG_ENCRYPTION_KEY="")
+    with pytest.raises(ValidationError, match="ALLOWED_ORIGINS"):
+        _production_settings(ENVIRONMENT=spelling, ALLOWED_ORIGINS="")
+    with pytest.raises(ValidationError, match="OPENAI_API_KEY"):
+        _production_settings(ENVIRONMENT=spelling, OPENAI_API_KEY="")
+
+
 def test_normalizes_evaluator_failure_mode():
     settings = _base_settings(EVALUATOR_FAILURE_MODE="FAIL_CLOSED")
 

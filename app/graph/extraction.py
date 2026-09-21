@@ -33,8 +33,12 @@ MAX_ENTITIES = 12
 MAX_RELATIONS = 24
 
 _DATE_RE = re.compile(r"\b(?:20\d{2}[-/][01]?\d[-/][0-3]?\d|[0-3]?\d[-/][01]?\d[-/]20\d{2})\b")
+# The separator is intra-line whitespace ON PURPOSE: the input is the
+# ``\n``-joined title/summary/tags/content, and ``\s+`` fused the last
+# capitalized word of one line with the first of the next ("Alice Python",
+# "Bob SQLite") — bogus entities that then travelled into relations.
 _CAPITALIZED_PHRASE_RE = re.compile(
-    r"\b(?:[A-Z][\wÀ-ỹ]+|[A-Z]{2,})(?:\s+(?:[A-Z][\wÀ-ỹ]+|[A-Z]{2,}|\d+)){0,3}\b",
+    r"\b(?:[A-Z][\wÀ-ỹ]+|[A-Z]{2,})(?:[^\S\n]+(?:[A-Z][\wÀ-ỹ]+|[A-Z]{2,}|\d+)){0,3}\b",
     re.UNICODE,
 )
 _ALLOWED_ENTITY_TYPES = set(ENTITY_TYPES)
@@ -69,6 +73,11 @@ class EntityExtractionResult:
     fallback_used: bool = False
     error: str | None = None
     raw_preview: str | None = None
+    #: The provider ANSWERED, but the payload broke the contract (a wrong-typed
+    #: field). A provider failure is not this: there the deterministic fallback
+    #: IS the product. A schema error is worth retrying, so the builder leaves
+    #: the memory rebuildable instead of stamping it as processed.
+    schema_error: bool = False
 
 
 @dataclass(frozen=True)
@@ -77,6 +86,10 @@ class RelationExtractionResult:
     fallback_used: bool = False
     error: str | None = None
     raw_preview: str | None = None
+    #: Same contract as ``EntityExtractionResult.schema_error`` (id 363's
+    #: sibling): the provider ANSWERED but the payload broke the field
+    #: contract, so the builder leaves the memory rebuildable.
+    schema_error: bool = False
 
 
 ENTITY_EXTRACTION_PROMPT = """You extract a personal knowledge graph from a second-brain memory.
@@ -350,7 +363,16 @@ async def extract_entities(memory: Memory, *, model: str | None = None) -> Entit
 
         raw_entities = parsed.data.get("entities", [])
         if not isinstance(raw_entities, list):
-            raw_entities = []
+            # A wrong-TYPED payload is a schema failure, not an empty success:
+            # returning [] with fallback_used=False made the caller stamp the
+            # memory as extracted, so nothing ever rebuilt its graph.
+            return EntityExtractionResult(
+                entities=_fallback_entities(memory),
+                fallback_used=True,
+                error="invalid_entity_schema: 'entities' must be a JSON array",
+                raw_preview=parsed.raw_preview,
+                schema_error=True,
+            )
         entities = [entity for item in raw_entities if isinstance(item, dict) for entity in [_entity_from_mapping(item)] if entity]
         return EntityExtractionResult(
             entities=_dedupe_entities(entities),
@@ -408,7 +430,17 @@ async def extract_relations(
 
         raw_relations = parsed.data.get("relations", [])
         if not isinstance(raw_relations, list):
-            raw_relations = []
+            # A wrong-TYPED payload is a schema failure, not an empty success —
+            # the same rule as ``entities`` above (id 363's sibling): returning
+            # [] with fallback_used=False made the caller stamp the memory as
+            # extracted, so its fallback-only graph was never rebuilt.
+            return RelationExtractionResult(
+                relations=_fallback_relations(entities),
+                fallback_used=True,
+                error="invalid_relation_schema: 'relations' must be a JSON array",
+                raw_preview=parsed.raw_preview,
+                schema_error=True,
+            )
         relations = [
             relation
             for item in raw_relations

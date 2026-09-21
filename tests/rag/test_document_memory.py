@@ -325,6 +325,69 @@ async def test_suppress_and_check_work_on_an_async_session(db):
     assert await is_suppressed_async(db, user_id=owner.id, source_ref="ref-b") is False
 
 
+async def test_a_lost_suppression_race_does_not_poison_the_callers_session(tmp_path, monkeypatch):
+    """id 70: the suppression row was added BEFORE the savepoint.
+
+    Two real async sessions on one file: the rival lands the row and commits
+    between this session's SELECT and its flush. The IntegrityError is the
+    savepoint's to absorb — the row was already added OUTSIDE it, so the flush
+    used to leave the outer transaction inactive and the caller's NEXT commit
+    died with PendingRollbackError (its unrelated work was lost).
+    """
+    from sqlalchemy import event
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+    from sqlalchemy.pool import NullPool
+
+    from app import database
+    from app.database import Base
+    from app.models.memory import Memory, MemorySuppression
+
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{tmp_path / 'suppression-race.sqlite'}", poolclass=NullPool
+    )
+    event.listen(engine.sync_engine, "connect", database._configure_sqlite_connection)
+    sessions = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False, autoflush=False)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    owner = _new_user("Owner")
+    async with sessions() as setup:
+        setup.add(owner)
+        await setup.commit()
+
+    # The winner of the race: the row is written and COMMITTED.
+    async with sessions() as winner:
+        assert await suppress_source_async(winner, user_id=owner.id, source_ref="doc-1") is True
+        await winner.commit()
+
+    async with sessions() as loser:
+        loser.add(Memory(user_id=owner.id, content="unrelated pending work", tags=[],
+                         source_type="manual_note"))
+        real_execute = loser.execute
+        stale = {"pending": True}
+
+        class _StaleRead:
+            def scalar_one_or_none(self):
+                return None  # what this session's SELECT saw before the winner committed
+
+        async def stale_execute(statement, *args, **kwargs):
+            if stale["pending"] and "FROM memory_suppressions" in str(statement):
+                stale["pending"] = False
+                return _StaleRead()
+            return await real_execute(statement, *args, **kwargs)
+
+        monkeypatch.setattr(loser, "execute", stale_execute)
+        assert await suppress_source_async(loser, user_id=owner.id, source_ref="doc-1") is True
+        await loser.commit()  # used to raise PendingRollbackError
+        assert loser.is_active is True
+
+    async with sessions() as check:
+        rows = (await check.execute(select(MemorySuppression))).scalars().all()
+        pending = (await check.execute(select(Memory).where(Memory.content == "unrelated pending work"))).scalars().all()
+    assert len(rows) == 1, "the ledger keeps ONE row for (user, source_ref)"
+    assert len(pending) == 1, "the caller's own work must still commit"
+    await engine.dispose()
+
+
 # ── pipeline projection query is tenant-scoped too ───────────────────────────
 
 

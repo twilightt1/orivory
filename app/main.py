@@ -18,6 +18,11 @@ from app.retrieval.vector_retriever import VectorUnavailableError
 
 log = structlog.get_logger()
 
+#: click's BOOL true-values, which is what parses uvicorn's ``--reload`` flag
+#: (and therefore its ``UVICORN_RELOAD`` env fallback). Everything else — the
+#: false spellings AND the empty string — is OFF.
+_RELOAD_TRUE_VALUES = frozenset({"1", "true", "t", "yes", "y", "on"})
+
 # The boot replays ONE bounded batch of intents before serving: the background
 # loop's first tick can be a whole interval away, and a booting app should not
 # make a user wait for it. Everything after that batch is
@@ -65,9 +70,16 @@ def _requested_processes() -> int:
     Gunicorn's worker counts — uvicorn reads ``--workers`` from
     ``UVICORN_WORKERS`` through its ``UVICORN_`` envvar prefix, so the env var
     alone is a multi-process launcher. ``UVICORN_RELOAD`` is uvicorn's env
-    fallback for the ``--reload`` flag.
+    fallback for the ``--reload`` flag: 1/true/t/yes/y/on mean ON, and 'false',
+    '0', 'no', 'off', 'f', 'n' and the empty string mean OFF — exactly the
+    spellings click's BOOL accepts. Garbage is NOT parity: click exits 2 on it
+    ('maybe', '2'), here it reads as OFF, because a launcher typo must not
+    become a boot refusal the operator cannot explain.
     """
-    if os.environ.get("UVICORN_RELOAD", "").strip() or "--reload" in sys.argv:
+    if (
+        os.environ.get("UVICORN_RELOAD", "").strip().casefold() in _RELOAD_TRUE_VALUES
+        or "--reload" in sys.argv
+    ):
         return 2  # a reloader: a supervisor plus the app it restarts
     for source in ("WEB_CONCURRENCY", "UVICORN_WORKERS"):
         workers = os.environ.get(source, "").strip()

@@ -129,6 +129,38 @@ def test_llm_json_parser_handles_fenced_json_and_none():
     assert empty.error == "empty_response"
     assert empty.raw_preview is None
 
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        '```text\nhello\n```\n{"a": 1}',        # an earlier NON-JSON fence
+        '```\ncode { }\n```\n{"a": 1}',          # an earlier EMPTY-object fence
+        'Sure!\n{"a": 1}',                       # plain prose
+    ],
+)
+def test_llm_json_parser_does_not_commit_to_the_first_fence(raw):
+    """The prompt asks for ONE object; an early fence that is not the payload
+    (a transcript, a shell sample, an empty `{}`) must not shadow the real
+    JSON that follows it — the graph builder's entity list lives in there."""
+    parsed = parse_llm_json_object(raw)
+
+    assert parsed.ok is True
+    assert parsed.data == {"a": 1}
+
+
+def test_llm_json_parser_prefers_the_labelled_json_fence():
+    parsed = parse_llm_json_object('intro {"note": "not the payload"}\n```json\n{"a": 1}\n```')
+
+    assert parsed.data == {"a": 1}
+
+
+def test_llm_json_parser_still_reports_unparseable_responses():
+    parsed = parse_llm_json_object("```json\n{not json at all}\n```")
+
+    assert parsed.ok is False
+    assert (parsed.error or "").startswith("invalid_json")
+
+
 def test_rrf_output_has_stable_id_and_best_child():
     """Fused chunks must carry a stable 'id' — CRAG indexes doc['id'] directly
     (regression: retrieval chunks had parent_id but no id -> KeyError)."""

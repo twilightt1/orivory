@@ -224,16 +224,19 @@ def suppress_source(db: Session, *, user_id, source_ref: str, reason: str = "for
                                          content_hash=content_hash)
         db.flush()
         return True
-    db.add(MemorySuppression(id=uuid.uuid4().hex, user_id=user_id,
-                             source_ref=source_ref, reason=reason,
-                             namespace=namespace, content_hash=content_hash))
+    # The row is ADDED INSIDE the savepoint: an object that is already pending
+    # when the savepoint begins is flushed by a rollback that cannot retract it,
+    # and the losing side of a check-then-insert race then left the caller's
+    # outer transaction inactive (its next commit died PendingRollbackError).
     # Flush so a replay inside the same transaction sees the row (the session
-    # does not autoflush) instead of racing the unique constraint. The
-    # savepoint scopes the race: a rival forget that landed the row first
-    # answers IntegrityError, the savepoint rolls back — and THIS caller's
-    # other work stays alive.
+    # does not autoflush) instead of racing the unique constraint: a rival
+    # forget that landed the row first answers IntegrityError, the savepoint
+    # rolls back — and THIS caller's other work stays alive.
     try:
         with db.begin_nested():
+            db.add(MemorySuppression(id=uuid.uuid4().hex, user_id=user_id,
+                                     source_ref=source_ref, reason=reason,
+                                     namespace=namespace, content_hash=content_hash))
             db.flush()
     except IntegrityError:
         pass
@@ -261,11 +264,14 @@ async def suppress_source_async(db: AsyncSession, *, user_id, source_ref: str,
                                          content_hash=content_hash)
         await db.flush()
         return True
-    db.add(MemorySuppression(id=uuid.uuid4().hex, user_id=user_id,
-                             source_ref=source_ref, reason=reason,
-                             namespace=namespace, content_hash=content_hash))
+    # Added INSIDE the savepoint, same reason as the sync face above (id 70):
+    # a pre-savepoint IntegrityError leaves the OUTER transaction inactive and
+    # the caller's next commit fails instead of landing its other work.
     try:
         async with db.begin_nested():
+            db.add(MemorySuppression(id=uuid.uuid4().hex, user_id=user_id,
+                                     source_ref=source_ref, reason=reason,
+                                     namespace=namespace, content_hash=content_hash))
             await db.flush()
     except IntegrityError:
         pass
