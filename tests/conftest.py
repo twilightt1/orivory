@@ -44,6 +44,9 @@ class MockRedisPipeline:
     def zremrangebyscore(self, *args):
         return self
 
+    def zremrangebyrank(self, *args):
+        return self
+
     def zcard(self, *args):
         return self
 
@@ -67,9 +70,11 @@ class MockRedisPipeline:
         for name, args in self._queued:
             await getattr(self._redis, name)(*args)
         self._queued.clear()
-        # Return (removed_count, current_count, added_count, ttl)
-        # current_count=0 means we're under the limit
-        return (0, 0, 1, 60)
+        # The REAL pipeline's reply shape — the limiter unpacks five values
+        # (removed, added, count, trimmed, expire) and raises ValueError on
+        # anything shorter. count=1 is under the limit, so tests are never
+        # throttled.
+        return (0, 1, 1, 0, True)
 
 
 class MockRedis:

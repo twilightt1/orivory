@@ -38,7 +38,10 @@ class _LogSink:
         self.calls: list[dict] = []
 
     def info(self, *args, **kwargs):
-        self.calls.append({"args": args, "kwargs": kwargs})
+        self.calls.append({"level": "info", "args": args, "kwargs": kwargs})
+
+    def error(self, *args, **kwargs):
+        self.calls.append({"level": "error", "args": args, "kwargs": kwargs})
 
 
 @pytest.fixture()
@@ -82,6 +85,48 @@ async def test_raising_handler_is_logged_as_500_and_reraised(sink):
     assert logged["duration_ms"] >= 0
     assert logged["request_id"]
     seen["request_id"] = logged["request_id"]
+
+
+@pytest.mark.asyncio
+async def test_the_failure_is_logged_at_error_with_the_traceback(sink):
+    """Finding 73: the traceback available at the catch site must not be dropped.
+
+    The access line stays (status/path/duration/request_id), but it carries the
+    exception now — INFO with a rendered ``"Type: message"`` discarded every
+    stack frame.
+    """
+
+    async def call_next(request):
+        raise RuntimeError("boom")
+
+    with pytest.raises(RuntimeError):
+        await LoggingMiddleware(app=_dummy_app).dispatch(_request(), call_next)
+
+    assert len(sink.calls) == 1  # the access line, not a second record
+    logged = sink.calls[0]
+    assert logged["level"] == "error"
+    assert logged["kwargs"]["exc_info"] is True
+    assert logged["kwargs"]["status"] == 500
+    assert logged["kwargs"]["request_id"]
+
+
+@pytest.mark.asyncio
+async def test_capture_logs_carries_exc_info_for_a_raising_handler():
+    """structlog sees ``exc_info`` on the record (not just a message string)."""
+    from structlog.testing import capture_logs
+
+    async def call_next(request):
+        raise ValueError("bad input")
+
+    with capture_logs() as logs:
+        with pytest.raises(ValueError):
+            await LoggingMiddleware(app=_dummy_app).dispatch(_request(), call_next)
+
+    record = next(entry for entry in logs if entry.get("event") == "request")
+    assert record["log_level"] == "error"
+    assert record["exc_info"] is True
+    assert record["status"] == 500
+    assert "ValueError" in record["error"]
 
 
 @pytest.mark.asyncio

@@ -28,8 +28,13 @@ async def check_rate_limit(
     # and let limit+1 requests through each window.
     pipe.zadd(key, {member: now})
     pipe.zcard(key)
+    # …then keep only the newest `limit` attempts. The members trimmed are the
+    # ones that leave the window FIRST, so every decision (and every release
+    # moment) is unchanged — while a hammering caller can no longer grow the
+    # key's sorted set with request volume: it is bounded by the limit.
+    pipe.zremrangebyrank(key, 0, -limit - 1)
     pipe.expire(key, window_seconds)
-    _, _, count, _ = await pipe.execute()
+    _, _, count, _, _ = await pipe.execute()
 
     if count > limit:
         log.warning("Rate limit exceeded", extra={"user_id": user_id})

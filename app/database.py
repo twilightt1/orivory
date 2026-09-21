@@ -32,7 +32,11 @@ IS_SQLITE = settings.DATABASE_URL.startswith("sqlite")
 # NOT NULL Boolean whose constant default IS the backfill — every pre-existing
 # user is OFF, spec §8.1 never lets a migration turn auto-expiration on — and
 # retention_days, NULLABLE: "no window chosen" is a real state, not 0).
-SQLITE_SCHEMA_VERSION = 7
+# v8 = the P3 freshness barrier's count index on index_outbox (DDL: an index on
+# (kind, tenant_id, status), the shape create_all installs — the barrier counts
+# this tenant's memory intents once per poll and the outbox is never pruned,
+# so without it every poll scanned the table).
+SQLITE_SCHEMA_VERSION = 8
 
 # Objects added by the v1 -> v2 ladder; excluded from the v1 shape check.
 V2_TABLES = ("index_outbox", "index_generations", "memory_suppressions")
@@ -397,6 +401,32 @@ def _upgrade_v6_to_v7(sync_conn) -> None:
         )
 
 
+def _upgrade_v7_to_v8(sync_conn) -> None:
+    """v7 -> v8: the freshness barrier's count index on ``index_outbox``.
+
+    Runs ONCE, on the version transition, and on a fresh install too (which has
+    nothing to back up). Pure additive index DDL, spelled exactly as
+    ``create_all`` installs it, so an upgraded file and a fresh one are
+    indistinguishable.
+
+    Why it exists: the barrier counts this tenant's ``kind='memory'`` intents
+    grouped by ``status`` on every poll (once per recall on the happy path, up
+    to ~40 times while a write is pending) and the outbox is never pruned
+    (no retention policy in P3), so without this index each count was a full
+    scan of a monotonically growing table — measured 0.86 / 22.5 / 114.9 ms at
+    5k / 100k / 500k rows.
+
+    Idempotent: ``IF NOT EXISTS``, so a crash between the DDL and the version
+    stamp resumes instead of failing on a duplicate index. A later boot never
+    re-runs it (it is gated on the starting version), and re-creating an index
+    an operator dropped is not a repair this ladder performs.
+    """
+    sync_conn.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS ix_index_outbox_kind_tenant_status"
+        " ON index_outbox(kind, tenant_id, status)"
+    )
+
+
 def _conn_sqlite_path(conn) -> str:
     """File path of the SQLite database behind an engine/connection."""
     path = conn.engine.url.database
@@ -428,7 +458,9 @@ def upgrade_sqlite_schema(conn) -> None:
     and never backfilled: NULL is the honest value for a row that predates them),
     then v6 -> v7 (the P4b opt-in retention settings on ``users``, ONCE — the
     NOT NULL ``retention_enabled`` default backfills every existing user OFF,
-    which is the only value a migration may choose for it).
+    which is the only value a migration may choose for it), then v7 -> v8 (the
+    P3 freshness barrier's count index on ``index_outbox``, ONCE — additive
+    index DDL, the exact shape ``create_all`` installs).
     Divergence fails closed — ``create_all`` is never used as an
     existing-schema migration mechanism.
     """
@@ -520,6 +552,16 @@ def upgrade_sqlite_schema(conn) -> None:
         # service reads — OFF for every pre-existing user (the column default
         # IS the backfill: spec §8.1 never lets a migration opt a user in).
         _upgrade_v6_to_v7(conn)
+    if version in (0, 1, 2, 3, 4, 5, 6, 7) and SQLITE_SCHEMA_VERSION >= 8:
+        # P3-freshness milestone backup: its OWN name, taken where the ladder
+        # stands now (v7, pre-count-index). The earlier files are snapshots of
+        # EARLIER states — nothing to inherit, so no rename — and are never
+        # overwritten. A fresh install has nothing to back up.
+        if tables:
+            _backup_before_ddl(path, suffix="pre-freshness-index")
+        # The v7 -> v8 DDL step, ONCE, on the transition; a fresh install runs
+        # it too, so every v8 install serves the barrier's count from an index.
+        _upgrade_v7_to_v8(conn)
     conn.execute(text(f"PRAGMA user_version = {SQLITE_SCHEMA_VERSION}"))
     integrity = conn.exec_driver_sql("PRAGMA integrity_check").fetchone()
     if integrity is None or integrity[0] != "ok":

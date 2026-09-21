@@ -41,7 +41,7 @@ from datetime import UTC, datetime, timedelta
 from random import uniform
 from typing import Any
 
-from sqlalchemy import or_, select, update
+from sqlalchemy import case, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
@@ -101,7 +101,18 @@ class IndexFreshnessTimeout(Exception):
     answers 503 with the typed body ``{"error": "index_freshness_timeout"}``
     (see ``app.main``). Raised by
     :func:`app.retrieval.memory.freshness.await_freshness`.
+
+    ``retry_after`` (a UTC datetime) is the earliest moment a pending intent of
+    that tenant can even be claimed — set ONLY when that is the reason the wait
+    was pointless (every pending intent is waiting out its backoff), and
+    ``None`` when the intents were still in flight when the budget ran out. It
+    is reported through the message and the warning log, never on the wire: the
+    503 body is pinned to the typed error alone (a signed gate).
     """
+
+    def __init__(self, *args: object, retry_after: datetime | None = None) -> None:
+        super().__init__(*args)
+        self.retry_after = retry_after
 
 
 def bump_revision(memory) -> int:
@@ -517,16 +528,29 @@ def _error_text(exc: Exception) -> str:
     return f"{type(exc).__name__}: {exc}"[:_ERROR_TEXT_LIMIT]
 
 
-async def drain_pending(*, batch_size: int = 50) -> dict:
+async def drain_pending(*, batch_size: int = 50, priority_tenant: str | None = None) -> dict:
     """Apply pending intents in seq order against the latest SQL state.
 
     Success, a stale skip and a contract mismatch all ack the row (``done`` /
     ``blocked``); only a transient failure stays ``pending`` with exponential
     backoff. A ``blocked`` intent is terminal — an embedding-contract mismatch
     must not be retried silently.
+
+    ``priority_tenant`` (the read-path barrier's own tenant) puts that tenant's
+    rows FIRST in the batch: the caller is waiting on them, and a foreign
+    backlog (a bulk import's chunk intents) otherwise fills every batch it
+    triggers. The background loop passes no tenant, so its seq fairness is
+    untouched — and within the batch the seq order still holds.
     """
     report = {"claimed": 0, "applied": 0, "skipped": 0, "blocked": 0, "failed": 0}
     now = datetime.now(UTC)
+    if priority_tenant is None:
+        order_by = [IndexOutbox.seq]
+    else:
+        order_by = [
+            case((IndexOutbox.tenant_id == priority_tenant, 0), else_=1),
+            IndexOutbox.seq,
+        ]
     async with AsyncSessionLocal() as db:
         rows = (
             await db.execute(
@@ -535,7 +559,7 @@ async def drain_pending(*, batch_size: int = 50) -> dict:
                     IndexOutbox.status == "pending",
                     or_(IndexOutbox.next_attempt_at.is_(None), IndexOutbox.next_attempt_at <= now),
                 )
-                .order_by(IndexOutbox.seq)
+                .order_by(*order_by)
                 .limit(batch_size)
             )
         ).scalars().all()

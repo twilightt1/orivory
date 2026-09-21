@@ -104,10 +104,16 @@ async def fetch_personal_context(
             seen.add(m.id)
             combined.append(m)
 
-    # Final sort + cap.
+    # Final sort + cap. Pinned rows are the documented "always include" set
+    # (module docstring, item 1), so they take their slots FIRST — a plain
+    # truncate dropped a pinned row older than the newest `cap` rows.
     combined.sort(key=lambda m: m.captured_at, reverse=True)
     if len(combined) > cap:
-        combined = combined[:cap]
+        pinned_ids = {m.id for m in pinned}
+        head = [m for m in combined if m.id in pinned_ids][:cap]
+        room = cap - len(head)
+        tail = [m for m in combined if m.id not in pinned_ids][:room] if room > 0 else []
+        combined = sorted(head + tail, key=lambda m: m.captured_at, reverse=True)
 
     log.info(
         "fetch_personal_context",

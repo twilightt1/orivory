@@ -324,6 +324,53 @@ async def test_stop_ends_the_task_within_the_bound(env, monkeypatch, caplog):
     assert "was destroyed" not in caplog.text
 
 
+async def test_a_backlog_burst_does_not_pay_a_producer_pass_per_batch(monkeypatch):
+    """Finding 559: the producer is evidence-shaped, not batch-shaped.
+
+    Every landed round used to run a full producer pass before ``continue``ing
+    (a DISTINCT user scan plus a full per-user memory load, per 50-row batch),
+    so its cost scaled with batches. It runs where the round EMPTIED the queue
+    now — a partial batch, which is every ordinary write — and on an idle tick.
+    """
+    full_rounds = 6
+    state = {"round": 0}
+    passes: list[int] = []  # the round index each producer pass saw
+
+    async def _drain(*, batch_size):
+        state["round"] += 1
+        if state["round"] > full_rounds:
+            stop.set()  # the burst is over: the test has seen what it needs
+        return {
+            "claimed": batch_size if state["round"] <= full_rounds else 1,
+            "applied": 1,
+            "skipped": 0,
+            "blocked": 0,
+            "failed": 0,
+        }
+
+    async def _noop():
+        return None
+
+    async def _consolidate():
+        passes.append(state["round"])
+
+    monkeypatch.setattr(drain_loop, "drain_once", _drain)
+    monkeypatch.setattr(drain_loop, "_reconcile_after_drain", _noop)
+    monkeypatch.setattr(drain_loop, "_retain_after_drain", _noop)
+    monkeypatch.setattr(drain_loop, "_consolidate_after_drain", _consolidate)
+
+    stop = asyncio.Event()
+    await asyncio.wait_for(
+        drain_loop.run_drain_loop(interval=30.0, batch_size=50, stop=stop), timeout=5
+    )
+
+    assert state["round"] == full_rounds + 1, "the burst really ran"
+    assert [seen for seen in passes if seen <= full_rounds] == [], (
+        "a saturated backlog must not pay a producer pass per batch")
+    assert passes and passes[0] == full_rounds + 1, (
+        "the queue-emptying round picks the new evidence up (R39)")
+
+
 async def test_stop_cancels_a_drain_that_overruns_the_bound(monkeypatch):
     """A hung drain must not hold the shutdown past the 5s bound."""
     stuck = asyncio.Event()

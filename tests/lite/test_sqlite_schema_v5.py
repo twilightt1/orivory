@@ -158,7 +158,7 @@ async def test_v4_install_upgrades_to_v5_with_the_p4_backup_and_personal_backfil
         contents = await _contents(conn)
         integrity = (await conn.execute(text("PRAGMA integrity_check"))).scalar_one()
 
-    assert version == database.SQLITE_SCHEMA_VERSION == 7
+    assert version == database.SQLITE_SCHEMA_VERSION == 8
     assert "namespace" in columns, "the v5 step adds the column"
     assert ("namespace", "VARCHAR(32)", 1, "'personal'", 0) in info, (
         "NOT NULL with the 'personal' default: that default IS the backfill")
@@ -236,7 +236,7 @@ async def test_rebooting_a_v5_install_is_a_no_op(v4_db):
         version, _tables = await _schema(conn)
         moved = (await conn.execute(text(
             "SELECT namespace FROM memories WHERE id = :id"), {"id": MEM_A})).scalar_one()
-    assert version == 7
+    assert version == 8
     assert moved == "moved", "a later boot never re-asserts a value"
     assert not list(tmp_path.glob(BACKUP)), "no transition, no backup"
 
@@ -254,7 +254,7 @@ async def test_a_later_boot_never_re_asserts_the_index(v4_db):
     async with eng.connect() as conn:
         version, _tables = await _schema(conn)
         assert await _index_sql(conn) is None, "a v5 boot does not re-create the index"
-    assert version == 7
+    assert version == 8
     assert list(tmp_path.glob(BACKUP)), "and it takes no second backup"
 
 
@@ -291,7 +291,7 @@ async def test_a_crashed_v5_step_resumes_and_never_duplicates(v4_db):
         version, _tables = await _schema(conn)
         assert await _index_sql(conn) is not None, "the step resumed and finished"
         assert await _namespaces(conn) == ["personal"] * 3, "and never duplicated a column"
-    assert version == 7
+    assert version == 8
 
 
 async def test_fresh_install_runs_the_v5_step_without_a_backup(tmp_path, monkeypatch):
@@ -311,7 +311,7 @@ async def test_fresh_install_runs_the_v5_step_without_a_backup(tmp_path, monkeyp
             assert await _index_sql(conn) is not None
             stored = (await conn.execute(text(
                 "SELECT namespace FROM memories WHERE id = :id"), {"id": MEM_A})).scalar_one()
-        assert version == 7
+        assert version == 8
         assert ("namespace", "VARCHAR(32)", 1, "'personal'", 0) in info
         assert stored == "personal", "an insert that omits the column gets the default"
         assert not list(Path(tmp_path).glob("*.pre-p4.bak")), "nothing to back up yet"
@@ -346,7 +346,7 @@ async def test_rollback_restamps_v4_and_roll_forward_re_runs_the_step(v4_db):
         version, _tables = await _schema(conn)
         assert await _namespaces(conn) == ["personal"] * 3
         assert await _index_sql(conn) is not None
-    assert version == 7
+    assert version == 8
     assert backup.read_bytes() == before, "an existing backup is never overwritten"
 
     async with eng.begin() as conn:  # the stamp alone: the column is already there
@@ -357,7 +357,7 @@ async def test_rollback_restamps_v4_and_roll_forward_re_runs_the_step(v4_db):
     async with eng.connect() as conn:
         version, _tables = await _schema(conn)
         assert await _namespaces(conn) == ["personal"] * 3
-    assert version == 7
+    assert version == 8
     assert backup.read_bytes() == before
 
 

@@ -759,6 +759,6 @@ def test_the_workflow_runs_this_gate_and_names_only_paths_that_exist():
 
 def test_the_gate_pins_the_lifecycle_vocabulary_and_the_ladder_stamp():
     """A silent drift in either constant would leave these bullets checking nothing."""
-    assert database.SQLITE_SCHEMA_VERSION == 7, "the gate is written for the terminal SQLite stamp"
+    assert database.SQLITE_SCHEMA_VERSION == 8, "the gate is written for the terminal SQLite stamp"
     assert C.MEMORY_STATES == ("current", "superseded", "dirty", "needs-check", "invalidated")
     assert PERSONAL == "personal"

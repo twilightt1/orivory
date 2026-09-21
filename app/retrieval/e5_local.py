@@ -17,7 +17,11 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
+import shutil
+import threading
 import urllib.request
+import uuid
 from pathlib import Path
 
 import numpy as np
@@ -56,11 +60,21 @@ PASSAGE_PREFIX = "passage: "
 
 _BATCH = 128
 _MAX_TOKENS = 512
+# A stalled download used to block warmup (and every worker behind it) with no
+# bound at all; the socket timeout is per-read, so a healthy slow link is fine.
+_DOWNLOAD_TIMEOUT_SECONDS = 60.0
 
 _sess = None
 _tok = None
 _asess = None
 _atok = None
+
+# One lock for every lazy native object: the four singletons are check-then-set
+# and building a session is slow, so two concurrent cold starts (a request
+# thread retrying while boot warmup is still running) used to build two native
+# sessions. Session and tokenizer share the lock so neither can race the
+# other's file validation.
+_init_lock = threading.Lock()
 
 
 def model_dir() -> Path:
@@ -81,13 +95,24 @@ def _digest(path: Path) -> str:
 
 
 def _download(url: str, dest: Path, expected_sha256: str) -> None:
-    tmp = dest.with_suffix(dest.suffix + ".part")
+    """Fetch ``url`` and publish it at ``dest`` only once its digest verifies.
+
+    The temp file is UNIQUE per attempt (pid + uuid): two cold starts — boot
+    warmup and a request-thread retry — used to share ``<dest>.part`` and
+    corrupt each other's download. It is also removed in ``finally``: an
+    interrupted or stalled attempt leaves no poisoned ``.part`` behind.
+    """
+    tmp = dest.with_name(f"{dest.name}.{os.getpid()}.{uuid.uuid4().hex}.part")
     log.warning("Downloading embedding model %s (~%s)", dest.name, url)
-    urllib.request.urlretrieve(url, tmp)
-    if _digest(tmp) != expected_sha256:
+    try:
+        with urllib.request.urlopen(url, timeout=_DOWNLOAD_TIMEOUT_SECONDS) as response, \
+                tmp.open("wb") as out:
+            shutil.copyfileobj(response, out)
+        if _digest(tmp) != expected_sha256:
+            raise ValueError(f"Downloaded {dest.name} failed SHA256 verification")
+        os.replace(tmp, dest)  # atomic publish: no reader ever sees a partial file
+    finally:
         tmp.unlink(missing_ok=True)
-        raise ValueError(f"Downloaded {dest.name} failed SHA256 verification")
-    tmp.rename(dest)
 
 
 def ensure_files() -> tuple[Path, Path]:
@@ -126,22 +151,27 @@ def _session_options():
 def _session():
     global _sess
     if _sess is None:
-        import onnxruntime as ort
+        with _init_lock:
+            if _sess is None:
+                import onnxruntime as ort
 
-        model, _ = ensure_files()
-        _sess = ort.InferenceSession(
-            str(model), sess_options=_session_options(), providers=["CPUExecutionProvider"]
-        )
+                model, _ = ensure_files()
+                _sess = ort.InferenceSession(
+                    str(model), sess_options=_session_options(),
+                    providers=["CPUExecutionProvider"],
+                )
     return _sess
 
 
 def _tokenizer():
     global _tok
     if _tok is None:
-        from tokenizers import Tokenizer
+        with _init_lock:
+            if _tok is None:
+                from tokenizers import Tokenizer
 
-        _, tok_path = ensure_files()
-        _tok = Tokenizer.from_file(str(tok_path))
+                _, tok_path = ensure_files()
+                _tok = Tokenizer.from_file(str(tok_path))
     return _tok
 
 
@@ -187,22 +217,27 @@ def ensure_arctic_files() -> tuple[Path, Path]:
 def _asession():
     global _asess
     if _asess is None:
-        import onnxruntime as ort
+        with _init_lock:
+            if _asess is None:
+                import onnxruntime as ort
 
-        model, _ = ensure_arctic_files()
-        _asess = ort.InferenceSession(
-            str(model), sess_options=_session_options(), providers=["CPUExecutionProvider"]
-        )
+                model, _ = ensure_arctic_files()
+                _asess = ort.InferenceSession(
+                    str(model), sess_options=_session_options(),
+                    providers=["CPUExecutionProvider"],
+                )
     return _asess
 
 
 def _atokenizer():
     global _atok
     if _atok is None:
-        from tokenizers import Tokenizer
+        with _init_lock:
+            if _atok is None:
+                from tokenizers import Tokenizer
 
-        _, tok_path = ensure_arctic_files()
-        _atok = Tokenizer.from_file(str(tok_path))
+                _, tok_path = ensure_arctic_files()
+                _atok = Tokenizer.from_file(str(tok_path))
     return _atok
 
 

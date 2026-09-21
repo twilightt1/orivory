@@ -34,6 +34,11 @@ class IndexOutbox(Base):
         UniqueConstraint("kind", "entity_id", "revision", "target_generation", "operation",
                          name="uq_index_outbox_intent"),
         Index("ix_index_outbox_pending", "status", "next_attempt_at"),
+        # The P3 freshness barrier's per-poll count (``tenant_id`` + ``kind``,
+        # grouped by ``status``) against a table that is never pruned: without
+        # this the count is a full scan of the outbox, once per poll, up to ~40
+        # times per recall (finding 564).
+        Index("ix_index_outbox_kind_tenant_status", "kind", "tenant_id", "status"),
     )
 
     seq: Mapped[int] = mapped_column(BigInteger().with_variant(Integer, "sqlite"),
