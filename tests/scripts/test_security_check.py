@@ -93,9 +93,11 @@ def test_host_bind_mount_fails_with_service_name():
 
 def test_prod_override_uses_replace_semantics():
     """The committed override file must use merge-replacing syntax, so the
-    no-op `ports: []` regression cannot silently return."""
+    dev bind mount of the data dir cannot silently survive into prod. (The
+    lite stack is a single service, so the list is replaced with the named
+    volume rather than emptied — the point is `!override`/`!reset`, not `[]`.)"""
     prod = (Path(__file__).resolve().parents[2] / "docker-compose.prod.yml").read_text()
-    assert "!override []" in prod or "!reset []" in prod, (
-        "docker-compose.prod.yml must use `!override []` (Compose 2.24+) — "
-        "plain `ports: []` is a merge no-op and leaves services exposed"
+    assert "!override" in prod or "!reset" in prod, (
+        "docker-compose.prod.yml must use `!override` (Compose 2.24+) — "
+        "a plain list is a Compose merge no-op and leaves the dev bind mount in place"
     )

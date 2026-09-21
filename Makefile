@@ -1,4 +1,4 @@
-.PHONY: dev build up down migrate seed test lint lint-full lint-fix format demo-smoke security-check check lite-build lite-run quickstart
+.PHONY: dev build up down test lint lint-full lint-fix format security-check check lite-build lite-run quickstart
 
 # ── Lite mode (one container, zero external services) ────────────────────────
 
@@ -15,7 +15,7 @@ lite-run:
 quickstart: lite-build lite-run
 	@echo "Orivory is up:  http://localhost:8000  (MCP: /mcp)"
 
-# ── Full stack (Postgres + Redis + Qdrant + MinIO; drain in-process) ────────
+# ── Compose (the same single-container lite stack) ──────────────────────────
 
 dev:
 	uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
@@ -29,19 +29,12 @@ down:
 build:
 	docker compose build
 
-migrate:
-	alembic upgrade head
-
-makemigration:
-	alembic revision --autogenerate -m "$(name)"
-
 # CI-safe unit tests only (skips live infra and Redis-bound auth tests).
 test:
 	python -m pytest tests -q --ignore=tests/integration --ignore=tests/test_auth.py
 
-# Targeted lint matching CI's narrow path list.
-lint:
-	ruff check app/main.py app/config.py app/agents app/services/health_service.py app/services/diagnostics_service.py app/storage.py app/retrieval app/api/v1/chat.py app/api/v1/sse.py app/api/v1/admin.py eval/run_eval.py eval/live_api_eval.py eval/metrics.py eval/reporting.py tests/api/test_health_api.py tests/api/test_sse.py tests/api/test_admin_diagnostics.py tests/api/conftest.py tests/rag/test_ai_hardening.py tests/rag/conftest.py tests/services/test_health_service.py tests/services/test_diagnostics_service.py tests/services/conftest.py tests/eval/test_eval_metrics.py tests/eval/test_live_api_eval.py tests/config/test_settings_validation.py tests/integration
+# Lint the paths CI lints (the same full-repo check).
+lint: lint-full
 
 # Full-repo lint (Phase 1-3 remediation pass).
 lint-full:
@@ -53,9 +46,6 @@ lint-fix:
 
 format:
 	ruff format app/
-
-demo-smoke:
-	python scripts/demo_smoke.py
 
 security-check:
 	python scripts/security_check.py

@@ -201,9 +201,10 @@ written to. Both rules are enforced before a byte is copied (default target:
 ## 5. Removal condition
 
 Keep this escape hatch for **exactly one release**. Delete §1-§4 (the Chroma
-rebuild), `scripts/rollback_to_chroma.py`, `requirements-rollback.txt` and
-`tests/migration/test_p1b_rollback.py` in the release after P1b (spec §12), and
-drop the retired store itself — the `LEGACY_CHROMA_PATH` directory
+rebuild), `scripts/rollback_to_chroma.py` and `requirements-rollback.txt` in the
+release after P1b (spec §12); the rollback test module that used to pin this path
+already went with the full-stack surface — and drop the retired store itself —
+the `LEGACY_CHROMA_PATH` directory
 (`Orivory_memories` + `rag_conv_*`) — once the window closes: nothing serves from
 it after `cutover`, so it is only disk at that point. From that release the only
 supported restore is `verify --restore-drill` plus a Qdrant snapshot restore.

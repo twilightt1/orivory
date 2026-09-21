@@ -132,7 +132,6 @@ P4B_CI_SUITES = (
 P4B_WIRED_ELSEWHERE = (
     "tests/mcp_hub/test_forget_tool.py",
     "tests/lite/test_sqlite_schema_v5.py",
-    "tests/api/test_dormant_router_acl.py",
     "tests/retrieval/test_visibility.py",
 )
 P4B_DOCS = (

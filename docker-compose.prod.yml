@@ -1,13 +1,20 @@
-# Production overrides — use with: docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+# Production overrides — use with:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# The lite stack has no internal services to hide: the only published port is
+# the API's own 8000. `!override` REPLACES the sequence (Compose merges
+# sequences otherwise), so the dev bind mount of ./data cannot survive into
+# prod — the deployment writes into a named volume instead.
 services:
   app:
     environment:
       ENVIRONMENT: production
-    volumes: !override []
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4
+      LITE_MODE: "1"
+    volumes: !override
+      - orivory-data:/data
+    # Embedded Qdrant is owned by exactly ONE process (the store folder is
+    # locked): a second worker dies on its first write. Keep workers at 1.
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1
 
-  postgres:
-    ports: !override []
-
-  qdrant:
-    ports: !override []
+volumes:
+  orivory-data:

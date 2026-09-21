@@ -18,26 +18,10 @@ from app.redis_client import get_redis
 
 log = logging.getLogger(__name__)
 
-# Cache configuration per route pattern
-CACHE_CONFIG = {
-    # Graph metrics - cache for 5 minutes
-    "/api/v1/discovery/metrics": {"ttl": 300, "key_prefix": "cache:metrics"},
-
-    # Session list - cache for 1 minute
-    "/api/v1/discovery/sessions": {"ttl": 60, "key_prefix": "cache:sessions"},
-
-    # Graph visualization - cache for 5 minutes
-    "/api/v1/discovery/graph": {"ttl": 300, "key_prefix": "cache:graph"},
-
-    # Insights list - cache for 2 minutes
-    "/api/v1/insights": {"ttl": 120, "key_prefix": "cache:insights"},
-
-    # Insights metrics - cache for 5 minutes
-    "/api/v1/insights/metrics": {"ttl": 300, "key_prefix": "cache:insights:metrics"},
-
-    # Workspaces list - cache for 1 minute
-    "/api/v1/workspaces": {"ttl": 60, "key_prefix": "cache:workspaces"},
-}
+# Cache configuration per route pattern. The routes this used to cover
+# (discovery / insights / workspaces) went with the full-stack surface, so no
+# route opts in today — the middleware stays mounted and simply passes through.
+CACHE_CONFIG: dict[str, dict] = {}
 
 
 def _get_cache_key(path: str, query_params: dict, user_id: str) -> str:

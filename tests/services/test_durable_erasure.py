@@ -584,55 +584,6 @@ async def test_delete_document_purges_chunks_after_the_commit(db, no_chroma, mon
     ])
 
 
-async def test_delete_session_enqueues_intents_and_purges_best_effort(db, no_chroma, monkeypatch):
-    from app.api.v1 import chat
-    from app.retrieval import vector_retriever
-
-    uid = await _owner(db)
-    conversation = Conversation(id=uuid.uuid4(), user_id=uid, title="session", document_count=1)
-    doc = Document(id=uuid.uuid4(), conversation_id=conversation.id, filename="f.pdf",
-                   file_path="uploads/f.pdf")
-    chunks = [_chunk(doc, index=i) for i in range(2)]
-    db.add_all([conversation, doc, *chunks])
-    await db.flush()
-    projected = _memory(uid, "projected", source_type="file_upload", source_ref=str(doc.id))
-    db.add(projected)
-    await db.commit()
-
-    purged: list[list[str]] = []
-    swept: list[tuple] = []
-    invalidated: list[str] = []
-
-    async def _vectors(ids):
-        purged.append([str(i) for i in ids])
-
-    async def _chunks(*args, **kwargs):
-        swept.append((args, kwargs))
-
-    async def _invalidate(conv_id):
-        invalidated.append(conv_id)
-
-    monkeypatch.setattr(vector_store, "delete_memories", _vectors)
-    monkeypatch.setattr(vector_retriever, "delete_conversation_chunks", _chunks)
-    monkeypatch.setattr(
-        "app.retrieval.bm25_retriever.bm25_retriever.publish_invalidate_async", _invalidate)
-
-    await chat.delete_session(session_id=conversation.id, current_user=SimpleNamespace(id=uid), db=db)
-
-    async with database.AsyncSessionLocal() as session:
-        assert await session.get(Conversation, conversation.id) is None
-        assert await session.get(Memory, projected.id) is None
-        assert await session.get(DocumentChunk, chunks[0].id) is None
-    assert sorted((row.entity_id, row.operation) for row in await _outbox_rows()) == sorted([
-        (projected.id.hex, "delete"),
-        (chunks[0].id.hex, "delete"),
-        (chunks[1].id.hex, "delete"),
-    ])
-    assert purged == [[str(projected.id)]]
-    assert swept == [((str(conversation.id),), {"user_id": str(uid)})]
-    assert invalidated == [str(conversation.id)]
-
-
 # ── entities left without memory links go with the closure ───────────────────
 
 

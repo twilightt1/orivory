@@ -7,15 +7,16 @@ import pytest
 import pytest_asyncio
 
 _TEST_ENV_DEFAULTS = {
-    "DATABASE_URL": "postgresql+asyncpg://postgres:password@localhost:55432/ragdb",
-    "REDIS_URL": "redis://localhost:6379/0",
+    # The lite shape these live modules run against: SQLite + embedded Qdrant +
+    # filesystem storage, i.e. the one container `docker compose up -d` boots.
+    "LITE_MODE": "1",
+    "DATABASE_URL": "sqlite+aiosqlite:////tmp/orivory-live-integration.db",
+    "REDIS_URL": "",
     "JWT_SECRET_KEY": "test-secret-key-change-in-production",
-    "MINIO_ENDPOINT": "localhost:9000",
-    "MINIO_ACCESS_KEY": "minioadmin",
-    "MINIO_SECRET_KEY": "minioadmin",
-    "MINIO_BUCKET": "rag-docs",
-    "MINIO_SECURE": "false",
-    "QDRANT_URL": "http://localhost:6333",
+    "STORAGE_BACKEND": "fs",
+    "FS_STORAGE_PATH": "/tmp/orivory-live-storage",
+    "QDRANT_MODE": "local",
+    "QDRANT_LOCAL_PATH": "/tmp/orivory-live-qdrant",
     "OPENROUTER_API_KEY": "test-openrouter-key",
     "OPENAI_API_KEY": "test-openai-key",
     "JINA_API_KEY": "test-jina-key",
@@ -32,9 +33,9 @@ pytestmark = [pytest.mark.integration, pytest.mark.requires_infra]
 async def db():
     """Session-scoped-style DB fixture for integration tests.
 
-    Tables are created by the Alembic `migrate` step that runs before this
-    suite in CI (`docker compose run --rm migrate`). Locally, run
-    `docker compose up -d migrate` first.
+    Tables come from the app's own SQLite bootstrap (`bootstrap_sqlite`, run by
+    the container at boot or by the first connection here); there is no
+    migration step to wait for any more.
     """
     from app.database import AsyncSessionLocal
 

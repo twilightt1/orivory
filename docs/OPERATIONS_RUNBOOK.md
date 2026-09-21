@@ -188,14 +188,16 @@ exactly as it did before the column existed.
   today, so the component is owed by whoever wires a live one — P4a AND P4b
   both left them unwired); and a namespace column on the outbox record (the
   applier re-reads the row and writes THAT row's namespace — R33).
-- **The fence, and its ceiling.** `tests/api/test_dormant_router_acl.py` scans
-  every `select(...)` that NAMES a memory model under `app/`, allowlisted by file
-  and statement count, alias-aware. Green there is NOT "every read is guarded":
+- **The fence, and its ceiling.** The repo-wide `select(...)` fence watched
+  every statement that NAMED a memory model under `app/`, allowlisted by file
+  and statement count, alias-aware — it was removed together with the dormant
+  full-stack routers whose surfaces it covered. Green there was never "every
+  read is guarded":
   `sqlalchemy.select` behind a module alias, `text()` queries, a model passed
   through a variable, `update`/`delete` writes and Python-side row checks
-  (`db.get` + `_owned`) are outside the scan. Those surfaces are pinned
-  behaviourally instead (`tests/retrieval/test_visibility.py`,
-  `tests/retrieval/test_p4a_gate.py`).
+  (`db.get` + `_owned`) are outside such a scan. Those surfaces stay pinned
+  behaviourally (`tests/retrieval/test_visibility.py`,
+  `tests/retrieval/test_p4a_gate.py`, `tests/retrieval/test_namespace_acl.py`).
 
 ### Rollback: a pre-P4 binary, and coming back
 

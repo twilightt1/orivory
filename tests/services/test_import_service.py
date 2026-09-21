@@ -228,8 +228,8 @@ async def test_run_import_empty_parse_creates_nothing(indexed):
 
 
 async def test_run_import_isolates_failed_items(indexed, monkeypatch):
-    """Per-item failures are isolated (house pattern: SourceSyncService) —
-    simulated via a Memory SUBCLASS that rejects one ref at construction.
+    """Per-item failures are isolated — simulated via a Memory SUBCLASS that
+    rejects one ref at construction.
     A plain replacement class would break the (real) dedup select below,
     so the seam stays a Memory and only row construction fails."""
     class _BoomMemory(Memory):

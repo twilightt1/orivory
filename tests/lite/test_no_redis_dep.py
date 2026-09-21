@@ -41,7 +41,6 @@ def test_lite_cache_stack_without_redis_package(no_redis_package, monkeypatch):
     import app.redis_client as rc
 
     importlib.reload(rc)
-    import app.services.settings_service  # noqa: F401 — must import without redis
 
     async def _roundtrip() -> None:
         client = await rc.get_redis()

@@ -17,8 +17,6 @@ The §9 P4 row, bullet by bullet — one test each:
   shared recall, MCP search/list) → test 1;
 * ... every WRITER (REST patch/delete/create-with-parent, MCP
   delete/correct/forget) → test 2;
-* ... every ADMIN surface (the reindex endpoint, whose request body cannot
-  carry a namespace — ruling R33) → test 3;
 * ... every EXPORT surface (the migration CLI's memory export; its
   ``namespace=None`` audit escape hatch is pinned as the documented residual)
   → test 4;
@@ -42,13 +40,12 @@ The §9 P4 row, bullet by bullet — one test each:
   ceiling is stated at the test: a meta-programmed reference slips through)
   → test 10;
 * the CI pin: the workflow runs this file, wires the P4a suites, keeps the
-  server-mode Qdrant parity run, names no path that does not exist, and cannot be
-  stood down by `--ignore`/`if:`/`continue-on-error` → test 11.
+  Qdrant parity suite wired somewhere, names no path that does not exist, and
+  cannot be stood down by `--ignore`/`if:`/`continue-on-error` → test 11.
 
 The gate is FALLIBLE by mutation (recorded in the task report): dropping
-``visibility.namespace_predicate``, the MCP ownership check, the reindex
-namespace or the export namespace each turns its bullet red on a copy of the
-tree.
+``visibility.namespace_predicate``, the MCP ownership check or the export
+namespace each turns its bullet red on a copy of the tree.
 
 ``TEAM`` is the namespace P4a deliberately cannot create (client input never
 sets a namespace): rows outside ``personal`` are seeded directly, the same
@@ -67,7 +64,6 @@ from types import SimpleNamespace
 import pytest
 import pytest_asyncio
 import yaml
-from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from qdrant_client import models as qm
 from sqlalchemy import event, text
@@ -77,7 +73,6 @@ from sqlalchemy.pool import NullPool
 
 import app.models  # noqa: F401 — register every ORM table on Base
 from app import database
-from app.api.v1 import admin as admin_api
 from app.database import Base, sync_session
 from app.main import app as asgi_app
 from app.mcp_hub import tools as hub_tools
@@ -91,12 +86,11 @@ from app.retrieval.memory import retriever as retriever_module
 from app.retrieval.memory.namespaces import PERSONAL
 from app.retrieval.memory.retriever import MemoryRetriever
 from app.services.agent_token_service import generate_token, hash_token
-from app.utils.dependencies import get_current_verified_user, require_admin
+from app.utils.dependencies import get_current_verified_user
 from tests.retrieval.test_p1b_gate import (
     _intents,
     _memory,
     _payloads,
-    _scroll_ids,
     _vector_for,
 )
 
@@ -118,7 +112,6 @@ P4_CI_SUITES = (
     "tests/retrieval/test_p4a_gate.py",
     "tests/retrieval/test_namespace_acl.py",
     "tests/lite/test_sqlite_schema_v5.py",
-    "tests/api/test_dormant_router_acl.py",
     "tests/retrieval/test_correction.py",
     "tests/services/test_compression_service.py",
     "tests/api/test_erasure_router.py",
@@ -180,32 +173,6 @@ def _auth_client(user) -> AsyncClient:
 
     asgi_app.dependency_overrides[get_current_verified_user] = _current_user
     return AsyncClient(transport=ASGITransport(app=asgi_app), base_url="http://gate")
-
-
-@pytest_asyncio.fixture
-async def admin_client(live):
-    """The dormant admin router, mounted the way a re-enable would mount it.
-
-    ``app/api/v1/admin.py`` is NOT mounted on the slim app (see
-    ``app/api/v1/router.py``), so the admin bullet's behavioural proof needs the
-    mount: same real SQL, plus the route itself.
-    """
-    mounted = FastAPI()
-    mounted.include_router(admin_api.router, prefix="/api/v1")
-
-    async def _admin():
-        admin = live.alice  # role is what ``require_admin`` reads
-        admin.role = "admin"
-        admin.onboarding_done = True
-        return admin
-
-    mounted.dependency_overrides[require_admin] = _admin
-    client = AsyncClient(transport=ASGITransport(app=mounted), base_url="http://gate")
-    try:
-        yield client
-    finally:
-        await client.aclose()
-        mounted.dependency_overrides.clear()
 
 
 def _mcp_seams(monkeypatch, principal) -> None:
@@ -311,50 +278,6 @@ async def test_writers_refuse_another_namespace_and_another_users_row(namespaced
             row = await db.get(Memory, memory_id)
             assert row is not None, f"{memory_id} was mutated outside the caller's namespace"
         assert (await db.get(Memory, team_id)).title != "hit"
-
-
-# ── 3. admin ─────────────────────────────────────────────────────────────────
-
-
-async def test_the_admin_reindex_cannot_widen_the_targets_namespace(namespaced, admin_client):
-    """The reindex embeds the target's OWN namespace, and nothing else.
-
-    The proof is a point that would APPEAR if the scan were unscoped: the
-    target's team twin has no vector, so an unscoped ``only_missing`` reindex
-    would embed it. The request body cannot carry a namespace (R33) — posting
-    one changes nothing. Bob is the target because his eligible set here is
-    exactly his two personal rows (no suppression, superseded or dirty rows to
-    reason about).
-    """
-    bob = namespaced.bob
-    generation = generation_name("memory")
-    # Both points start missing: Bob's own (so a write must happen and the
-    # reindex is proven to work) and the twin's (so an unscoped scan would
-    # visibly recreate it).
-    await vector_store.delete_memory(str(namespaced.bob_current.id))
-    await vector_store.delete_memory(str(namespaced.bob_team.id))
-    assert await vector_store.get_memory_ids_present(
-        [str(namespaced.bob_current.id), str(namespaced.bob_team.id)]) == set()
-
-    response = await admin_client.post(
-        "/api/v1/admin/memories/reindex",
-        json={"user_id": str(bob.id), "only_missing": True, "namespace": TEAM},
-    )
-
-    assert response.status_code == 200, response.text
-    body = response.json()
-    assert body["queued"] is True, body
-    assert "namespace=personal" in body["note"], body["note"]
-    assert "scanned=2" in body["note"], (
-        f"the scan counted the team twin too: {body['note']}")
-    present = await vector_store.get_memory_ids_present(
-        [str(namespaced.bob_current.id), str(namespaced.bob_extra.id),
-         str(namespaced.bob_team.id)])
-    assert present == {str(namespaced.bob_current.id), str(namespaced.bob_extra.id)}, (
-        "the reindex embedded a row outside the target's namespace")
-    assert str(namespaced.bob_team.id) not in _scroll_ids(generation)
-    assert "namespace" not in admin_api.ReindexRequest.model_fields, (
-        "a namespace is never derived from client input (R33)")
 
 
 # ── 4. export ────────────────────────────────────────────────────────────────
@@ -857,11 +780,11 @@ def test_the_workflow_runs_this_gate_and_names_only_paths_that_exist():
     for suite in P4_ERASURE_SUITES:
         assert suite in all_runs, f"{suite} is wired into no CI step at all"
 
-    parity = _step(workflow["jobs"]["integration"], "Run P1b Qdrant parity against the live server")
-    assert "tests/retrieval/test_qdrant_parity.py" in parity["run"]
-    assert parity["env"]["QDRANT_MODE"] == "server", (
-        "the T3 verification gap: IsEmptyCondition + the namespace payload index must run "
-        "against a REAL Qdrant server, not only embedded")
+    # The parity suite must stay wired SOMEWHERE: the lite product has no
+    # Qdrant server to run it against (embedded only), so the P1b step's
+    # embedded-folder run is the surviving home.
+    assert "tests/retrieval/test_qdrant_parity.py" in all_runs, (
+        "the Qdrant parity suite is wired into no CI step at all")
 
     # No dead path: pytest exits 4 on a missing target, and a stale mention in
     # the docs is the same lie told to a reader.

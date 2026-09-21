@@ -447,6 +447,11 @@ class Settings(BaseSettings):
             raise ValueError(f"Missing provider keys in production: {', '.join(missing)}")
 
     def _require_secure_minio_credentials(self) -> None:
+        if self.STORAGE_BACKEND != "minio":
+            # Filesystem storage (the lite stack's default in production):
+            # MinIO has no consumer here, so its credentials must not gate a
+            # boot that never talks to it.
+            return
         if not self.MINIO_ACCESS_KEY or not self.MINIO_SECRET_KEY:
             raise ValueError("MINIO_ACCESS_KEY and MINIO_SECRET_KEY must be set in production")
         if self.MINIO_ACCESS_KEY == "minioadmin" or self.MINIO_SECRET_KEY == "minioadmin":

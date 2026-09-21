@@ -1,7 +1,9 @@
 """
 Pytest configuration for smoke tests.
 
-Provides fixtures for Docker services and service discovery.
+The lite stack is ONE container — the API (with its MCP hub, embedded Qdrant,
+SQLite and filesystem storage) published on localhost:8000. There are no
+internal services to discover any more.
 """
 import pytest
 
@@ -16,36 +18,14 @@ def pytest_configure(config):
 @pytest.fixture(scope="session")
 def docker_services():
     """
-    Fixture that ensures Docker services are available.
+    Fixture that ensures the lite compose stack is available.
 
-    In CI, services are started via docker compose.
-    In local development, assumes services are running.
+    In CI, the stack is started via `docker compose up -d`.
+    In local development, assumes `docker compose up -d` is already running.
 
-    Returns a dict with service connection info.
+    Returns a dict with the one endpoint the lite stack exposes.
     """
     return {
-        "postgres": {
-            "host": "localhost",
-            "port": 5432,
-            "database": "ragdb",
-            "user": "postgres",
-            "password": "password",
-        },
-        "redis": {
-            "host": "localhost",
-            "port": 6379,
-            "db": 0,
-        },
-        "qdrant": {
-            "host": "localhost",
-            "port": 6333,
-        },
-        "minio": {
-            "host": "localhost",
-            "port": 9000,
-            "access_key": "minioadmin",
-            "secret_key": "minioadmin",
-        },
         "api": {
             "host": "localhost",
             "port": 8000,

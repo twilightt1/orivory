@@ -1,44 +1,32 @@
-# Shared runtime env for backend services (postgres + qdrant behind app).
-# LITE: compose targets the slim core — postgres + qdrant + app only.
-# Celery/Redis/MinIO/Flower/worker/beat were dropped (slim branch): lite
-# runs tasks eagerly in-process, storage on fs, embeddings local.
-x-backend-env: &backend-env
-  DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-password}@postgres:5432/${POSTGRES_DB:-orivory}
-  QDRANT_URL: http://qdrant:6333
-
+# The lite stack — ONE container, zero external services: SQLite canonical
+# store, in-process (embedded) Qdrant, in-memory caches, filesystem uploads,
+# background work eager in-process. Celery/Redis/MinIO/Flower and the
+# Postgres/Qdrant servers were dropped on the slim branch.
+#
+#   docker compose up -d          # http://localhost:8000  (MCP: /mcp)
+#
+# The host directory below holds EVERYTHING stateful — the paths come from
+# app/config.py: /data/orivory.db (SQLite), /data/qdrant (embedded Qdrant),
+# /data/uploads (uploaded files). On a Linux host make it writable by the
+# image's `app` user before the first boot:  mkdir -p data && chmod 777 data
 services:
-  # One-shot schema migration — runs before app so `docker compose up`
-  # never starts a server against a database without tables (the "silent
-  # empty-database" failure class). App gates on service_completed_successfully.
-  migrate:
-    build: .
-    env_file: .env
-    environment:
-      <<: *backend-env
-    depends_on:
-      postgres:
-        condition: service_healthy
-    command: alembic upgrade head
-    restart: "no"
-
   app:
     build: .
     ports:
       - "8000:8000"
     env_file: .env
     environment:
-      <<: *backend-env
-    depends_on:
-      postgres:
-        condition: service_healthy
-      qdrant:
-        condition: service_healthy
-      migrate:
-        condition: service_completed_successfully
+      LITE_MODE: "1"
+      # Pinned so a full-stack .env cannot silently retarget the lite store
+      # (env_file values lose to this block).
+      DATABASE_URL: sqlite+aiosqlite:////data/orivory.db
+      REDIS_URL: ""
+      QDRANT_MODE: local
+      QDRANT_LOCAL_PATH: /data/qdrant
+      STORAGE_BACKEND: fs
+      FS_STORAGE_PATH: /data/uploads
     volumes:
-      - ./app:/app/app
-      - ./.env:/app/.env
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+      - ./data:/data
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=2)\""]
       interval: 10s
@@ -46,46 +34,3 @@ services:
       retries: 5
       start_period: 20s
     restart: unless-stopped
-
-  postgres:
-    image: postgres:16-alpine
-    environment:
-      POSTGRES_DB: ${POSTGRES_DB:-orivory}
-      POSTGRES_USER: ${POSTGRES_USER:-postgres}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-password}
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-    ports:
-      - "${POSTGRES_PORT:-55432}:5432"
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d ${POSTGRES_DB:-orivory}"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
-    restart: unless-stopped
-
-  qdrant:
-    image: qdrant/qdrant
-    volumes:
-      - qdrantdata:/qdrant/storage
-    ports:
-      - "6333:6333"
-    healthcheck:
-      # /readyz is Qdrant's own readiness gate (200 only when shards are up).
-      # The image ships bash but no curl/wget, hence the /dev/tcp probe; the
-      # probe is proven against qdrant/qdrant (bash 5, HTTP 200 -> exit 0,
-      # unknown path -> exit 1).
-      test:
-        - CMD-SHELL
-        - >-
-          bash -c 'exec 3<>/dev/tcp/127.0.0.1/6333; printf "GET /readyz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n" >&3; grep -q "200 OK" <&3'
-      interval: 10s
-      timeout: 5s
-      retries: 8
-      start_period: 20s
-    restart: unless-stopped
-
-volumes:
-  pgdata:
-  qdrantdata:
