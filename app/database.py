@@ -540,7 +540,10 @@ async def bootstrap_sqlite() -> None:
         await conn.run_sync(upgrade_sqlite_schema)
     from app.services.local_owner import ensure_local_owner
 
-    async with AsyncSessionLocal() as session:
+    # Bound to the engine just migrated, NOT to AsyncSessionLocal: a caller
+    # that swapped `engine` (tests do) must not have the owner written into a
+    # different database than the schema.
+    async with AsyncSession(bind=engine) as session:
         await ensure_local_owner(session)
 
 
