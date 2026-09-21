@@ -115,6 +115,17 @@ async def lifespan(app: FastAPI):
     from app.database import bootstrap_sqlite
     await bootstrap_sqlite()
     log.info("SQLite schema bootstrapped")
+
+    # The install's ONE identity, created (or reused) at boot so the boot
+    # drain and the first request already have the owner row every per-user
+    # path keys on. Not part of the schema ladder: a pinned older binary must
+    # still boot against an older database (app/database.py:bootstrap_sqlite).
+    from app.database import AsyncSessionLocal
+    from app.services.local_owner import ensure_local_owner
+
+    async with AsyncSessionLocal() as session:
+        owner = await ensure_local_owner(session)
+    log.info("Local owner ready", email=owner.email)
     from app.retrieval.memory.drain_loop import start_drain_loop, stop_drain_loop
 
     # The session is built BEFORE the boot drain: the drain embeds too, and a

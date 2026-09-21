@@ -2,7 +2,9 @@
 # Orivory one-command installer — the `npx claude-mem install` equivalent.
 #
 # Bootstraps the lite deployment (single container: SQLite + in-process
-# Qdrant), creates the account + agent token, and proves first recall.
+# Qdrant), mints an agent token, and proves first recall. There is no signup:
+# the install has ONE identity (the local owner) and requests without a token
+# already ARE it, so the only credential worth creating is an agent token.
 # Needs curl + docker + python3 (JSON parsing only); everything idempotent.
 #
 #   curl -fsSL https://raw.githubusercontent.com/twilightt1/orivory/main/install.sh | bash
@@ -13,7 +15,7 @@ set -euo pipefail
 PORT="8000"
 DIR="${HOME}/.orivory"
 IMAGE="ghcr.io/twilightt1/orivory:lite"
-AGENT_NAME="openclaw-capture"
+AGENT_NAME="quickstart"
 WITH_CAPTURE=0
 
 say() { printf '\033[1;36m==>\033[0m %s\n' "$*"; }
@@ -61,26 +63,17 @@ curl -fsS "http://localhost:$PORT/health" >/dev/null 2>&1 \
 say "healthy: http://localhost:$PORT"
 
 API="http://localhost:$PORT/api/v1"
-EMAIL="you@example.com"
-PASS="change-me-12345"
 
-say "creating your account + agent token (copy-pasteable afterwards)"
-CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$API/auth/register" \
+say "creating your agent token (copy-pasteable afterwards)"
+# Reruns stay idempotent: revoke the client a previous run left behind first
+# (the token itself is shown once and never stored in the clear).
+for CID in $(curl -fsS "$API/agents" \
+  | python3 -c "import sys,json;print(' '.join(i['id'] for i in json.load(sys.stdin)['items'] if i['name']==\"$AGENT_NAME\"))"); do
+  curl -fsS -X DELETE "$API/agents/$CID" >/dev/null
+done
+AGENT_TOKEN=$(curl -fsS -X POST "$API/agents" \
   -H 'Content-Type: application/json' \
-  -d "{\"email\":\"$EMAIL\",\"password\":\"$PASS\"}")
-case "$CODE" in
-  201) say "account created" ;;
-  409) say "account exists, reusing it" ;;
-  *) warn "register failed (HTTP $CODE)"; exit 1 ;;
-esac
-TOKEN=$(curl -fsS -X POST "$API/auth/login" -H 'Content-Type: application/json' \
-  -d "{\"email\":\"$EMAIL\",\"password\":\"$PASS\"}" \
-  | python3 -c "import sys,json;print(json.load(sys.stdin)['access_token'])")
-curl -fsS -X POST "$API/auth/onboarding" -H "Authorization: Bearer $TOKEN" \
-  -H 'Content-Type: application/json' -d '{"display_name":"local user"}' >/dev/null
-AGENT_TOKEN=$(curl -fsS -X POST "$API/agents" -H "Authorization: Bearer $TOKEN" \
-  -H 'Content-Type: application/json' \
-  -d '{"name":"quickstart","scopes":["memory:read","memory:write"]}' \
+  -d "{\"name\":\"$AGENT_NAME\",\"scopes\":[\"memory:read\",\"memory:write\"]}" \
   | python3 -c "import sys,json;print(json.load(sys.stdin)['token'])")
 
 say "storing + recalling your first memory (zero API keys needed)"
@@ -101,7 +94,7 @@ fi
 
 cat <<EOF
 
-  Orivory (lite) is running — account, agent token, and first recall done.
+  Orivory (lite) is running — agent token and first recall done.
 
     API       : http://localhost:$PORT  (JSON only, no web UI in lite)
     Health    : http://localhost:$PORT/health
@@ -109,14 +102,17 @@ cat <<EOF
     MCP       : http://localhost:$PORT/mcp
     Agent key : $AGENT_TOKEN  (shown once — save it)
 
-  Your login: $EMAIL / $PASS  (change it: POST /api/v1/users/me/change-password)
+  Identity  : there is no login — this install IS one local owner
+              (LOCAL_OWNER_EMAIL, default owner@orivory.local). Requests with
+              no token already act as the owner; the agent key above is what
+              scopes an MCP client and what the ledger records.
 
   Point any MCP agent at the endpoint above with the agent key:
     {"mcp":{"servers":{"orivory":{"url":"http://localhost:$PORT/mcp",
       "transport":"streamable-http",
       "headers":{"Authorization":"Bearer $AGENT_TOKEN"}}}}}
 
-  Next: rerun this script any time (idempotent) or add keys for better
+  Next: rerun this script any time (it replaces its own agent token) or add keys for better
   recall: docker rm -f orivory-lite, then add -e JINA_API_KEY=... and rerun.
 
   Manage: docker logs -f orivory-lite | docker restart orivory-lite |

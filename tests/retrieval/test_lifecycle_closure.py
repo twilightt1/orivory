@@ -21,7 +21,7 @@ from app.retrieval.memory.visibility import (
     state_expression,
 )
 from app.services.digest_service import build_digest
-from app.utils.dependencies import get_current_verified_user
+from app.utils.dependencies import get_current_user
 from tests.retrieval.test_visibility import (
     _as_reader,
     _mem,
@@ -137,7 +137,7 @@ async def test_stats_excludes_invalidated_and_dirty(db, monkeypatch):
         return SimpleNamespace(id=owner)
 
     monkeypatch.setitem(app.dependency_overrides, get_db, session)
-    monkeypatch.setitem(app.dependency_overrides, get_current_verified_user, current_user)
+    monkeypatch.setitem(app.dependency_overrides, get_current_user, current_user)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.get("/api/v1/memories/stats")
 

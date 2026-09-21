@@ -1,35 +1,9 @@
-"""P4 hardening tests: email normalization, context budget, query limits."""
+"""P4 hardening tests: context budget, query limits."""
 from __future__ import annotations
 
 import pytest
 
 pytestmark = pytest.mark.rag
-
-
-class TestEmailNormalization:
-    def test_register_lowercases_full_address(self):
-        from app.schemas.auth import RegisterRequest
-
-        r = RegisterRequest(email="User.Name@Example.COM", password="secret12")
-        assert r.email == "user.name@example.com"
-
-    def test_login_strips_and_lowercases(self):
-        from app.schemas.auth import LoginRequest
-
-        r = LoginRequest(email="  MiXeD@Case.io  ", password="x")
-        assert r.email == "mixed@case.io"
-
-    def test_forgot_password_normalizes(self):
-        from app.schemas.auth import ForgotPasswordRequest
-
-        r = ForgotPasswordRequest(email="HELP@Domain.ORG")
-        assert r.email == "help@domain.org"
-
-    def test_otp_verify_normalizes(self):
-        from app.schemas.auth import OTPVerifyRequest
-
-        r = OTPVerifyRequest(email="A@B.Com", otp_code="123456")
-        assert r.email == "a@b.com"
 
 
 class TestChatRequestLimits:
@@ -46,5 +20,3 @@ class TestChatRequestLimits:
 
         req = ChatRequest(query="x" * 10_000)
         assert len(req.query) == 10_000
-
-

@@ -41,7 +41,7 @@ from app.services.agent_token_service import (
     hash_token,
     validate_scopes,
 )
-from app.utils.dependencies import get_current_verified_user
+from app.utils.dependencies import get_current_user
 
 router = APIRouter(prefix="/agents", tags=["agents"])
 
@@ -62,7 +62,7 @@ def _client_response(client: AgentClient) -> AgentClientResponse:
 @router.post("", response_model=AgentClientCreated, status_code=status.HTTP_201_CREATED)
 async def register_agent_client(
     body: AgentClientCreate,
-    current_user: Annotated[User, Depends(get_current_verified_user)],
+    current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> AgentClientCreated:
     """Register a new agent client. The plaintext token is returned once, here only."""
@@ -94,7 +94,7 @@ async def register_agent_client(
 
 @router.get("", response_model=AgentClientListResponse)
 async def list_agent_clients(
-    current_user: Annotated[User, Depends(get_current_verified_user)],
+    current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> AgentClientListResponse:
     """List the current user's agent clients (never includes token material)."""
@@ -113,7 +113,7 @@ async def list_agent_clients(
 # Declared BEFORE /{client_id} so "access-log" isn't parsed as a client_id.
 @router.get("/access-log", response_model=AccessLogListResponse)
 async def list_access_log(
-    current_user: Annotated[User, Depends(get_current_verified_user)],
+    current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
     agent_client_id: UUID | None = Query(default=None, description="Filter by agent client"),
     limit: int = Query(default=50, ge=1, le=200),
@@ -137,7 +137,7 @@ async def list_access_log(
 @router.delete("/{client_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def revoke_agent_client(
     client_id: UUID,
-    current_user: Annotated[User, Depends(get_current_verified_user)],
+    current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> None:
     """Revoke an agent client. Immediate and idempotent for the owner (204)."""

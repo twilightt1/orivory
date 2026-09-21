@@ -527,10 +527,14 @@ def upgrade_sqlite_schema(conn) -> None:
 
 
 async def bootstrap_sqlite() -> None:
-    """Create or upgrade the canonical SQLite schema for lite mode.
+    """Create or upgrade the canonical SQLite schema.
 
     Thin async wrapper over :func:`upgrade_sqlite_schema` (the one ladder
-    definition shared with the migration CLI).
+    definition shared with the migration CLI). It deliberately does NOTHING
+    else: a process whose terminal version is older than this file's ladder
+    must still be able to boot against an older database and stamp its own
+    version (tests/lite/test_sqlite_schema_v6.py). The install's single
+    identity is ensured by the app boot (app/main.py), not by the ladder.
     """
     if not IS_SQLITE:
         raise RuntimeError("bootstrap_sqlite() is only for SQLite deployments")

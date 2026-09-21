@@ -84,17 +84,20 @@ Or from a clone: `make quickstart`. Then:
 - **App**: http://localhost:8000 · MCP endpoint: http://localhost:8000/mcp
 - Connect an agent below — that's the whole setup.
 
-It is single-user by design (personal brain). Data persists in the
-`orivory-data` volume; the JWT secret is ephemeral per container unless you set
-`JWT_SECRET_KEY`. Provider keys are optional — with none set, the bundled local
-ONNX embedder is the default.
+It is single-user by design (personal brain), and that single user is built in:
+**there is no signup, login or password** — the install serves one local owner
+(`LOCAL_OWNER_EMAIL`, default `owner@orivory.local`) and a request without a
+token already IS that owner. Data persists in the `orivory-data` volume.
+Provider keys are optional — with none set, the bundled local ONNX embedder is
+the default.
 
 ### From a clone (docker compose — the same single container)
 
 ```bash
 git clone https://github.com/twilightt1/orivory.git
 cd orivory
-cp .env.example .env            # optional: add your LLM API key(s)
+cp .env.example .env            # docker compose reads this file; add your
+                                # LLM API key(s) here too
 
 docker compose up -d            # boots the app: SQLite + in-process Qdrant +
                                 # filesystem uploads — ingestion and the P3
@@ -110,9 +113,8 @@ per-dependency checks (sqlite, redis, storage, qdrant, mcp_hub).
 ### Connect an AI agent
 
 ```bash
-# 1. Register an agent client (as your logged-in user) — token shown ONCE
+# 1. Register an agent client — no login needed, the token is shown ONCE
 curl -X POST http://localhost:8000/api/v1/agents \
-  -H "Authorization: Bearer $ACCESS_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"name": "Claude Desktop", "scopes": ["memory:read", "memory:write"]}'
 ```
@@ -133,18 +135,21 @@ curl -X POST http://localhost:8000/api/v1/agents \
 ```
 
 Every tool call (`search_memory`, `add_memory`, `forget_memory`, …) is now
-scoped to that token and recorded in the ledger.
+scoped to that token and recorded in the ledger. The REST API (the curl calls
+above) belongs to the local owner and takes no token — the agent token is what
+makes an MCP client accountable.
 
 ### Bring your old brain along
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/imports \
-  -H "Authorization: Bearer $ACCESS_TOKEN" \
   -F "file=@conversations.json" -F "source_format=chatgpt"
 ```
 
 ChatGPT, Claude, PAM bundles and generic JSON are supported. Leave anytime —
-plain SQLite + JSON everywhere, export or query your data directly.
+plain SQLite + JSON everywhere, export or query your data directly. Add an
+agent token (`Authorization: Bearer oa_…`) to ledger the import under that
+agent instead of the owner.
 
 ## Project layout
 
@@ -168,7 +173,7 @@ orivory/
 
 | Doc | Contents |
 |---|---|
-| [docs/API.md](docs/API.md) | Full API reference: auth, chat, memories, MCP hub, erasure, imports |
+| [docs/API.md](docs/API.md) | Full API reference: identity, memories, MCP hub, erasure, imports |
 | [docs/how-it-works.html](docs/how-it-works.html) | The one-page explainer — how the hub works, honestly compared | 
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System architecture — hub spine, agents, retrieval, data model |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | Shipped milestones and open follow-ups |

@@ -7,7 +7,6 @@ from pydantic import ValidationError
 os.environ.setdefault(
     "DATABASE_URL", f"sqlite+aiosqlite:///{tempfile.mkdtemp(prefix='orivory-config-')}/config-test.db"
 )
-os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-change-in-production")
 
 from app.config import Settings
 
@@ -17,7 +16,6 @@ _SQLITE_URL = "sqlite+aiosqlite:////tmp/orivory-config-test.db"
 def _base_settings(**overrides):
     values = {
         "DATABASE_URL": _SQLITE_URL,
-        "JWT_SECRET_KEY": "dev-secret-key",
         "ALLOWED_ORIGINS": "http://localhost:3000,http://localhost:5173",
         "ENVIRONMENT": "development",
     }
@@ -28,7 +26,6 @@ def _base_settings(**overrides):
 def _production_settings(**overrides):
     values = {
         "DATABASE_URL": _SQLITE_URL,
-        "JWT_SECRET_KEY": "production-secret-key-with-more-than-32-characters",
         "OPENROUTER_API_KEY": "«redacted:sk-…»",
         "OPENAI_API_KEY": "«redacted:sk-…»",
         "JINA_API_KEY": "jina-production",
@@ -40,14 +37,6 @@ def _production_settings(**overrides):
     return Settings(_env_file=None, **values)
 
 
-def test_unset_jwt_secret_gets_an_ephemeral_one():
-    """The single-user self-host keeps working out of the box: an unset
-    JWT_SECRET_KEY is generated at load (tokens live until a restart)."""
-    settings = _base_settings(JWT_SECRET_KEY="")
-
-    assert len(settings.JWT_SECRET_KEY) >= 32
-
-
 def test_zerokey_embeddings_default_to_the_local_model():
     """No embedding key means the bundled local ONNX model — the zero-cost
     path a fresh self-host boots with."""
@@ -56,14 +45,11 @@ def test_zerokey_embeddings_default_to_the_local_model():
     assert settings.USE_LOCAL_EMBEDDINGS is True
 
 
-def test_production_rejects_placeholder_jwt_secret():
-    with pytest.raises(ValidationError, match="JWT_SECRET_KEY"):
-        _production_settings(JWT_SECRET_KEY="change-me-to-a-random-256-bit-secret")
-
-
-def test_production_rejects_short_jwt_secret():
-    with pytest.raises(ValidationError, match="at least 32 characters"):
-        _production_settings(JWT_SECRET_KEY="too-short")
+def test_local_owner_email_is_the_default_identity():
+    """There is no account auth: the install's identity is one configured
+    email, defaulted so a fresh self-host boots with an owner."""
+    assert _base_settings().LOCAL_OWNER_EMAIL == "owner@orivory.local"
+    assert _base_settings(LOCAL_OWNER_EMAIL="me@example.com").LOCAL_OWNER_EMAIL == "me@example.com"
 
 
 def test_production_rejects_wildcard_cors():

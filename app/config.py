@@ -49,20 +49,21 @@ class Settings(BaseSettings):
     APP_PORT: int = 8000
 
 
-    JWT_SECRET_KEY: str = ""  # auto-generated (ephemeral) when unset
-    JWT_ALGORITHM: str = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 15
-    REFRESH_TOKEN_EXPIRE_DAYS: int = 7
+    # ── Identity (single-operator install) ────────────────────────────────────
+    # There is no account auth: every local request IS the owner, and this is
+    # the key of the one ``users`` row that owns everything (agent tokens, the
+    # access ledger, quotas, retention, erasure). See
+    # app/services/local_owner.py — an existing row with this email is reused
+    # untouched.
+    LOCAL_OWNER_EMAIL: str = "owner@orivory.local"
 
-    # Symmetric key for encrypting connector secrets (Source.config) at rest.
-    # Must be a urlsafe-base64 32-byte Fernet key. When empty in non-production
-    # a key is derived from JWT_SECRET_KEY so local dev works out of the box;
-    # production requires an explicit value (see _validate_production_settings).
+    # Symmetric key for encrypting secrets stored at rest (Source.config).
+    # Must be a urlsafe-base64 32-byte Fernet key. Production requires an
+    # explicit value (see _validate_production_settings); in non-production an
+    # unset key falls back to a documented local-dev key (app/utils/crypto.py).
     CONFIG_ENCRYPTION_KEY: str = ""
 
 
-    GOOGLE_CLIENT_ID: str = ""
-    GOOGLE_CLIENT_SECRET: str = ""
     API_BASE_URL: str = "http://localhost:8000"
 
     # ── App identity ──────────────────────────────────────────────────────────────
@@ -70,17 +71,6 @@ class Settings(BaseSettings):
     APP_NAME: str = "Orivory"
     APP_TAGLINE: str = "Personal AI Second Brain"
     CONTACT_EMAIL: str = "hello@orivory.local"
-
-    # ── Email ─────────────────────────────────────────────────────────────────────
-    SENDGRID_API_KEY: str = ""
-    EMAIL_FROM: str = "noreply@orivory.local"
-    EMAIL_FROM_NAME: str = "Orivory"
-    # When SendGrid is not configured, emails are mocked. By default we log
-    # only metadata (recipient, subject, body length) to avoid leaking OTP /
-    # reset tokens into stdout. Set to True in development to log the full
-    # body at DEBUG level.
-    EMAIL_MOCK_VERBOSE: bool = False
-
 
     LEDGER_RETENTION_DAYS: int = 90
     # Compression-before-storage (claude-mem adopt-learn): off by default —
@@ -294,12 +284,9 @@ class Settings(BaseSettings):
     def _apply_lite_defaults(self) -> "Settings":
         """Zero-external-services defaults, applied unconditionally.
 
-        Ephemeral JWT secret when unset: this is a single-user personal
-        deployment; tokens survive only until the container restarts.
+        This is a single-user personal deployment: no accounts, no token
+        signing keys, no external services to configure.
         """
-        if not self.JWT_SECRET_KEY:
-            import secrets
-            self.JWT_SECRET_KEY = secrets.token_urlsafe(48)
         # Same flip for Qdrant: no API key + a localhost URL means there is
         # no server to talk to, so own a local folder instead.
         if (
@@ -374,7 +361,6 @@ class Settings(BaseSettings):
             raise ValueError("JINA_RERANKER_TIMEOUT_SECONDS must be > 0")
 
     def _validate_production_settings(self) -> None:
-        self._require_strong_jwt_secret()
         self._require_explicit_cors_origins()
         self._require_provider_keys()
         self._require_config_encryption_key()
@@ -385,20 +371,6 @@ class Settings(BaseSettings):
                 "CONFIG_ENCRYPTION_KEY must be set in production "
                 "(generate with: python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\")"
             )
-
-    def _require_strong_jwt_secret(self) -> None:
-        placeholders = {
-            "change-me",
-            "change-me-to-a-random-256-bit-secret",
-            "test-secret-key-change-in-production",
-            "secret",
-            "your-secret-key",
-        }
-        normalized_secret = self.JWT_SECRET_KEY.strip().casefold()
-        if normalized_secret in placeholders or "change-me" in normalized_secret:
-            raise ValueError("JWT_SECRET_KEY must not use a placeholder value in production")
-        if len(self.JWT_SECRET_KEY) < 32:
-            raise ValueError("JWT_SECRET_KEY must be at least 32 characters in production")
 
     def _require_explicit_cors_origins(self) -> None:
         origins = [origin.strip() for origin in self.ALLOWED_ORIGINS.split(",") if origin.strip()]

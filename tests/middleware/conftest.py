@@ -9,7 +9,6 @@ import tempfile
 
 _MW_TEST_ENV_DEFAULTS = {
     "DATABASE_URL": f"sqlite+aiosqlite:///{tempfile.mkdtemp(prefix='orivory-middleware-')}/mw-test.db",
-    "JWT_SECRET_KEY": "test-secret-key-for-testing-only",
     "ENVIRONMENT": "test",
 }
 

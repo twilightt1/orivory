@@ -20,7 +20,6 @@ from app.main import app
 
 ROUTERS_TO_CHECK = [
     "app.api.v1.memories",
-    "app.api.v1.auth",
     "app.api.v1.agents",
     "app.api.v1.erasure",
     "app.api.v1.imports",

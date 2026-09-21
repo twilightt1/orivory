@@ -27,7 +27,7 @@ from app.schemas.Orivory import (
     ErasureReceiptListResponse,
 )
 from app.services.erasure_service import erase_memories, list_receipts
-from app.utils.dependencies import get_current_verified_user
+from app.utils.dependencies import get_current_user
 
 router = APIRouter(prefix="/erasure-receipts", tags=["erasure"])
 
@@ -35,7 +35,7 @@ router = APIRouter(prefix="/erasure-receipts", tags=["erasure"])
 @router.post("", response_model=ErasureReceiptItem, status_code=status.HTTP_201_CREATED)
 async def create_erasure_receipt(
     body: ErasureReceiptCreate,
-    current_user: Annotated[User, Depends(get_current_verified_user)],
+    current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> ErasureReceiptItem:
     """Erase the given memories (caller-owned only) and return the receipt."""
@@ -45,7 +45,7 @@ async def create_erasure_receipt(
 
 @router.get("", response_model=ErasureReceiptListResponse)
 async def list_erasure_receipts(
-    current_user: Annotated[User, Depends(get_current_verified_user)],
+    current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
@@ -61,7 +61,7 @@ async def list_erasure_receipts(
 @router.get("/{receipt_id}", response_model=ErasureReceiptItem)
 async def get_erasure_receipt(
     receipt_id: UUID,
-    current_user: Annotated[User, Depends(get_current_verified_user)],
+    current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> ErasureReceiptItem:
     """Fetch one receipt. Foreign or unknown ids read as 404 (no existence leak)."""

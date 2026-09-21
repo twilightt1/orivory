@@ -1104,7 +1104,6 @@ import uuid
 
 os.environ["USE_LOCAL_EMBEDDINGS"] = "true"
 os.environ["LOCAL_EMBED_MODEL"] = "arctic"
-os.environ["JWT_SECRET_KEY"] = "child-secret"
 os.environ["DATABASE_URL"] = os.environ["GATE_CHILD_DB"]
 os.environ["QDRANT_MODE"] = "local"
 os.environ["QDRANT_LOCAL_PATH"] = os.environ["GATE_CHILD_QDRANT"]

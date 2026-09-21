@@ -42,7 +42,7 @@ from app.retrieval.memory import drain_loop
 from app.retrieval.memory.correction import state_of
 from app.retrieval.memory.outbox import KIND_MEMORY, OPERATION_UPSERT
 from app.retrieval.memory.visibility import not_dirty_predicate
-from app.schemas.auth import RetentionSettingsRequest, UserResponse
+from app.schemas.users import RetentionSettingsRequest, UserResponse
 from app.services import erasure_service
 from app.services.erasure_service import erase_memories, soft_forget
 from app.services.retention_service import RETENTION_REASON, RetentionReport, run_retention

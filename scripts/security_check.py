@@ -39,7 +39,6 @@ def _read(path: str) -> str:
 def _base_production_settings(**overrides) -> dict[str, object]:
     values: dict[str, object] = {
         "DATABASE_URL": "sqlite+aiosqlite:////data/orivory.db",
-        "JWT_SECRET_KEY": "production-secret-key-with-more-than-32-characters",
         "CONFIG_ENCRYPTION_KEY": "2CiSbMXhP2zwWOAk7nkEcGABAJSJnt7hl_SVcMBnlnk=",
         "OPENROUTER_API_KEY": "sk-or-production",
         "OPENAI_API_KEY": "sk-production",
@@ -67,14 +66,6 @@ def check_production_accepts_safe_settings() -> CheckResult:
     if not settings.is_production:
         return CheckResult("production safe settings", "FAIL", "Production settings did not normalize to production")
     return CheckResult("production safe settings", "PASS", "Complete safe production settings are accepted")
-
-
-def check_jwt_placeholder_rejected() -> CheckResult:
-    return _expect_validation_error(
-        "placeholder JWT secret",
-        "JWT_SECRET_KEY",
-        JWT_SECRET_KEY="change-me-to-a-random-256-bit-secret",
-    )
 
 
 def check_wildcard_cors_rejected() -> CheckResult:
@@ -136,8 +127,8 @@ def check_internal_ports_removed() -> CheckResult:
         return CheckResult(
             "production internal ports",
             "PASS",
-            "docker unavailable — prod override declares no internal service "
-            "and no host bind mount",
+            "static check only (docker compose config failed or no docker) — prod "
+            "override declares no internal service and no host bind mount",
         )
     return CheckResult(
         "production internal ports",
@@ -197,6 +188,9 @@ def check_flower_ops_profile() -> CheckResult:
 
 def check_diagnostics_summary_safe() -> CheckResult:
     summary = build_config_summary()
+    # A denylist held even where the setting itself is gone (JWT_SECRET_KEY
+    # left with account auth): denying a name costs nothing, and this is what
+    # a re-introduced secret would have to get past.
     forbidden_keys = {
         "DATABASE_URL",
         "JWT_SECRET_KEY",
@@ -226,7 +220,7 @@ def check_docs_disabled_in_production() -> CheckResult:
 def check_env_example_placeholders() -> CheckResult:
     env_example = _read(".env.example")
     expected_markers = [
-        "JWT_SECRET_KEY=change-me-to-a-random-256-bit-secret",
+        "LOCAL_OWNER_EMAIL=owner@orivory.local",
         "DATABASE_URL=sqlite+aiosqlite:////data/orivory.db",
         "STORAGE_BACKEND=fs",
         "ENVIRONMENT=development",
@@ -240,7 +234,6 @@ def check_env_example_placeholders() -> CheckResult:
 def run_checks() -> list[CheckResult]:
     checks: list[Callable[[], CheckResult]] = [
         check_production_accepts_safe_settings,
-        check_jwt_placeholder_rejected,
         check_wildcard_cors_rejected,
         check_provider_keys_required,
         check_internal_ports_removed,

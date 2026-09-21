@@ -40,9 +40,6 @@ jobs:
       - name: Run API tests
         run: python -m pytest --confcutdir=tests/api tests/api/test_health_api.py tests/api/test_admin_diagnostics.py -q
 
-      - name: Run auth tests (SQLite, provider keys stubbed per test)
-        run: python -m pytest --confcutdir=tests tests/test_auth.py -q
-
       - name: Run service tests
         run: python -m pytest --confcutdir=tests/services tests/services/test_health_service.py tests/services/test_diagnostics_service.py tests/services/test_storage_fs.py -q
 
@@ -275,6 +272,9 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt -r requirements-dev.txt
 
+      - name: Seed .env so the compose checks run for real
+        run: cp .env.test.example .env
+
       - name: Run security_check.py
         run: python scripts/security_check.py
 
@@ -329,7 +329,6 @@ jobs:
       # The shipped shape — on the host side too: SQLite + embedded Qdrant +
       # fs storage, i.e. the one container this job boots on :8000.
       DATABASE_URL: sqlite+aiosqlite:////tmp/orivory-ci-lite.db
-      JWT_SECRET_KEY: test-secret-key-change-in-production
       STORAGE_BACKEND: fs
       FS_STORAGE_PATH: /tmp/orivory-ci-storage
       QDRANT_MODE: local
@@ -423,7 +422,6 @@ jobs:
       # host-side values are the same shipped shape (there are no Postgres/
       # Redis/MinIO/Qdrant services to point at any more).
       DATABASE_URL: sqlite+aiosqlite:////tmp/orivory-ci-smoke.db
-      JWT_SECRET_KEY: test-secret-key-change-in-production
       STORAGE_BACKEND: fs
       FS_STORAGE_PATH: /tmp/orivory-ci-storage
       QDRANT_MODE: local

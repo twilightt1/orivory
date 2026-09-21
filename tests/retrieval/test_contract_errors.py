@@ -32,7 +32,7 @@ from app.retrieval.embedding_fingerprint import (
 from app.retrieval.memory import freshness, vector_store
 from app.retrieval.memory import retriever as retriever_module
 from app.retrieval.vector_retriever import VectorUnavailableError
-from app.utils.dependencies import enforce_llm_quota, get_current_verified_user
+from app.utils.dependencies import enforce_llm_quota, get_current_user
 
 
 async def _empty_context(*_args, **_kwargs):
@@ -75,7 +75,7 @@ async def _recall_client(tmp_path, monkeypatch):
         async with sessions() as session:
             yield session
 
-    app.dependency_overrides[get_current_verified_user] = lambda: SimpleNamespace(
+    app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(
         id=uuid.uuid4()
     )
     app.dependency_overrides[enforce_llm_quota] = lambda: None

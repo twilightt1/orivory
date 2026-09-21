@@ -39,7 +39,7 @@ from app.main import app as asgi_app
 from app.models.memory import Memory
 from app.models.user import User
 from app.retrieval.memory import namespaces
-from app.utils.dependencies import get_current_verified_user
+from app.utils.dependencies import get_current_user
 
 ACL_DB = "namespace-acl.sqlite"
 TEAM = "team"  # a namespace client input can never create in P4a — seeded directly
@@ -105,7 +105,7 @@ async def live(tmp_path, monkeypatch):
         async def _current_user():
             return _user(user_id)
 
-        asgi_app.dependency_overrides[get_current_verified_user] = _current_user
+        asgi_app.dependency_overrides[get_current_user] = _current_user
         return AsyncClient(transport=ASGITransport(app=asgi_app), base_url="http://test")
 
     async def seed(*rows: object) -> None:

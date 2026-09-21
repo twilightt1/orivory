@@ -283,9 +283,9 @@ async def test_import_endpoint_happy_path_real_service(monkeypatch):
     async def _current_user_override():
         return SimpleNamespace(id=uuid.uuid4())
 
-    # The endpoint authenticates via `_optional_user` (dual human-JWT /
-    # agent-token auth), not `get_current_verified_user` — overriding the
-    # latter leaves the real auth in place and every call 401s.
+    # The endpoint resolves its caller through `_optional_user` (local owner /
+    # agent token), not the `get_current_user` dependency — override the
+    # former, which is the one the route actually depends on.
     app.dependency_overrides[imports_module._optional_user] = _current_user_override
     app.dependency_overrides[get_db] = _db_override
     try:
@@ -356,9 +356,9 @@ async def test_blank_source_format_over_http_behaves_as_omitted(monkeypatch):
     async def _db_override():
         yield object()
 
-    # The endpoint authenticates via `_optional_user` (dual human-JWT /
-    # agent-token auth), not `get_current_verified_user` — overriding the
-    # latter leaves the real auth in place and every call 401s.
+    # The endpoint resolves its caller through `_optional_user` (local owner /
+    # agent token), not the `get_current_user` dependency — override the
+    # former, which is the one the route actually depends on.
     app.dependency_overrides[imports_module._optional_user] = _current_user_override
     app.dependency_overrides[get_db] = _db_override
     try:
@@ -394,9 +394,9 @@ async def test_content_length_header_over_cap_early_rejected(monkeypatch):
     async def _db_override():
         yield object()
 
-    # The endpoint authenticates via `_optional_user` (dual human-JWT /
-    # agent-token auth), not `get_current_verified_user` — overriding the
-    # latter leaves the real auth in place and every call 401s.
+    # The endpoint resolves its caller through `_optional_user` (local owner /
+    # agent token), not the `get_current_user` dependency — override the
+    # former, which is the one the route actually depends on.
     app.dependency_overrides[imports_module._optional_user] = _current_user_override
     app.dependency_overrides[get_db] = _db_override
     try:

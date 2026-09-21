@@ -27,6 +27,13 @@ brain). Point Claude Desktop / Cursor / OpenClaw at
 `http://localhost:8000/mcp` with a token from
 `POST /api/v1/agents` (see the main [README](../README.md)).
 
+There is **no account auth** to run: no register, no login, no email
+verification, no OAuth, no password reset, no JWT session. The install has
+exactly one identity — the **local owner** (`LOCAL_OWNER_EMAIL`, default
+`owner@orivory.local`), created on first boot and reused untouched afterwards.
+A request with no Authorization header IS that owner; an agent token
+(`oa_…`) scopes a call to one registered client and lands in the ledger.
+
 ## What the one container trades away
 
 > **Not a horizontal-scale tier.** One container means one blast radius (OOM
@@ -37,8 +44,10 @@ brain). Point Claude Desktop / Cursor / OpenClaw at
 - **Single-user, single-instance** — SQLite + in-memory caches don't do
   horizontal scale, and embedded Qdrant owns its folder exclusively (keep
   workers at 1).
-- **JWT secret is ephemeral** — auto-generated per container; users re-login
-  after an upgrade unless they set `JWT_SECRET_KEY` explicitly.
+- **One identity, no accounts** — the local owner is created on first boot.
+  There is nothing to log into and no session to expire; agent tokens are the
+  only credentials, and they are for scoping/auditing agents, not for
+  authenticating a human.
 - **No task queue** — work runs inline in the API process; a crash mid-task
   loses that task (fine: SQL is truth, and anything a write enqueued into
   `index_outbox` is replayed by the P3 drain loop on the next run).
@@ -70,6 +79,6 @@ SQLite ladder (`bootstrap_sqlite()`); there is no Alembic step any more.
 
 ## Verified
 
-E2E in the built container: register → verify → login → agent client
+E2E in the built container: boot (SQLite ladder + local owner) → agent client
 registration → MCP `initialize` (200) → `add_memory` → `search_memory` —
 all green, `/ready` reports `sqlite/redis/storage/qdrant/mcp_hub` all ok.

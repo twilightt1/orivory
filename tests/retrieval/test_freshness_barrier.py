@@ -48,7 +48,7 @@ from app.retrieval.memory import retriever as retriever_module
 from app.retrieval.memory.outbox import IndexFreshnessTimeout
 from app.retrieval.memory.retriever import MemoryRetriever
 from app.retrieval.vector_retriever import VectorUnavailableError
-from app.utils.dependencies import enforce_llm_quota, get_current_verified_user
+from app.utils.dependencies import enforce_llm_quota, get_current_user
 from tests.retrieval.test_drain_loop import (
     _activate_memory_manifest,
     _statuses,
@@ -171,7 +171,7 @@ async def _recall_client(tmp_path, monkeypatch, *, user_id: uuid.UUID):
         async with sessions() as session:
             yield session
 
-    app.dependency_overrides[get_current_verified_user] = lambda: SimpleNamespace(id=user_id)
+    app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(id=user_id)
     app.dependency_overrides[enforce_llm_quota] = lambda: None
     app.dependency_overrides[get_db] = _db_override
     try:

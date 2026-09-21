@@ -38,37 +38,22 @@ https://api.orivory.io/api/v1
 
 ### Authentication
 
-All API requests (except `/auth/*`) require a Bearer token in the Authorization header:
+There is **no account auth**: an Orivory install is one container with one
+operator, so it has exactly one identity — the **local owner** (the `users`
+row named by `LOCAL_OWNER_EMAIL`, default `owner@orivory.local`).
 
-```
-Authorization: Bearer <access_token>
-```
+- A request with **no** Authorization header IS the local owner. Nothing to
+  log in to, nothing to expire, no 401 for a missing token.
+- A request with an **agent token** (`Authorization: Bearer *** minted by
+  `POST /api/v1/agents`) acts as that client on the **MCP endpoint** and on
+  `POST /api/v1/imports`, which is where the token's scopes
+  (`memory:read` / `memory:write`) are enforced and where every write is
+  recorded in the access ledger under it. The REST API itself takes no token:
+  a Bearer value on a REST route is `401` (unknown, revoked, or simply the
+  wrong surface — serving its owner there would bypass scopes).
 
-Tokens are obtained via the `/auth/login` or `/auth/register` endpoints. Access tokens expire after **1 hour**. Use `/auth/refresh` to obtain a new access token.
-
-#### Token Response
-
-```json
-{
-  "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
-  "refresh_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
-  "token_type": "Bearer",
-  "expires_in": 3600
-}
-```
-
-#### Refreshing Tokens
-
-```http
-POST /api/v1/auth/refresh
-Content-Type: application/json
-
-{
-  "refresh_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
-}
-```
-
-**Response:** Same structure as token response above.
+Register / login / email verification / OAuth / password reset / JWT were
+removed with account auth; those endpoints no longer exist.
 
 ---
 
@@ -162,6 +147,12 @@ Non-breaking additions (new optional fields, new endpoints) are added to the cur
 ---
 
 ## 2. Authentication
+
+> **Removed.** Account auth went with the self-hosted single-operator shape —
+> there is no register / login / email verification / OAuth / password reset /
+> JWT session any more. Every endpoint below in this section returns `404`.
+> See §1 for how identity actually works now (local owner + agent tokens);
+> this section is kept only until the endpoint catalogue is rewritten.
 
 ### POST /api/v1/auth/register
 

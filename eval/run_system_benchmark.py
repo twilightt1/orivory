@@ -50,7 +50,6 @@ for line in ENV_FILE.open():
 # may carry a DATABASE_URL), and os.environ BEATS env_file, so these must
 # land in os.environ unconditionally.
 os.environ["QDRANT_MODE"] = "local"
-os.environ["JWT_SECRET_KEY"] = "benchmark-run-secret-key-not-for-prod"
 _RESULTS_DIR = ROOT / "eval/benchmarks/results"
 _RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{_RESULTS_DIR}/.system_run.db"
