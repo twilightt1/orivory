@@ -11,10 +11,8 @@ from app.models.types import GUID
 
 if TYPE_CHECKING:
     from app.models.conversation import Conversation
-    from app.models.email_verification import EmailVerification
     from app.models.entity import Entity
     from app.models.memory import Memory
-    from app.models.password_reset_session import PasswordResetSession
     from app.models.source import Source
     from app.models.user_quota import UserQuota
 
@@ -46,8 +44,6 @@ class User(Base):
     created_at:      Mapped[datetime]  = mapped_column(TIMESTAMP(timezone=True), server_default=func.now())
     updated_at:      Mapped[datetime]  = mapped_column(TIMESTAMP(timezone=True), server_default=func.now(), onupdate=utc_now)
 
-    email_verifications:     Mapped[list["EmailVerification"]]     = relationship(back_populates="user", cascade="all, delete-orphan")
-    password_reset_sessions: Mapped[list["PasswordResetSession"]]  = relationship(back_populates="user", cascade="all, delete-orphan")
     conversations:           Mapped[list["Conversation"]]          = relationship(back_populates="user", cascade="all, delete-orphan")
     quota:                   Mapped["UserQuota"]                   = relationship(back_populates="user", uselist=False, cascade="all, delete-orphan")
     memories:                Mapped[list["Memory"]]                = relationship(back_populates="user", cascade="all, delete-orphan")

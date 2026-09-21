@@ -88,7 +88,7 @@ from app.services.retention_service import (
     RetentionReport,
     run_retention,
 )
-from app.utils.dependencies import get_current_verified_user
+from app.utils.dependencies import get_current_user
 from tests.retrieval.test_p1b_gate import (  # noqa: F401 — the harness, by name
     _intents,
     _memory,
@@ -190,7 +190,7 @@ def _auth_client(user) -> AsyncClient:
     async def _current_user(db=Depends(database.get_db)):
         return await db.get(User, user.id)
 
-    asgi_app.dependency_overrides[get_current_verified_user] = _current_user
+    asgi_app.dependency_overrides[get_current_user] = _current_user
     return AsyncClient(transport=ASGITransport(app=asgi_app), base_url="http://gate")
 
 

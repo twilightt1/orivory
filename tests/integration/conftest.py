@@ -10,7 +10,6 @@ _TEST_ENV_DEFAULTS = {
     # The shape these live modules run against: SQLite + embedded Qdrant +
     # filesystem storage, i.e. the one container `docker compose up -d` boots.
     "DATABASE_URL": "sqlite+aiosqlite:////tmp/orivory-live-integration.db",
-    "JWT_SECRET_KEY": "test-secret-key-change-in-production",
     "STORAGE_BACKEND": "fs",
     "FS_STORAGE_PATH": "/tmp/orivory-live-storage",
     "QDRANT_MODE": "local",

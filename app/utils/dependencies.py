@@ -1,66 +1,64 @@
+"""Request identity: the REST API serves the local owner, and no one else.
+
+There is no account auth to run: a self-hosted install is one loopback-bound
+operator, so a request with **no** Authorization header IS the local owner
+(:mod:`app.services.local_owner`) and must NOT 401 — that is the whole point.
+
+An Authorization header here is NOT a credential. Agent tokens belong to the
+MCP surface and to ``POST /api/v1/imports``, which resolve them themselves and
+enforce their scopes (:mod:`app.mcp_hub.identity`, ``app/api/v1/imports.py``).
+Letting ``get_current_user`` answer with the token's *owner* would hand a
+``memory:read`` client the entire REST surface — including minting itself a
+write token, or revoking a sibling's — and answering with the owner for a
+revoked token would make revocation meaningless. Both fail closed.
+"""
 from typing import Annotated
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.database import get_db
 from app.models.user import User
-from app.redis_client import get_redis
-from app.utils.security import decode_access_token
+from app.services.local_owner import ensure_local_owner
 
-bearer = HTTPBearer()
+# auto_error=False is load-bearing: a missing header is not an error any more.
+bearer = HTTPBearer(auto_error=False)
 
 
 async def get_current_user(
-    credentials: HTTPAuthorizationCredentials = Depends(bearer),
-    db: AsyncSession = Depends(get_db),
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)],
+    db: Annotated[AsyncSession, Depends(get_db)],
 ) -> User:
-    """Decode JWT + blacklist check. No verified/onboarding requirement."""
-    token   = credentials.credentials
-    payload = decode_access_token(token)
+    """The local owner — the REST surface's only identity.
 
-    jti = payload.get("jti")
-    if jti:
-        redis = await get_redis()
-        if await redis.get(f"blacklist:{jti}"):
-            raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Token has been revoked.")
-
-    user = await db.scalar(select(User).where(User.id == payload["sub"]))
-    if not user or not user.is_active or user.is_deleted:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Account not found.")
-    return user
-
-
-async def get_current_verified_user(current_user: User = Depends(get_current_user)) -> User:
-    if not current_user.is_verified:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, detail="Email not verified.")
-    return current_user
-
-
-async def get_current_active_user(current_user: User = Depends(get_current_verified_user)) -> User:
-    if not current_user.onboarding_done:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, detail="Please complete account setup.")
-    return current_user
-
-
-async def require_admin(current_user: User = Depends(get_current_active_user)) -> User:
-    if current_user.role != "admin":
-        raise HTTPException(status.HTTP_403_FORBIDDEN, detail="Admin access required.")
-    return current_user
+    Any Bearer value is refused: an agent token belongs to the MCP endpoint and
+    ``POST /api/v1/imports`` (where its scopes are enforced), and account JWTs
+    no longer exist, so a client sending one is stale config that should hear
+    about it rather than silently act as the owner.
+    """
+    if credentials is not None and (credentials.credentials or "").strip():
+        raise HTTPException(
+            status.HTTP_401_UNAUTHORIZED,
+            detail=(
+                "The REST API serves the local owner; agent tokens are used with "
+                "the MCP endpoint and POST /api/v1/imports."
+            ),
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return await ensure_local_owner(db)
 
 
 async def enforce_llm_quota(
-    current_user: Annotated[User, Depends(get_current_verified_user)],
+    current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> None:
     """Rate limit + quota guard for endpoints that trigger LLM/embedding spend.
 
-    Without this, any verified user could loop /insights/generate or
-    /memories/recall and run up unbounded LLM cost — the quota system was
-    only enforced on the chat path. Use as ``Depends(enforce_llm_quota)``.
+    Without this, anything could loop /memories/recall and run up unbounded
+    LLM cost — the quota system was only enforced on the chat path. The owner
+    is the only principal, so the guard is keyed on it.
     """
     from app.middleware.rate_limiter import check_rate_limit
     from app.services.quota_service import check_and_increment

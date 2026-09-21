@@ -13,9 +13,14 @@ import secrets
 ALLOWED_SCOPES = ("memory:read", "memory:write")
 DEFAULT_SCOPES: tuple[str, ...] = ("memory:read",)
 
+# What every plaintext agent token starts with. The identity layer keys its
+# "this Bearer IS an agent token" branch on it (app/utils/dependencies.py), so
+# the generator and the resolver cannot drift apart.
+TOKEN_PREFIX = "oa_"
+
 
 def generate_token() -> str:
-    return "oa_" + secrets.token_hex(16)
+    return TOKEN_PREFIX + secrets.token_hex(16)
 
 
 def hash_token(token: str) -> str:
@@ -35,4 +40,4 @@ def validate_scopes(scopes: list[str]) -> list[str]:
     return list(dict.fromkeys(scopes))
 
 
-__all__ = ["ALLOWED_SCOPES", "DEFAULT_SCOPES", "generate_token", "hash_token", "token_hash_prefix", "validate_scopes"]
+__all__ = ["ALLOWED_SCOPES", "DEFAULT_SCOPES", "TOKEN_PREFIX", "generate_token", "hash_token", "token_hash_prefix", "validate_scopes"]

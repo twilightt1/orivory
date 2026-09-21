@@ -87,7 +87,7 @@ from app.retrieval.memory.outbox import IndexFreshnessTimeout
 from app.retrieval.memory.retriever import MemoryRetriever
 from app.schemas.Orivory import RECALL_TRACE_STAGE_KEYS, MemoryUpdate
 from app.services.erasure_service import erase_memories, reconcile_erasure_receipts
-from app.utils.dependencies import enforce_llm_quota, get_current_verified_user
+from app.utils.dependencies import enforce_llm_quota, get_current_user
 from tests.retrieval.test_drain_loop import _until
 from tests.retrieval.test_p1b_gate import (
     _create_memory,
@@ -452,7 +452,7 @@ async def test_an_unreachable_store_answers_the_typed_timeout_never_an_empty_rec
     ``200`` with ``results: []`` for a write that is committed in SQL.
     """
     monkeypatch.setattr(settings, "RECALL_FRESHNESS_BUDGET_SECONDS", 0.3)
-    app.dependency_overrides[get_current_verified_user] = lambda: SimpleNamespace(id=live.alice.id)
+    app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(id=live.alice.id)
     app.dependency_overrides[enforce_llm_quota] = lambda: None
     try:
         async with _unreachable_store(monkeypatch):

@@ -5,9 +5,10 @@ snapshot does not leak OAuth tokens / API keys in plaintext.
 
 Design:
     - A single process-wide Fernet built from ``CONFIG_ENCRYPTION_KEY``.
-    - In non-production, if no key is configured, one is derived
-      deterministically from ``JWT_SECRET_KEY`` so local dev works without
-      extra setup. Production requires an explicit key (enforced in config).
+    - In non-production, if no key is configured, one is derived from a fixed
+      local-dev secret so local dev works without extra setup (and stays
+      readable across restarts). Production requires an explicit key
+      (enforced in config).
     - Encryption is transparent and backward compatible: ciphertext is a
       string prefixed with a small marker so legacy plaintext rows can be
       detected and passed through on read.
@@ -26,6 +27,13 @@ from app.config import settings
 # is treated as legacy plaintext and returned unchanged on decrypt.
 _PREFIX = "enc::v1::"
 
+# The non-production fallback secret. Public on purpose: it protects nothing
+# (there is no multi-tenant surface and no key material behind it) and a
+# per-boot random value — the old JWT-derived behaviour — only made local
+# ciphertext unreadable after a restart. A deployment that cares sets
+# CONFIG_ENCRYPTION_KEY; production refuses to start without one.
+_DEV_FALLBACK_SECRET = "orivory-local-dev-config-encryption"
+
 
 def _derive_key_from_secret(secret: str) -> bytes:
     """Derive a urlsafe-base64 32-byte Fernet key from an arbitrary secret."""
@@ -42,9 +50,9 @@ def _fernet() -> Fernet:
             return Fernet(raw.encode("utf-8"))
         except (ValueError, TypeError):
             return Fernet(_derive_key_from_secret(raw))
-    # Non-production fallback: derive from JWT secret. Production config
-    # validation rejects an empty CONFIG_ENCRYPTION_KEY before we get here.
-    return Fernet(_derive_key_from_secret(settings.JWT_SECRET_KEY))
+    # Non-production fallback. Production config validation rejects an empty
+    # CONFIG_ENCRYPTION_KEY before we get here.
+    return Fernet(_derive_key_from_secret(_DEV_FALLBACK_SECRET))
 
 
 def encrypt_str(plaintext: str) -> str:

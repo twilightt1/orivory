@@ -762,7 +762,7 @@ Offline smoke:
 python eval/run_eval.py --mode offline --output-dir eval/results --top-k 5
 ```
 
-Live API smoke after login/token setup:
+Live API smoke after agent-token setup:
 
 ```bash
 python eval/run_eval.py --mode live-api \

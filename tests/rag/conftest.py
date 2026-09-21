@@ -13,7 +13,6 @@ import tempfile
 os.environ.setdefault(
     "DATABASE_URL", f"sqlite+aiosqlite:///{tempfile.mkdtemp(prefix='orivory-rag-')}/rag-ambient.db"
 )
-os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-change-in-production")
 os.environ.setdefault("ENVIRONMENT", "test")
 
 import pytest

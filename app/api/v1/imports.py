@@ -29,41 +29,36 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Uplo
 from fastapi.security import HTTPAuthorizationCredentials
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.auth import get_current_user
 from app.database import get_db
 from app.ingestion.import_formats import SOURCE_FORMATS, ImportFormatError
 from app.mcp_hub.identity import AgentPrincipal, resolve_principal
 from app.models.user import User
 from app.schemas.Orivory import ImportSummary
+from app.services.agent_token_service import TOKEN_PREFIX
 from app.services.import_service import run_import
-from app.utils.dependencies import get_current_verified_user
+from app.utils.dependencies import get_current_user
 
 
 async def _optional_user(
     request: Request,
     db: AsyncSession = Depends(get_db),
 ) -> User | None:
-    """Lenient auth: real user on valid JWT, else None (agent-token path).
+    """The importing party, or None when the caller is an agent token.
 
-    Routes on the Bearer VALUE, not on JWT-validation outcomes: human JWTs
-    always take the strict dependency (same 401s as today); only oa_ agent
-    tokens fall through to the principal path. A broken human JWT therefore
-    still 401s (no silent downgrade), while an oa_ token never reaches the
-    JWT decoder at all.
+    Routes on the Bearer VALUE: an ``oa_`` token is the agent path, which the
+    endpoint below resolves to a principal plus its owner (so the import is
+    scoped and ledgered under that agent). Anything else is a local request,
+    which IS the local owner.
     """
     auth_header = request.headers.get("authorization", "") or ""
     scheme, _, value = auth_header.partition(" ")
-    if scheme.lower() == "bearer" and value.strip().startswith("oa_"):
+    value = value.strip()
+    if scheme.lower() == "bearer" and value.startswith(TOKEN_PREFIX):
         return None
-    try:
-        return await get_current_verified_user(
-            await get_current_user(
-                HTTPAuthorizationCredentials(scheme="Bearer", credentials=value.strip()),
-                db,
-            )
-        )
-    except HTTPException:
-        return None
+    credentials = (
+        HTTPAuthorizationCredentials(scheme="Bearer", credentials=value) if value else None
+    )
+    return await get_current_user(credentials, db)
 
 log = logging.getLogger(__name__)
 
@@ -76,7 +71,7 @@ async def _resolve_import_user(
     request: Request,
     db: AsyncSession,
 ) -> tuple[User | None, AgentPrincipal | None]:
-    """Resolve the importing party: a human JWT user OR an agent token.
+    """Resolve the importing party: the local owner OR an agent token.
 
     Agent-token imports (the auto-capture path) attribute the memories to
     the agent's owner and record the agent in the ledger as an import —
@@ -109,8 +104,8 @@ async def create_import(
     """Import one export file as memories.
 
     Accepts TWO auth modes:
-      - Human JWT (Authorization: Bearer <jwt>) — the second-brain UI path.
-      - Agent token (Authorization: Bearer oa_...) — the auto-capture path;
+      - A local request (no token): the local owner — the self-host path.
+      - An agent token (Authorization: Bearer oa_…) — the auto-capture path;
         memories attribute to the agent's owner and the import is ledgered
         as ``import`` by that agent.
 
@@ -122,12 +117,12 @@ async def create_import(
     agent_principal: AgentPrincipal | None = None
 
     if current_user is None:
-        # JWT auth didn't resolve — try the agent-token path before failing.
+        # No local identity — try the agent-token path before failing.
         user, agent_principal = await _resolve_import_user(request, db)
         if user is None:
             raise HTTPException(
                 status.HTTP_401_UNAUTHORIZED,
-                detail="Authentication required (human JWT or agent token).",
+                detail="Authentication required (invalid or revoked agent token).",
                 headers={"WWW-Authenticate": "Bearer"},
             )
         # Imports write memories: require the same scope as MCP writes.

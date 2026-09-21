@@ -46,11 +46,11 @@ pip install -r requirements-dev.txt
 copy .env.example .env
 ```
 
-Open `.env` and fill in your OpenRouter, OpenAI, Jina, JWT, SendGrid, and
-OAuth values as needed.
+Open `.env` and fill in the provider keys you use (OpenRouter, OpenAI, Jina —
+all optional; embeddings and storage run locally out of the box).
 
 > [!WARNING]
-> Do not commit `.env`. Keep API keys and JWT secrets local.
+> Do not commit `.env`. Keep API keys local.
 
 ### 2. Start infrastructure
 
@@ -200,24 +200,22 @@ streaming, returned sources, and trace metadata. Start the API first —
 ingestion and the index drain live inside that process (no worker to start).
 Then run one of these commands:
 
-```powershell
-.\.venv\Scripts\python.exe eval/run_eval.py --mode live-api `
-  --api-base-url http://localhost:8000 `
-  --email eval-user@example.com `
-  --password EvalPassword123! `
-  --sample-docs sample_docs `
-  --output-dir eval/results
-```
-
-Or use an existing bearer token:
+> **Not runnable.** `--mode live-api` drives the chat API (`/api/v1/chat/*`),
+> which was deleted with the full-stack surface — the run fails at the first
+> request regardless of credentials. The supported lane is `--mode offline`
+> (the default). This mode is tracked for removal with the docs wave.
 
 ```powershell
 .\.venv\Scripts\python.exe eval/run_eval.py --mode live-api `
   --api-base-url http://localhost:8000 `
-  --access-token $env:ACCESS_TOKEN `
+  --access-token $env:ORIVORY_AGENT_TOKEN `
   --sample-docs sample_docs `
   --output-dir eval/results
 ```
+
+(`--email`/`--password` went with account auth: mint an agent token with
+`POST /api/v1/agents` and pass it as the access token — the value is shown
+once. `$env:ACCESS_TOKEN` works the same way if you already exported one.)
 
 Reports are written to `eval/results/live_api_report.md` and
 `eval/results/live_api_report.json`.

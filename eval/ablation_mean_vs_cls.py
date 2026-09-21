@@ -48,7 +48,6 @@ os.environ["QDRANT_MODE"] = "local"
 os.environ["QDRANT_LOCAL_PATH"] = str(_QDRANT_DIR)
 os.environ["USE_LOCAL_EMBEDDINGS"] = "true"
 os.environ["LOCAL_EMBED_MODEL"] = "arctic"
-os.environ.setdefault("JWT_SECRET_KEY", "ablation-mean-vs-cls-local")
 
 ARTIFACT = Path(__file__).with_suffix(".json")
 K_VALUES = (1, 3, 5)

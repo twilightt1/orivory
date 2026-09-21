@@ -98,7 +98,7 @@ from app.retrieval.memory.retriever import MemoryRetriever
 from app.retrieval.reranker import RerankInvalidResponse, RerankUnavailable
 from app.retrieval.vector_retriever import VectorUnavailableError
 from app.schemas.Orivory import RECALL_TRACE_COUNTER_KEYS, RECALL_TRACE_STAGE_KEYS
-from app.utils.dependencies import enforce_llm_quota, get_current_verified_user
+from app.utils.dependencies import enforce_llm_quota, get_current_user
 
 # The P1b gate's real-store fixtures (``env`` / ``world`` / ``live``), reused
 # rather than copied — this gate proves the SAME store the migration installs.
@@ -993,7 +993,7 @@ async def test_mcp_and_api_share_semantics_and_the_mcp_payload_is_index_only(liv
                                                for index in range(5)])
     holder["vector"] = _vector_for("shared fixture row 2")
 
-    app.dependency_overrides[get_current_verified_user] = lambda: SimpleNamespace(
+    app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(
         id=live.alice.id)
     app.dependency_overrides[enforce_llm_quota] = lambda: None
     try:

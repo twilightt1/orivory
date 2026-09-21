@@ -99,6 +99,11 @@ If a threshold is not met, the command exits non-zero.
 
 ## Live API Evaluation
 
+> **Not runnable.** This mode drives the chat API (`/api/v1/chat/*`), which was
+> deleted with the full-stack surface — it fails at the first request whatever
+> credentials you pass. Kept here only until it is removed/rewritten with the
+> docs wave; use `--mode offline` (the default lane).
+
 Live mode requires the full application path to be running:
 
 1. Postgres, Redis, Qdrant, and MinIO
@@ -108,13 +113,13 @@ Live mode requires the full application path to be running:
 5. a verified/onboarded user or a valid access token
 6. provider keys required by ingestion/chat, such as OpenAI, OpenRouter, and Jina
 
-Example using email/password login:
+Example using an agent token (there is no account login any more — mint one
+with `POST /api/v1/agents`; the value is shown once):
 
 ```bash
 python eval/run_eval.py --mode live-api \
   --api-base-url http://localhost:8000 \
-  --email eval-user@example.com \
-  --password EvalPassword123! \
+  --access-token "$ORIVORY_AGENT_TOKEN" \
   --sample-docs sample_docs \
   --output-dir eval/results
 ```

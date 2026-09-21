@@ -29,9 +29,9 @@ down:
 build:
 	docker compose build
 
-# CI-safe unit tests only (skips live infra and Redis-bound auth tests).
+# CI-safe unit tests only (skips the live-infra integration suite).
 test:
-	python -m pytest tests -q --ignore=tests/integration --ignore=tests/test_auth.py
+	python -m pytest tests -q --ignore=tests/integration
 
 # Lint the paths CI lints (the same full-repo check).
 lint: lint-full

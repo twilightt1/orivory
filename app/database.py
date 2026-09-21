@@ -527,15 +527,21 @@ def upgrade_sqlite_schema(conn) -> None:
 
 
 async def bootstrap_sqlite() -> None:
-    """Create or upgrade the canonical SQLite schema for lite mode.
+    """Create or upgrade the canonical SQLite schema, then ensure the owner.
 
     Thin async wrapper over :func:`upgrade_sqlite_schema` (the one ladder
-    definition shared with the migration CLI).
+    definition shared with the migration CLI), followed by the one identity a
+    self-hosted install has: the local owner row every per-user path keys on
+    (app/services/local_owner.py). An existing owner row is left untouched.
     """
     if not IS_SQLITE:
         raise RuntimeError("bootstrap_sqlite() is only for SQLite deployments")
     async with engine.begin() as conn:
         await conn.run_sync(upgrade_sqlite_schema)
+    from app.services.local_owner import ensure_local_owner
+
+    async with AsyncSessionLocal() as session:
+        await ensure_local_owner(session)
 
 
 async def get_db():

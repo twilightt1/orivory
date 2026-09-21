@@ -47,7 +47,7 @@ from app.schemas.Orivory import (
     RecallResponse,
 )
 from app.services.erasure_service import erase_memories
-from app.utils.dependencies import enforce_llm_quota, get_current_verified_user
+from app.utils.dependencies import enforce_llm_quota, get_current_user
 
 log = logging.getLogger(__name__)
 
@@ -109,7 +109,7 @@ async def _owned(memory: Memory | None, user: User) -> bool:
 @router.post("", response_model=MemoryResponse, status_code=status.HTTP_201_CREATED)
 async def create_memory(
     body: MemoryCreate,
-    current_user: Annotated[User, Depends(get_current_verified_user)],
+    current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> MemoryResponse:
     """Create a new memory. The owning user is taken from the auth context."""
@@ -164,7 +164,7 @@ async def create_memory(
 
 @router.get("", response_model=MemoryListResponse)
 async def list_memories(
-    current_user: Annotated[User, Depends(get_current_verified_user)],
+    current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
     source_type: Literal["manual_note", "file_upload", "google_drive", "notion",
                           "gmail", "web_clipper", "rss", "conversation_excerpt",
@@ -231,7 +231,7 @@ async def list_memories(
 # Declared BEFORE /{memory_id} so "digest" isn't parsed as a memory UUID.
 @router.get("/digest", response_model=DigestResponse)
 async def memory_digest(
-    current_user: Annotated[User, Depends(get_current_verified_user)],
+    current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
     window_days: int = Query(default=7, ge=1, le=90),
 ) -> DigestResponse:
@@ -248,7 +248,7 @@ async def memory_digest(
 # Declared BEFORE /{memory_id} so "stats"/"digest" aren't parsed as UUIDs.
 @router.get("/stats")
 async def memory_stats(
-    current_user: Annotated[User, Depends(get_current_verified_user)],
+    current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> dict:
     """Aggregate counts for the memory dashboard (the caller's namespace only).
@@ -304,7 +304,7 @@ async def memory_stats(
 @router.get("/{memory_id}", response_model=MemoryResponse)
 async def get_memory(
     memory_id: UUID,
-    current_user: Annotated[User, Depends(get_current_verified_user)],
+    current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> MemoryResponse:
     memory = await db.get(Memory, memory_id)
@@ -317,7 +317,7 @@ async def get_memory(
 async def update_memory(
     memory_id: UUID,
     body: MemoryUpdate,
-    current_user: Annotated[User, Depends(get_current_verified_user)],
+    current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> MemoryResponse:
     memory = await db.get(Memory, memory_id)
@@ -358,7 +358,7 @@ async def update_memory(
 @router.delete("/{memory_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_memory(
     memory_id: UUID,
-    current_user: Annotated[User, Depends(get_current_verified_user)],
+    current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> None:
     """Delete one owned memory through the durable erasure path.
@@ -378,7 +378,7 @@ async def delete_memory(
 @router.post("/recall", response_model=RecallResponse)
 async def recall_memory(
     body: RecallRequest,
-    current_user: Annotated[User, Depends(get_current_verified_user)],
+    current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
     _quota: None = Depends(enforce_llm_quota),
 ) -> RecallResponse:

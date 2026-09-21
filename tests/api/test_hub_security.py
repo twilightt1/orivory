@@ -19,7 +19,7 @@ from app.main import app
 from app.models.agent_client import AgentClient
 from app.models.memory import Memory
 from app.models.user import User
-from app.utils.dependencies import get_current_verified_user
+from app.utils.dependencies import get_current_user
 from tests.conftest import make_async_test_engine
 
 pytestmark = pytest.mark.api
@@ -72,14 +72,14 @@ async def _auth_client(user_id: uuid.UUID) -> AsyncClient:
         async with test_session() as session:
             yield session
 
-    app.dependency_overrides[get_current_verified_user] = _user_override
+    app.dependency_overrides[get_current_user] = _user_override
     app.dependency_overrides[get_db] = _db_override
     return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
 
 
 async def _close(client: AsyncClient) -> None:
     await client.aclose()
-    app.dependency_overrides.pop(get_current_verified_user, None)
+    app.dependency_overrides.pop(get_current_user, None)
     app.dependency_overrides.pop(get_db, None)
 
 
@@ -191,7 +191,7 @@ async def test_import_dedup_counts_over_http():
 
     client = await _auth_client(user_id)
     # /imports authenticates via `_optional_user` (dual human/agent auth), not
-    # `get_current_verified_user` — without this the calls below 401.
+    # `get_current_user` — without this the calls below 401.
     from app.api.v1 import imports as imports_module
 
     async def _imports_user_override():

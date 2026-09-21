@@ -29,7 +29,7 @@ cp .env.example .env
 Production must use:
 
 - `ENVIRONMENT=production`
-- a random `JWT_SECRET_KEY` with at least 32 characters
+- an explicit `CONFIG_ENCRYPTION_KEY` (Fernet; no default is derived in production)
 - explicit `ALLOWED_ORIGINS`, never `*`
 - real provider keys for `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, and `JINA_API_KEY`
 
@@ -41,17 +41,15 @@ the app is alive).
 
 The app validates these guardrails at startup in production mode.
 
-## Refresh Token Rotation
+## Identity
 
-Refresh tokens are stored as SHA-256 hashes under `refresh:{hash}` in the
-process-local `InMemoryRedis`. A per-user index set (`refresh_user:{user_id}`)
-lets the application revoke every active session for a user in
-O(N_user_tokens) without scanning the full `refresh:*` keyspace. Consequences:
-
-- a container restart drops the store, so every user re-authenticates — the
-  correct behaviour for a secret-bearing store, and nothing to back up.
-- `REFRESH_TOKEN_EXPIRE_DAYS` still bounds a session in the database; the
-  in-memory index only carries the revocation state.
+There are no accounts and no sessions to rotate. The install has ONE identity —
+the local owner (`LOCAL_OWNER_EMAIL`, default `owner@orivory.local`), created
+on first boot and reused untouched afterwards; a request with no Authorization
+header acts as it. The only credentials are **agent tokens** (`oa_…`), minted
+by `POST /api/v1/agents`, hashed at rest (SHA-256) and revocable immediately via
+`DELETE /api/v1/agents/{client_id}`: revoking one stops it on the next request
+and the attempt is not silently downgraded to the owner.
 
 ## Validate Compose Config
 

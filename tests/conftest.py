@@ -9,7 +9,6 @@ import tempfile
 os.environ.setdefault(
     "DATABASE_URL", f"sqlite+aiosqlite:///{tempfile.mkdtemp(prefix='orivory-tests-')}/orivory-tests.db"
 )
-os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-testing-only")
 
 import pytest
 import pytest_asyncio
@@ -33,10 +32,9 @@ TEST_DATABASE_URL = os.environ["DATABASE_URL"]
 class MockRedisPipeline:
     """Mock Redis pipeline.
 
-    Rate-limit commands are no-ops (tests must never be throttled); the
-    refresh-token commands the auth service writes through a pipeline are
-    queued and applied to the mock on ``execute()``, so a later
-    ``smembers``/``delete`` sees them.
+    Rate-limit commands are no-ops (tests must never be throttled); a command
+    with a real effect is queued and applied to the mock on ``execute()``, so
+    a later ``smembers``/``delete``/``get`` sees it.
     """
 
     def __init__(self, redis: "MockRedis"):
@@ -159,8 +157,6 @@ def mock_redis_for_rate_limiter(monkeypatch):
     # Patch Redis at all locations where it's used
     monkeypatch.setattr("app.middleware.rate_limiter.get_redis", mock_get_redis)
     monkeypatch.setattr("app.redis_client.get_redis", mock_get_redis)
-    monkeypatch.setattr("app.services.auth_service.get_redis", mock_get_redis)
-    monkeypatch.setattr("app.api.v1.auth.get_redis", mock_get_redis)
 
 
 test_engine = create_async_engine(

@@ -237,17 +237,14 @@ class LiveApiEvaluator:
         return {"Authorization": f"Bearer {self.token}"}
 
     async def _login(self, client: httpx.AsyncClient) -> str:
-        if not self.config.email or not self.config.password:
-            raise LiveApiEvalError("Provide --access-token or both --email and --password.")
-        response = await client.post(
-            "/api/v1/auth/login",
-            json={"email": self.config.email, "password": self.config.password},
+        # Account auth is gone: there is no login endpoint to call, and a
+        # request with no token is already the local owner. A live run only
+        # needs a token when it must be scoped/audited as an agent client.
+        raise LiveApiEvalError(
+            "This install has no account login any more. Pass --access-token "
+            "with an agent token (POST /api/v1/agents), or omit it to run as "
+            "the local owner."
         )
-        response.raise_for_status()
-        token = response.json().get("access_token")
-        if not token:
-            raise LiveApiEvalError("Login response did not include access_token.")
-        return str(token)
 
     async def _create_conversation(self, client: httpx.AsyncClient) -> str:
         response = await client.post(
