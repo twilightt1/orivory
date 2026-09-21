@@ -40,6 +40,9 @@ jobs:
       - name: Run API tests
         run: python -m pytest --confcutdir=tests/api tests/api/test_health_api.py tests/api/test_admin_diagnostics.py -q
 
+      - name: Run auth tests (SQLite, provider keys stubbed per test)
+        run: python -m pytest --confcutdir=tests tests/test_auth.py -q
+
       - name: Run service tests
         run: python -m pytest --confcutdir=tests/services tests/services/test_health_service.py tests/services/test_diagnostics_service.py tests/services/test_storage_fs.py -q
 
@@ -323,11 +326,9 @@ jobs:
 
     env:
       RUN_LIVE_INTEGRATION: "1"
-      # The lite shape — on the host side too: SQLite + embedded Qdrant + fs
-      # storage, i.e. the one container this job boots on :8000.
-      LITE_MODE: "1"
+      # The shipped shape — on the host side too: SQLite + embedded Qdrant +
+      # fs storage, i.e. the one container this job boots on :8000.
       DATABASE_URL: sqlite+aiosqlite:////tmp/orivory-ci-lite.db
-      REDIS_URL: ""
       JWT_SECRET_KEY: test-secret-key-change-in-production
       STORAGE_BACKEND: fs
       FS_STORAGE_PATH: /tmp/orivory-ci-storage
@@ -419,11 +420,9 @@ jobs:
 
     env:
       # The smoke suite talks to the API the compose stack publishes; these
-      # host-side values are the same lite shape (there are no Postgres/Redis/
-      # MinIO/Qdrant services to point at any more).
-      LITE_MODE: "1"
+      # host-side values are the same shipped shape (there are no Postgres/
+      # Redis/MinIO/Qdrant services to point at any more).
       DATABASE_URL: sqlite+aiosqlite:////tmp/orivory-ci-smoke.db
-      REDIS_URL: ""
       JWT_SECRET_KEY: test-secret-key-change-in-production
       STORAGE_BACKEND: fs
       FS_STORAGE_PATH: /tmp/orivory-ci-storage

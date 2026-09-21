@@ -38,12 +38,9 @@ def _read(path: str) -> str:
 
 def _base_production_settings(**overrides) -> dict[str, object]:
     values: dict[str, object] = {
-        "DATABASE_URL": "postgresql+asyncpg://orivory:strong-db-password@postgres:5432/ragdb",
-        "REDIS_URL": "redis://redis:6379/0",
+        "DATABASE_URL": "sqlite+aiosqlite:////data/orivory.db",
         "JWT_SECRET_KEY": "production-secret-key-with-more-than-32-characters",
         "CONFIG_ENCRYPTION_KEY": "2CiSbMXhP2zwWOAk7nkEcGABAJSJnt7hl_SVcMBnlnk=",
-        "MINIO_ACCESS_KEY": "orivory-prod-minio",
-        "MINIO_SECRET_KEY": "orivory-prod-minio-secret",
         "OPENROUTER_API_KEY": "sk-or-production",
         "OPENAI_API_KEY": "sk-production",
         "JINA_API_KEY": "jina-production",
@@ -82,10 +79,6 @@ def check_jwt_placeholder_rejected() -> CheckResult:
 
 def check_wildcard_cors_rejected() -> CheckResult:
     return _expect_validation_error("wildcard CORS", "ALLOWED_ORIGINS", ALLOWED_ORIGINS="*")
-
-
-def check_default_minio_rejected() -> CheckResult:
-    return _expect_validation_error("default MinIO credentials", "Default MinIO", MINIO_ACCESS_KEY="minioadmin")
 
 
 def check_provider_keys_required() -> CheckResult:
@@ -206,15 +199,12 @@ def check_diagnostics_summary_safe() -> CheckResult:
     summary = build_config_summary()
     forbidden_keys = {
         "DATABASE_URL",
-        "REDIS_URL",
         "JWT_SECRET_KEY",
         "OPENROUTER_API_KEY",
         "OPENAI_API_KEY",
         "JINA_API_KEY",
         "SENDGRID_API_KEY",
         "GOOGLE_CLIENT_SECRET",
-        "MINIO_ACCESS_KEY",
-        "MINIO_SECRET_KEY",
         "access_token",
         "refresh_token",
         "password",
@@ -237,9 +227,8 @@ def check_env_example_placeholders() -> CheckResult:
     env_example = _read(".env.example")
     expected_markers = [
         "JWT_SECRET_KEY=change-me-to-a-random-256-bit-secret",
-        "POSTGRES_PASSWORD=change-me-db-password",
-        "MINIO_ACCESS_KEY=minioadmin",
-        "MINIO_SECRET_KEY=minioadmin",
+        "DATABASE_URL=sqlite+aiosqlite:////data/orivory.db",
+        "STORAGE_BACKEND=fs",
         "ENVIRONMENT=development",
     ]
     missing = [marker for marker in expected_markers if marker not in env_example]
@@ -253,7 +242,6 @@ def run_checks() -> list[CheckResult]:
         check_production_accepts_safe_settings,
         check_jwt_placeholder_rejected,
         check_wildcard_cors_rejected,
-        check_default_minio_rejected,
         check_provider_keys_required,
         check_internal_ports_removed,
         check_flower_ops_profile,

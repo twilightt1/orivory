@@ -99,7 +99,7 @@ def _ingest(db, document_id: str) -> None:
     try:
         file_bytes = minio.get_object_sync(doc.file_path)
     except Exception as exc:
-        raise _stage_error("minio_read", exc) from exc
+        raise _stage_error("storage_read", exc) from exc
     # The projection's content hash comes from THESE bytes (R38): read once,
     # hash once, hand it down — a second storage read could fail on its own and
     # leave the re-upload guard blind.

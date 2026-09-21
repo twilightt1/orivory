@@ -41,7 +41,6 @@ for line in ENV_FILE.open():
         key, _, value = line.partition("=")
         os.environ.setdefault(key.strip(), value.strip())
 
-os.environ["LITE_MODE"] = "1"
 os.environ["QDRANT_MODE"] = "local"
 os.environ["JWT_SECRET_KEY"] = "benchmark-run-secret-key-not-for-prod"
 _RESULTS_DIR = ROOT / "eval/benchmarks/results"

@@ -41,7 +41,7 @@ Three ideas make it different from a chat-with-docs app:
    [CHANGELOG](CHANGELOG.md).
 
 Your data stays on your infrastructure. MIT-licensed, self-hosted, plain
-Postgres + Qdrant under the hood.
+SQLite + embedded Qdrant under the hood — one container, no external services.
 
 ## Core features
 
@@ -60,10 +60,10 @@ Postgres + Qdrant under the hood.
 
 ## Quick start
 
-### Lite mode — one container, zero external services (personal/demo use)
+### One container, zero external services
 
 The whole memory hub — API + MCP server + SQLite + in-process Qdrant — in a
-single container. No Postgres, no Redis, no MinIO, no workers.
+single container. No Postgres, no Redis, no MinIO, no object store, no workers.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/twilightt1/orivory/main/install.sh | bash
@@ -72,39 +72,42 @@ curl -fsSL https://raw.githubusercontent.com/twilightt1/orivory/main/install.sh 
 or plain docker:
 
 ```bash
-docker run -d --name orivory -p 8000:8000 -v orivory-data:/data \
+docker run -d --name orivory -p 127.0.0.1:8000:8000 -v orivory-data:/data \
   -e OPENAI_API_KEY=sk-... ghcr.io/twilightt1/orivory:lite
 ```
+
+The API binds **127.0.0.1 on the host** (loopback only) — put a reverse proxy
+in front of it to expose it.
 
 Or from a clone: `make quickstart`. Then:
 
 - **App**: http://localhost:8000 · MCP endpoint: http://localhost:8000/mcp
 - Connect an agent below — that's the whole setup.
 
-Lite mode is single-user by design (personal brain). Data persists in the
-`orivory-data` volume; the JWT secret is ephemeral per container.
-It is the fastest way to try Orivory — not a production tier: anything
-multi-user, multi-instance, or load-bearing belongs on the full stack below.
+It is single-user by design (personal brain). Data persists in the
+`orivory-data` volume; the JWT secret is ephemeral per container unless you set
+`JWT_SECRET_KEY`. Provider keys are optional — with none set, the bundled local
+ONNX embedder is the default.
 
-### Full stack — Postgres + Qdrant behind the app
+### From a clone (docker compose — the same single container)
 
 ```bash
 git clone https://github.com/twilightt1/orivory.git
 cd orivory
-cp .env.example .env            # add your LLM API key(s)
+cp .env.example .env            # optional: add your LLM API key(s)
 
-docker compose up -d            # migrations run automatically (migrate gate),
-                                # then the app — ingestion and the P3 index
-                                # drain run INSIDE it (no worker to start)
+docker compose up -d            # boots the app: SQLite + in-process Qdrant +
+                                # filesystem uploads — ingestion and the P3
+                                # index drain run INSIDE it (no worker)
 ```
 
 - **App**: http://localhost:8000 · API docs: http://localhost:8000/docs
 - **MCP** (agents): http://localhost:8000/mcp
 
-Health & self-diagnosis: `/health` (liveness) and `/ready` — deployment-aware
-per-dependency checks (postgres/sqlite, redis, minio/storage, qdrant, mcp_hub).
+Health & self-diagnosis: `/health` (liveness) and `/ready` —
+per-dependency checks (sqlite, redis, storage, qdrant, mcp_hub).
 
-### Connect an AI agent (both modes)
+### Connect an AI agent
 
 ```bash
 # 1. Register an agent client (as your logged-in user) — token shown ONCE
@@ -141,7 +144,7 @@ curl -X POST http://localhost:8000/api/v1/imports \
 ```
 
 ChatGPT, Claude, PAM bundles and generic JSON are supported. Leave anytime —
-plain Postgres + JSON everywhere, export or query your data directly.
+plain SQLite + JSON everywhere, export or query your data directly.
 
 ## Project layout
 
@@ -158,7 +161,7 @@ orivory/
 ├── skills/orivory/         # OpenClaw/ClawHub skill package
 ├── eval/                   # RAG eval framework + benchmarks/
 ├── docs/                   # architecture, API reference, guides, research
-└── docker-compose.yml      # full stack with migrate gate + healthchecks
+└── docker-compose.yml      # the one-container stack + healthchecks
 ```
 
 ## Documentation
@@ -172,7 +175,7 @@ orivory/
 | [open-source-positioning.md](https://github.com/twilightt1/orivory-private/blob/main/docs/ideas/open-source-positioning.md) (private) | Positioning: one-line definition, competitor matrix, hub-first narrative |
 | [research/](https://github.com/twilightt1/orivory-private/tree/main/docs/research) (private) | Market / user / platform / papers research behind the pivot |
 | [docs/EVALUATION_GUIDE.md](docs/EVALUATION_GUIDE.md) | RAG evaluation + benchmarks |
-| [docs/LITE_MODE.md](docs/LITE_MODE.md) | One-container lite mode |
+| [docs/LITE_MODE.md](docs/LITE_MODE.md) | One-container deployment: what runs inside, what it trades away |
 | [docs/DEPLOYMENT_GUIDE.md](docs/DEPLOYMENT_GUIDE.md) · [docs/OPERATIONS_RUNBOOK.md](docs/OPERATIONS_RUNBOOK.md) · [docs/BACKUP_RESTORE.md](docs/BACKUP_RESTORE.md) | Ops |
 
 ## Contributing

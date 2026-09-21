@@ -1,10 +1,10 @@
 """API test environment defaults."""
 
 import os
+import tempfile
 
 _API_TEST_ENV_DEFAULTS = {
-    "DATABASE_URL": "postgresql+asyncpg://postgres:password@localhost:55432/ragdb_test",
-    "REDIS_URL": "redis://localhost:6379/0",
+    "DATABASE_URL": f"sqlite+aiosqlite:///{tempfile.mkdtemp(prefix='orivory-api-')}/api-test.db",
     "JWT_SECRET_KEY": "test-secret-key-change-in-production",
     "ENVIRONMENT": "test",
 }

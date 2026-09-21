@@ -113,7 +113,8 @@ Open Swagger UI at <http://localhost:8000/docs>.
 curl http://localhost:8000/health
 ```
 
-`/ready` checks Postgres, Redis, MinIO, and Qdrant:
+`/ready` checks the in-container dependencies (SQLite, the in-memory store,
+filesystem storage, the embedded Qdrant, and the MCP hub when enabled):
 
 ```powershell
 curl http://localhost:8000/ready
@@ -126,10 +127,11 @@ Expected healthy response:
   "status": "ok",
   "version": "1.0.0",
   "checks": {
-    "postgres": {"status": "ok", "latency_ms": 10.2},
+    "sqlite": {"status": "ok", "latency_ms": 1.2},
     "redis": {"status": "ok", "latency_ms": 2.1},
-    "minio": {"status": "ok", "latency_ms": 15.4},
-    "qdrant": {"status": "ok", "latency_ms": 8.7}
+    "storage": {"status": "ok", "latency_ms": 3.4},
+    "qdrant": {"status": "ok", "latency_ms": 8.7},
+    "mcp_hub": {"status": "ok", "latency_ms": 0.4}
   }
 }
 ```
@@ -169,17 +171,18 @@ Run the deterministic RAG evaluation report:
 
 Reports are written to [latest_report.md](../eval/results/latest_report.md) and [latest_report.json](../eval/results/latest_report.json).
 
-These tests use mocks/monkeypatching and do not need Postgres, Redis, MinIO,
-Qdrant, or external LLM/API credentials.
+These tests use mocks/monkeypatching and do not need any service (SQLite and
+the embedded store included) or external LLM/API credentials.
 
 ### Live integration tests
 
-Live tests exercise real Postgres, Redis, Qdrant, and MinIO services. They are
-marked `requires_infra` and skipped unless `RUN_LIVE_INTEGRATION=1` is set.
+Live tests exercise a really running API (its own SQLite + embedded Qdrant).
+They are marked `requires_infra` and skipped unless `RUN_LIVE_INTEGRATION=1`
+is set.
 
 ```powershell
 copy .env.test.example .env.test
-docker compose up -d postgres qdrant
+docker compose up -d
 $env:RUN_LIVE_INTEGRATION="1"
 .\.venv\Scripts\python.exe -m pytest --confcutdir=tests/integration tests/integration -q
 ```
@@ -357,4 +360,4 @@ curl http://localhost:8000/ready
 3. Retry ingestion through the admin retry endpoint or re-upload the document.
 
 The ingestion task now records a clearer `Document.error_msg`, including the
-failing stage such as `minio_read`, `redis_parent_cache`, or the vector upsert.
+failing stage such as `storage_read`, `redis_parent_cache`, or the vector upsert.

@@ -12,17 +12,10 @@ def _is_local_host(url: str) -> bool:
 
 class Settings(BaseSettings):
 
-    # ── Lite mode ──────────────────────────────────────────────────────────────
-    # LITE_MODE=1 gives a zero-external-services deployment: SQLite storage,
-    # in-process Qdrant, in-memory caches (no Redis), synchronous in-process
-    # background work (no worker), filesystem uploads (no MinIO). Default
-    # DATABASE_URL / REDIS_URL point at the lite defaults; full-stack compose
-    # overrides them.
-    LITE_MODE: bool = False
-
+    # ── Canonical store ────────────────────────────────────────────────────────
+    # One container, zero external services: SQLite is the ONLY supported
+    # DATABASE_URL (app/database.py fails fast on anything else).
     DATABASE_URL: str = "sqlite+aiosqlite:////data/orivory.db"
-    DATABASE_POOL_SIZE: int = 10
-    DATABASE_MAX_OVERFLOW: int = 20
 
     # ── Outbox drain (P3 background indexing, both dialects) ──────────────────
     # Every deployment drains its index outbox from a background task in the
@@ -56,11 +49,7 @@ class Settings(BaseSettings):
     APP_PORT: int = 8000
 
 
-    REDIS_URL: str = ""
-    REDIS_POOL_MAX: int = 20
-
-
-    JWT_SECRET_KEY: str = ""  # auto-generated (ephemeral) when unset in lite mode
+    JWT_SECRET_KEY: str = ""  # auto-generated (ephemeral) when unset
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 15
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
@@ -93,13 +82,6 @@ class Settings(BaseSettings):
     EMAIL_MOCK_VERBOSE: bool = False
 
 
-    MINIO_ENDPOINT: str = "localhost:9000"
-    MINIO_ACCESS_KEY: str | None = None
-    MINIO_SECRET_KEY: str | None = None
-    MINIO_BUCKET: str = "rag-docs"
-    MINIO_SECURE: bool = False
-
-
     LEDGER_RETENTION_DAYS: int = 90
     # Compression-before-storage (claude-mem adopt-learn): off by default —
     # opt-in per deployment; failures degrade to storing raw content.
@@ -124,8 +106,8 @@ class Settings(BaseSettings):
     # simply reports it "missing".
     LEGACY_CHROMA_PATH: str = "/data/chroma"
 
-    # lite: "fs" stores uploads on the local filesystem instead of MinIO.
-    STORAGE_BACKEND: str = "minio"  # minio | fs
+    # Uploads live on the filesystem (app/storage.py is fs-only).
+    STORAGE_BACKEND: str = "fs"
     FS_STORAGE_PATH: str = "/data/uploads"
 
 
@@ -309,31 +291,29 @@ class Settings(BaseSettings):
     LOG_LEVEL: str = "INFO"
 
     @model_validator(mode="after")
-    def _apply_lite_mode(self) -> "Settings":
-        if self.LITE_MODE:
-            # Ephemeral JWT secret when unset: lite is a single-user personal
-            # deployment; tokens survive only until the container restarts.
-            if not self.JWT_SECRET_KEY:
-                import secrets
-                self.JWT_SECRET_KEY = secrets.token_urlsafe(48)
-            # In-process background work, embedded Qdrant, filesystem storage
-            # unless overridden.
-            # Same flip for Qdrant: no API key + a localhost URL means there is
-            # no server to talk to, so own a local folder instead.
-            if (
-                self.QDRANT_MODE == "server"
-                and not self.QDRANT_API_KEY
-                and _is_local_host(self.QDRANT_URL)
-            ):
-                self.QDRANT_MODE = "local"
-            if self.STORAGE_BACKEND == "minio" and not self.MINIO_ACCESS_KEY:
-                self.STORAGE_BACKEND = "fs"
-            # Zero-key lite must still remember: no embedding API key means
-            # the bundled local model (384-dim, no download beyond ONNX).
-            # ponytail: keyed backends win whenever a key exists; the dim
-            # guard refuses mixing backends in one store.
-            if not self.USE_LOCAL_EMBEDDINGS and not self.JINA_API_KEY and not self.OPENAI_API_KEY:
-                self.USE_LOCAL_EMBEDDINGS = True
+    def _apply_lite_defaults(self) -> "Settings":
+        """Zero-external-services defaults, applied unconditionally.
+
+        Ephemeral JWT secret when unset: this is a single-user personal
+        deployment; tokens survive only until the container restarts.
+        """
+        if not self.JWT_SECRET_KEY:
+            import secrets
+            self.JWT_SECRET_KEY = secrets.token_urlsafe(48)
+        # Same flip for Qdrant: no API key + a localhost URL means there is
+        # no server to talk to, so own a local folder instead.
+        if (
+            self.QDRANT_MODE == "server"
+            and not self.QDRANT_API_KEY
+            and _is_local_host(self.QDRANT_URL)
+        ):
+            self.QDRANT_MODE = "local"
+        # Zero-key deployments must still remember: no embedding API key means
+        # the bundled local model (384-dim, no download beyond ONNX).
+        # ponytail: keyed backends win whenever a key exists; the dim
+        # guard refuses mixing backends in one store.
+        if not self.USE_LOCAL_EMBEDDINGS and not self.JINA_API_KEY and not self.OPENAI_API_KEY:
+            self.USE_LOCAL_EMBEDDINGS = True
         return self
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
@@ -349,11 +329,6 @@ class Settings(BaseSettings):
         self._validate_ai_runtime_settings()
         if self.is_production:
             self._validate_production_settings()
-        else:
-            if not self.MINIO_ACCESS_KEY:
-                self.MINIO_ACCESS_KEY = "minioadmin"
-            if not self.MINIO_SECRET_KEY:
-                self.MINIO_SECRET_KEY = "minioadmin"
         return self
 
     def _validate_ai_runtime_settings(self) -> None:
@@ -402,7 +377,6 @@ class Settings(BaseSettings):
         self._require_strong_jwt_secret()
         self._require_explicit_cors_origins()
         self._require_provider_keys()
-        self._require_secure_minio_credentials()
         self._require_config_encryption_key()
 
     def _require_config_encryption_key(self) -> None:
@@ -445,17 +419,5 @@ class Settings(BaseSettings):
         missing = [name for name, value in required_keys.items() if not value.strip()]
         if missing:
             raise ValueError(f"Missing provider keys in production: {', '.join(missing)}")
-
-    def _require_secure_minio_credentials(self) -> None:
-        if self.STORAGE_BACKEND != "minio":
-            # Filesystem storage (the lite stack's default in production):
-            # MinIO has no consumer here, so its credentials must not gate a
-            # boot that never talks to it.
-            return
-        if not self.MINIO_ACCESS_KEY or not self.MINIO_SECRET_KEY:
-            raise ValueError("MINIO_ACCESS_KEY and MINIO_SECRET_KEY must be set in production")
-        if self.MINIO_ACCESS_KEY == "minioadmin" or self.MINIO_SECRET_KEY == "minioadmin":
-            raise ValueError("Default MinIO credentials are not allowed in production")
-
 
 settings = Settings()

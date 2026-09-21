@@ -6,19 +6,11 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 import httpx
-from sqlalchemy import text
 
 from app.config import settings
 
 CheckPayload = dict[str, Any]
 CheckFn = Callable[[], Awaitable[None]]
-
-
-async def _check_postgres() -> None:
-    from app.database import engine
-
-    async with engine.connect() as conn:
-        await conn.execute(text("SELECT 1"))
 
 
 async def _check_redis() -> None:
@@ -30,14 +22,6 @@ async def _check_redis() -> None:
     finally:
         if hasattr(redis, "aclose"):
             await redis.aclose()
-
-
-async def _check_minio() -> None:
-    from app.storage import bucket_exists
-
-    exists = await bucket_exists(settings.MINIO_BUCKET)
-    if not exists:
-        raise RuntimeError(f"MinIO bucket '{settings.MINIO_BUCKET}' does not exist")
 
 
 async def _check_qdrant() -> None:
@@ -74,10 +58,10 @@ async def _check_sqlite() -> None:
 
 
 async def _check_storage() -> None:
-    """Backend-agnostic storage check (MinIO bucket or fs root)."""
+    """Storage check: the fs root must exist (it is created on demand)."""
     from app.storage import bucket_exists
 
-    if not await bucket_exists(settings.MINIO_BUCKET):
+    if not await bucket_exists():
         raise RuntimeError(f"Storage backend not ready ({settings.STORAGE_BACKEND})")
 
 
@@ -121,28 +105,14 @@ async def _measure(name: str, checker: CheckFn) -> tuple[str, CheckPayload]:
 
 
 def _default_readiness_checkers() -> dict[str, CheckFn]:
-    """Deployment-aware readiness checks.
-
-    Postgres (full stack): postgres + redis + minio + qdrant + mcp_hub.
-    SQLite (lite mode):   sqlite + redis(memory) + storage(fs) + qdrant
-    + mcp_hub.
-    """
-    from app.database import IS_SQLITE
-
-    if IS_SQLITE:
-        checkers = {
-            "sqlite": _check_sqlite,
-            "redis": _check_redis,
-            "storage": _check_storage,
-            "qdrant": _check_qdrant,
-        }
-    else:
-        checkers = {
-            "postgres": _check_postgres,
-            "redis": _check_redis,
-            "minio": _check_minio,
-            "qdrant": _check_qdrant,
-        }
+    """The one-container readiness checks: sqlite + redis(memory) + storage(fs)
+    + qdrant (+ mcp_hub while enabled)."""
+    checkers = {
+        "sqlite": _check_sqlite,
+        "redis": _check_redis,
+        "storage": _check_storage,
+        "qdrant": _check_qdrant,
+    }
     if settings.MCP_HUB_ENABLED:
         # Flag-off is a deliberate configuration, not a degraded service —
         # the check (and its failure signal) only exists while enabled.

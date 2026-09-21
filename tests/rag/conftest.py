@@ -1,16 +1,18 @@
 """RAG test environment defaults + isolated SQLite DB fixtures.
 
 ``--confcutdir=tests/rag`` runs this suite without the shared root conftest
-(no Postgres provisioning, no ambient ``db`` fixture), so the two DB fixtures
-below build a PRIVATE SQLite file on the test's ``tmp_path`` and point the
-module-level engines at it. Nothing in this suite can read or write an
-ambient database (pattern: ``tests/retrieval/test_index_outbox.py``).
+(no ambient ``db`` fixture), so the two DB fixtures below build a PRIVATE
+SQLite file on the test's ``tmp_path`` and point the module-level engines at
+it. Nothing in this suite can read or write an ambient database (pattern:
+``tests/retrieval/test_index_outbox.py``).
 """
 
 import os
+import tempfile
 
-os.environ.setdefault("DATABASE_URL", "postgresql+asyncpg://postgres:password@localhost:5432/ragdb_test")
-os.environ.setdefault("REDIS_URL", "redis://localhost:6379/0")
+os.environ.setdefault(
+    "DATABASE_URL", f"sqlite+aiosqlite:///{tempfile.mkdtemp(prefix='orivory-rag-')}/rag-ambient.db"
+)
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-change-in-production")
 os.environ.setdefault("ENVIRONMENT", "test")
 

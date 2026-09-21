@@ -1,128 +1,76 @@
 # Backup and Restore Guide
 
-Orivory stores durable state in Postgres, MinIO, and Qdrant volumes.
-Redis is used for queues/cache/session-like data and is usually not the primary source of truth.
+Orivory is ONE container and stores ALL durable state under `/data`:
 
-## What to Back Up
+| Component | Path | Data | Backup priority |
+|---|---|---|---|
+| SQLite | `/data/orivory.db` (+ `-wal`/`-shm`) | users, conversations, memories, documents, chunks, outbox | Critical |
+| Uploads | `/data/uploads` | uploaded source documents | Critical |
+| Qdrant | `/data/qdrant` | vector index | Important, rebuildable from documents/chunks |
+| Caches / rate limits | process memory | nothing durable (`InMemoryRedis`) | none |
 
-| Component | Data | Backup priority |
-|---|---|---|
-| Postgres | users, conversations, messages, document metadata, chunks | Critical |
-| MinIO | uploaded source documents | Critical |
-| Qdrant | vector index | Important, rebuildable from docs/chunks |
-| Redis | cache, refresh tokens, rate limits | Optional / operational |
+There is no Postgres, MinIO or Redis service to back up any more — one archive
+covers the whole system.
 
-## Postgres Backup
-
-```bash
-docker compose -f docker-compose.yml -f docker-compose.prod.yml exec postgres \
-  pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB" > backups/postgres_$(date +%Y%m%d_%H%M%S).sql
-```
-
-For Windows PowerShell:
-
-```powershell
-docker compose -f docker-compose.yml -f docker-compose.prod.yml exec postgres pg_dump -U $env:POSTGRES_USER $env:POSTGRES_DB > backups/postgres_backup.sql
-```
-
-## Postgres Restore
-
-Stop app services first:
+## Backup (the whole /data directory)
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.prod.yml stop app
+# Stop the app first: a copy of a LIVE SQLite file can miss the WAL.
+docker compose stop app
+docker run --rm -v orivory-data:/data -v "$PWD/backups":/backup alpine \
+  tar czf /backup/orivory-data_$(date +%Y%m%d_%H%M%S).tgz -C /data .
+docker compose start app
 ```
 
-Restore:
+A dev checkout bind-mounts `./data` instead of the named volume; tar that
+directory the same way.
+
+Prefer a SQLite-consistent snapshot WITHOUT stopping the app? Take the database
+on its own with `VACUUM INTO` (it includes committed WAL frames), then copy
+`uploads/` and `qdrant/` separately:
 
 ```bash
-cat backups/postgres_backup.sql | docker compose -f docker-compose.yml -f docker-compose.prod.yml exec -T postgres \
-  psql -U "$POSTGRES_USER" "$POSTGRES_DB"
+docker compose exec app python -c \
+  "import sqlite3; sqlite3.connect('/data/orivory.db').execute(\"VACUUM INTO '/data/backup.db'\")"
 ```
 
-Run migrations after restore if needed:
+## Restore
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.prod.yml exec app alembic upgrade head
+docker compose stop app
+docker run --rm -v orivory-data:/data -v "$PWD/backups":/backup alpine \
+  sh -c "rm -rf /data/* && tar xzf /backup/orivory-data_<stamp>.tgz -C /data"
+docker compose start app
 ```
 
-## MinIO Backup
+Boot runs the versioned SQLite ladder (`bootstrap_sqlite()`), so an older
+database is adopted and upgraded on start; a NEWER schema than the image knows
+is refused loudly rather than repaired.
 
-Recommended options:
+## Qdrant
 
-1. use MinIO Client (`mc`) mirror to object storage or local disk
-2. snapshot the Docker volume `miniodata`
+Embedded Qdrant owns `/data/qdrant` exclusively and is included in the archive
+above. If it is lost (or the archive is from a different database), the index
+can be rebuilt: re-ingest the source documents, or run
+`python scripts/migrate_qdrant.py backfill`. A restored Qdrant folder is only
+consistent with the database it was taken with — the generation pointers live
+in SQLite — so restore both or re-run `cutover`.
 
-Example with `mc` from a configured host:
+## Caches
 
-```bash
-mc alias set Orivory http://localhost:9000 "$MINIO_ACCESS_KEY" "$MINIO_SECRET_KEY"
-mc mirror Orivory/rag-docs backups/minio/rag-docs
-```
-
-## MinIO Restore
-
-```bash
-mc mirror backups/minio/rag-docs Orivory/rag-docs
-```
-
-Ensure `MINIO_BUCKET` matches the restored bucket name.
-
-## Qdrant Backup
-
-Qdrant stores persistent index data in the `qdrantdata` Docker volume
-(`/qdrant/storage` inside the container).
-
-Snapshot the volume while writes are stopped:
-
-```bash
-docker compose -f docker-compose.yml -f docker-compose.prod.yml stop app
-docker run --rm -v orivory_qdrantdata:/data -v "$PWD/backups":/backup alpine \
-  tar czf /backup/qdrantdata_backup.tgz -C /data .
-```
-
-Qdrant's own snapshot API (`POST /collections/{name}/snapshots`) is a
-per-collection alternative; either is restorable, the volume copy is the one
-that keeps the generation manifests and the Qdrant metadata in step.
-
-## Qdrant Restore
-
-```bash
-docker compose -f docker-compose.yml -f docker-compose.prod.yml stop qdrant
-docker run --rm -v orivory_qdrantdata:/data -v "$PWD/backups":/backup alpine \
-  sh -c "rm -rf /data/* && tar xzf /backup/qdrantdata_backup.tgz -C /data"
-docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d qdrant
-```
-
-If the Qdrant backup is missing, the index can be rebuilt by re-ingesting source
-documents (or, on a P1b install, by re-running `migrate_qdrant.py backfill`),
-but that takes longer and needs provider keys. A Qdrant backup restored on its
-own is only consistent with the database it was taken with: the generation
-pointers live in the database, so restore both or re-run `cutover`.
-
-## Redis Notes
-
-Redis contains cache, refresh tokens, and rate limit keys.
-In most deployments, do not rely on Redis as the backup source of truth.
-
-If Redis is lost:
-
-- users may need to log in again
-- BM25/parent caches can rebuild through ingestion paths
+`InMemoryRedis` is process-local: restarting the container drops caches,
+refresh tokens and rate-limit windows. Nothing to back up; lost refresh tokens
+only mean users log in again.
 
 ## Safe Restore Order
 
-1. Stop the API.
-2. Restore Postgres.
-3. Restore MinIO.
-4. Restore Qdrant if available.
-5. Start infrastructure.
-6. Run migrations.
-7. Start the API.
-8. Check `/ready`.
-9. Run offline or live API eval smoke.
+1. Stop the app.
+2. Restore the `/data` archive (database + uploads + Qdrant together).
+3. Start the app — the schema ladder upgrades an older database on boot.
+4. Check `/ready`.
+5. Run an offline or live API eval smoke.
 
-## P1b cutover backups (SQLite / lite)
+## P1b cutover backups (SQLite)
 
 The Qdrant cutover has its own offline tooling — see
 [ROLLBACK_P1B.md](ROLLBACK_P1B.md):
@@ -155,4 +103,3 @@ then delete the retired collection/store (`LEGACY_CHROMA_PATH`, holding
 `Orivory_memories` and `rag_conv_*`) and drop any backups that only carry it —
 the Qdrant data plus the database are the whole system from that point on.
 `verify --restore-drill` is the supported restore afterwards.
-

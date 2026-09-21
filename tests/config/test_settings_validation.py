@@ -1,51 +1,59 @@
 import os
+import tempfile
 
 import pytest
 from pydantic import ValidationError
 
-os.environ.setdefault("DATABASE_URL", "postgresql+asyncpg://postgres:password@localhost:5432/ragdb")
-os.environ.setdefault("REDIS_URL", "redis://localhost:6379/0")
+os.environ.setdefault(
+    "DATABASE_URL", f"sqlite+aiosqlite:///{tempfile.mkdtemp(prefix='orivory-config-')}/config-test.db"
+)
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-change-in-production")
 
 from app.config import Settings
 
+_SQLITE_URL = "sqlite+aiosqlite:////tmp/orivory-config-test.db"
+
 
 def _base_settings(**overrides):
     values = {
-        "DATABASE_URL": "postgresql+asyncpg://postgres:password@localhost:5432/ragdb",
-        "REDIS_URL": "redis://localhost:6379/0",
+        "DATABASE_URL": _SQLITE_URL,
         "JWT_SECRET_KEY": "dev-secret-key",
         "ALLOWED_ORIGINS": "http://localhost:3000,http://localhost:5173",
         "ENVIRONMENT": "development",
     }
     values.update(overrides)
-    return Settings(**values)
+    return Settings(_env_file=None, **values)
 
 
 def _production_settings(**overrides):
     values = {
-        "DATABASE_URL": "postgresql+asyncpg://orivory:strong-db-password@postgres:5432/ragdb",
-        "REDIS_URL": "redis://redis:6379/0",
+        "DATABASE_URL": _SQLITE_URL,
         "JWT_SECRET_KEY": "production-secret-key-with-more-than-32-characters",
-        "MINIO_ACCESS_KEY": "orivory-prod-minio",
-        "MINIO_SECRET_KEY": "orivory-prod-minio-secret",
-        "OPENROUTER_API_KEY": "sk-or-production",
-        "OPENAI_API_KEY": "sk-production",
+        "OPENROUTER_API_KEY": "«redacted:sk-…»",
+        "OPENAI_API_KEY": "«redacted:sk-…»",
         "JINA_API_KEY": "jina-production",
         "CONFIG_ENCRYPTION_KEY": "production-config-encryption-key-32chars",
         "ALLOWED_ORIGINS": "https://app.orivory.example",
         "ENVIRONMENT": "production",
     }
     values.update(overrides)
-    return Settings(**values)
+    return Settings(_env_file=None, **values)
 
 
-def test_development_defaults_minio_credentials():
-    settings = _base_settings(MINIO_ACCESS_KEY=None, MINIO_SECRET_KEY=None)
+def test_unset_jwt_secret_gets_an_ephemeral_one():
+    """The single-user self-host keeps working out of the box: an unset
+    JWT_SECRET_KEY is generated at load (tokens live until a restart)."""
+    settings = _base_settings(JWT_SECRET_KEY="")
 
-    assert settings.ENVIRONMENT == "development"
-    assert settings.MINIO_ACCESS_KEY == "minioadmin"
-    assert settings.MINIO_SECRET_KEY == "minioadmin"
+    assert len(settings.JWT_SECRET_KEY) >= 32
+
+
+def test_zerokey_embeddings_default_to_the_local_model():
+    """No embedding key means the bundled local ONNX model — the zero-cost
+    path a fresh self-host boots with."""
+    settings = _base_settings(JINA_API_KEY="", OPENAI_API_KEY="")
+
+    assert settings.USE_LOCAL_EMBEDDINGS is True
 
 
 def test_production_rejects_placeholder_jwt_secret():
@@ -66,22 +74,6 @@ def test_production_rejects_wildcard_cors():
 def test_production_rejects_missing_provider_keys():
     with pytest.raises(ValidationError, match="OPENAI_API_KEY"):
         _production_settings(OPENAI_API_KEY="")
-
-
-def test_production_rejects_default_minio_credentials():
-    with pytest.raises(ValidationError, match="Default MinIO"):
-        _production_settings(MINIO_ACCESS_KEY="minioadmin")
-
-
-def test_production_fs_storage_needs_no_minio_credentials():
-    """The lite prod stack pins STORAGE_BACKEND=fs; the MinIO credential gate
-    must not block a boot that never talks to MinIO."""
-    settings = _production_settings(
-        MINIO_ACCESS_KEY="", MINIO_SECRET_KEY="", STORAGE_BACKEND="fs"
-    )
-
-    assert settings.is_production is True
-    assert settings.STORAGE_BACKEND == "fs"
 
 
 def test_production_rejects_missing_config_encryption_key():

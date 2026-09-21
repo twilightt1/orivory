@@ -17,9 +17,9 @@ def _diagnostics_payload():
         "version": "1.1.0",
         "environment": "test",
         "checks": {
-            "postgres": {"status": "ok", "latency_ms": 1.0},
+            "sqlite": {"status": "ok", "latency_ms": 1.0},
             "redis": {"status": "ok", "latency_ms": 1.0},
-            "minio": {"status": "ok", "latency_ms": 1.0},
+            "storage": {"status": "ok", "latency_ms": 1.0},
             "qdrant": {"status": "ok", "latency_ms": 1.0},
             "celery": {"status": "ok", "latency_ms": 1.0},
         },
@@ -27,8 +27,7 @@ def _diagnostics_payload():
             "environment": "test",
             "docs_enabled": True,
             "cors_origins_count": 2,
-            "minio_bucket": "rag-docs",
-            "minio_secure": False,
+            "storage_backend": "fs",
             "llm_model": "openai/gpt-4o-mini",
             "embed_model": "text-embedding-3-small",
             "reranker_model": "jina-reranker-v2-base-multilingual",
@@ -51,5 +50,5 @@ def test_admin_diagnostics_payload_is_secret_safe():
     assert "OPENROUTER_API_KEY" not in encoded
     assert "JINA_API_KEY" not in encoded
     assert "DATABASE_URL" not in encoded
-    assert "REDIS_URL" not in encoded
+    assert "SENDGRID_API_KEY" not in encoded
     assert "SECRET" not in encoded.upper()

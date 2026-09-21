@@ -50,22 +50,20 @@ V7_COLUMNS = {"users": ("retention_enabled", "retention_days")}
 def _make_engine():
     """Create the async engine for the configured DATABASE_URL.
 
-    Full-stack deployments use Postgres (pool sizing applies). Lite mode
-    uses SQLite (`sqlite+aiosqlite`) with no pool sizing args — SQLite has
-    no pool to size and SQLAlchemy would reject pool_size there.
+    SQLite (`sqlite+aiosqlite`) is the only supported dialect: the product is
+    one container with a canonical SQLite store, and there is no pool to size.
+    Anything else fails fast at import instead of booting a deployment the
+    rest of the stack (the versioned ladder, FTS5, the single-process
+    assumptions) cannot serve.
     """
-    if IS_SQLITE:
-        return create_async_engine(
-            settings.DATABASE_URL,
-            echo=settings.ENVIRONMENT == "development",
-            connect_args={"check_same_thread": False},
+    if not IS_SQLITE:
+        raise ValueError(
+            f"DATABASE_URL must be a SQLite URL (sqlite+aiosqlite:///...), got {settings.DATABASE_URL!r}"
         )
     return create_async_engine(
         settings.DATABASE_URL,
-        pool_size=settings.DATABASE_POOL_SIZE,
-        max_overflow=settings.DATABASE_MAX_OVERFLOW,
-        pool_pre_ping=True,
         echo=settings.ENVIRONMENT == "development",
+        connect_args={"check_same_thread": False},
     )
 
 
@@ -562,25 +560,14 @@ def get_sync_engine() -> Engine:
     """Return the process-wide synchronous engine, creating it on first use."""
     from sqlalchemy import create_engine
 
-    url = settings.DATABASE_URL
-    if url.startswith("sqlite"):
-        sync_url = url.replace("+aiosqlite", "")
-        eng = create_engine(sync_url, connect_args={"check_same_thread": False})
+    sync_url = settings.DATABASE_URL.replace("+aiosqlite", "")
+    eng = create_engine(sync_url, connect_args={"check_same_thread": False})
 
-        @event.listens_for(eng, "connect")
-        def _enable_sync_sqlite_pragmas(dbapi_connection, _record):
-            _configure_sqlite_connection(dbapi_connection, _record)
+    @event.listens_for(eng, "connect")
+    def _enable_sync_sqlite_pragmas(dbapi_connection, _record):
+        _configure_sqlite_connection(dbapi_connection, _record)
 
-        return eng
-
-    sync_url = url.replace("+asyncpg", "+psycopg2")
-    return create_engine(
-        sync_url,
-        pool_pre_ping=True,
-        pool_size=settings.DATABASE_POOL_SIZE,
-        max_overflow=settings.DATABASE_MAX_OVERFLOW,
-        pool_recycle=1800,
-    )
+    return eng
 
 
 @lru_cache(maxsize=1)

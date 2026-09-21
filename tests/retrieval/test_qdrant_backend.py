@@ -243,24 +243,20 @@ async def test_close_clients_releases_lock(local):
     reopened.close()
 
 
-def test_mode_flip_in_lite(monkeypatch):
+def test_mode_flip_is_unconditional(monkeypatch):
     monkeypatch.delenv("QDRANT_MODE", raising=False)
     monkeypatch.delenv("QDRANT_API_KEY", raising=False)
     monkeypatch.delenv("QDRANT_URL", raising=False)  # a dev shell's URL must not decide this
 
-    # lite + no API key + a localhost URL -> embedded local Qdrant (the same
-    # flip rule the retired Chroma mode had); anything that can reach a server
-    # stays "server".
-    assert Settings(_env_file=None, LITE_MODE=True).QDRANT_MODE == "local"
+    # no API key + a localhost URL -> embedded local Qdrant (the same flip rule
+    # the retired Chroma mode had); anything that can reach a server stays
+    # "server". No LITE_MODE flag: this IS the product's default shape.
+    assert Settings(_env_file=None).QDRANT_MODE == "local"
+    assert Settings(_env_file=None, QDRANT_API_KEY="key").QDRANT_MODE == "server"
     assert (
-        Settings(_env_file=None, LITE_MODE=True, QDRANT_API_KEY="key").QDRANT_MODE
+        Settings(_env_file=None, QDRANT_URL="http://qdrant:6333").QDRANT_MODE
         == "server"
     )
-    assert (
-        Settings(_env_file=None, LITE_MODE=True, QDRANT_URL="http://qdrant:6333").QDRANT_MODE
-        == "server"
-    )
-    assert Settings(_env_file=None, LITE_MODE=False).QDRANT_MODE == "server"
 
 
 async def test_async_shim_covers_local_client_surface(local):

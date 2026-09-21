@@ -44,7 +44,6 @@ if str(ROOT) not in sys.path:
 _TMPDIR = tempfile.TemporaryDirectory(prefix="ablation-mean-vs-cls-",
                                      ignore_cleanup_errors=True)
 _QDRANT_DIR = Path(_TMPDIR.name)
-os.environ.setdefault("LITE_MODE", "1")            # the contract the ablation measures
 os.environ["QDRANT_MODE"] = "local"
 os.environ["QDRANT_LOCAL_PATH"] = str(_QDRANT_DIR)
 os.environ["USE_LOCAL_EMBEDDINGS"] = "true"

@@ -203,13 +203,13 @@ finishes ([`app/ingestion/pipeline.py`](../app/ingestion/pipeline.py) →
 `parent_chunk:{conversation_id}:{parent_id}`, TTL 7200 s. The read helpers
 (`get_parent`, `get_parents_batch`) serve from Redis, fall back to
 `document_chunks` and repopulate the cache, and `invalidate_conversation`
-drops a conversation's entries. In lite mode (`REDIS_URL` unset) the
-pipeline's synchronous write (`store_parents_sync`) is skipped, so reads go
-straight to the DB.
+drops a conversation's entries. The pipeline's synchronous write
+(`store_parents_sync`) is skipped — a sync caller cannot reach the async
+in-memory store — so reads go straight to the DB after synchronous ingestion.
 
-**Trade-off.** Redis becomes a hard dependency for the cached path in
-production; with no server configured, `get_redis()` hands out an in-memory
-stand-in ([`app/redis_client.py`](../app/redis_client.py)).
+**Trade-off.** The cache is process-local: `get_redis()` always hands out the
+in-memory stand-in ([`app/redis_client.py`](../app/redis_client.py)), so it is
+lost on restart and never shared across processes.
 
 **Legacy.** [`app/retrieval/retrieval_cache.py`](../app/retrieval/retrieval_cache.py)
 holds a per-conversation query-result cache (`rag:query:conv:...`, TTL 300 s)

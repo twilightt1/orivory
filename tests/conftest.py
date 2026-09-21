@@ -1,21 +1,29 @@
 """Pytest configuration and shared fixtures."""
 import asyncio
 import os
-import warnings
+import tempfile
 
-# Mock required environment variables BEFORE importing app modules
-os.environ.setdefault("DATABASE_URL", "postgresql+asyncpg://postgres:password@localhost:55432/ragdb_test")
-os.environ.setdefault("REDIS_URL", "redis://localhost:6379/0")
+# Point app import at a per-run SQLite file BEFORE any app module is imported.
+# SQLite is the only supported DATABASE_URL and is always available, so the
+# whole suite runs with NO environment overrides.
+os.environ.setdefault(
+    "DATABASE_URL", f"sqlite+aiosqlite:///{tempfile.mkdtemp(prefix='orivory-tests-')}/orivory-tests.db"
+)
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-testing-only")
 
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
+from app import database
 from app.database import Base, get_db
 from app.main import app
+
+# The effective URL every DB-backed fixture and loop-local engine resolves to.
+TEST_DATABASE_URL = os.environ["DATABASE_URL"]
 
 # ─── Rate Limiter Mock ─────────────────────────────────────────────────────────
 # Disable rate limiting in tests by mocking Redis calls.
@@ -23,7 +31,17 @@ from app.main import app
 
 
 class MockRedisPipeline:
-    """Mock Redis pipeline that returns safe values for rate limiting."""
+    """Mock Redis pipeline.
+
+    Rate-limit commands are no-ops (tests must never be throttled); the
+    refresh-token commands the auth service writes through a pipeline are
+    queued and applied to the mock on ``execute()``, so a later
+    ``smembers``/``delete`` sees them.
+    """
+
+    def __init__(self, redis: "MockRedis"):
+        self._redis = redis
+        self._queued: list[tuple[str, tuple]] = []
 
     def zremrangebyscore(self, *args):
         return self
@@ -37,7 +55,20 @@ class MockRedisPipeline:
     def expire(self, *args):
         return self
 
+    def setex(self, key: str, seconds: int, value: str):
+        return self._queue("setex", key, seconds, value)
+
+    def sadd(self, key: str, *members: str):
+        return self._queue("sadd", key, *members)
+
+    def _queue(self, name: str, *args):
+        self._queued.append((name, args))
+        return self
+
     async def execute(self):
+        for name, args in self._queued:
+            await getattr(self._redis, name)(*args)
+        self._queued.clear()
         # Return (removed_count, current_count, added_count, ttl)
         # current_count=0 means we're under the limit
         return (0, 0, 1, 60)
@@ -48,10 +79,12 @@ class MockRedis:
 
     def __init__(self):
         self._counters = {}  # For incr() mocking
+        self._values = {}  # Values written through set/setex
+        self._sets = {}  # Sets written through sadd
 
     def pipeline(self):
         """Return a mock pipeline (synchronous method, async execute)."""
-        return MockRedisPipeline()
+        return MockRedisPipeline(self)
 
     async def incr(self, key: str) -> int:
         """Mock incr that always returns 1 (under limit)."""
@@ -77,12 +110,29 @@ class MockRedis:
         return True
 
     async def setex(self, key: str, seconds: int, value: str) -> bool:
-        """Mock setex - always succeeds."""
+        """Mock setex - stores the value, always succeeds."""
+        self._values[key] = str(value)
         return True
 
-    async def delete(self, key: str) -> int:
+    async def sadd(self, key: str, *members: str) -> int:
+        """Mock sadd - remembers the set members (refresh-token index)."""
+        target = self._sets.setdefault(key, set())
+        added = len([member for member in members if member not in target])
+        target.update(members)
+        return added
+
+    async def smembers(self, key: str) -> "set[str]":
+        """Mock smembers - the members added through sadd()."""
+        return set(self._sets.get(key, set()))
+
+    async def delete(self, *keys: str) -> int:
         """Mock delete - always succeeds."""
-        return 1
+        removed = 0
+        for key in keys:
+            for store in (self._values, self._sets, self._counters):
+                if store.pop(key, None) is not None:
+                    removed += 1
+        return removed
 
     async def zcard(self, key: str) -> int:
         """Mock zcard for rate limiting - always returns 0."""
@@ -100,35 +150,6 @@ class MockRedis:
 _mock_redis = MockRedis()
 
 
-_DB_AVAILABLE: bool | None = None
-_DB_ERROR: str = ""
-
-
-async def require_db_available() -> None:
-    """Skip the calling test when Postgres is unreachable.
-
-    For tests that manage their own engine (loop-local engines in the hub
-    security / import suites) instead of using the ``db`` fixture. Probes
-    live when the session fixture never ran (e.g. ``--confcutdir``
-    isolation), otherwise reuses its recorded result.
-    """
-    global _DB_AVAILABLE, _DB_ERROR
-    if _DB_AVAILABLE is None:
-        try:
-            from sqlalchemy import text
-
-            probe = create_async_engine(TEST_DATABASE_URL, poolclass=NullPool)
-            async with probe.begin() as conn:
-                await conn.execute(text("SELECT 1"))
-            await probe.dispose()
-            _DB_AVAILABLE = True
-        except Exception as e:
-            _DB_AVAILABLE = False
-            _DB_ERROR = str(e)
-    if not _DB_AVAILABLE:
-        pytest.skip(f"Database not available: {_DB_ERROR}")
-
-
 @pytest.fixture(autouse=True)
 def mock_redis_for_rate_limiter(monkeypatch):
     """Mock Redis client to bypass rate limiting in tests."""
@@ -141,13 +162,27 @@ def mock_redis_for_rate_limiter(monkeypatch):
     monkeypatch.setattr("app.services.auth_service.get_redis", mock_get_redis)
     monkeypatch.setattr("app.api.v1.auth.get_redis", mock_get_redis)
 
-TEST_DATABASE_URL = os.environ.get(
-    "TEST_DATABASE_URL",
-    "postgresql+asyncpg://postgres:password@localhost:55432/ragdb_test",
-)
 
-test_engine = create_async_engine(TEST_DATABASE_URL, poolclass=NullPool)
+test_engine = create_async_engine(
+    TEST_DATABASE_URL, poolclass=NullPool, connect_args={"check_same_thread": False}
+)
+event.listen(test_engine.sync_engine, "connect", database._configure_sqlite_connection)
 TestSession = async_sessionmaker(test_engine, class_=AsyncSession, expire_on_commit=False)
+
+
+def make_async_test_engine(url: str = TEST_DATABASE_URL):
+    """A loop-local async engine on the suite's SQLite file.
+
+    NullPool on purpose: pytest-asyncio hands every test a fresh loop, and a
+    pooled aiosqlite connection would stay bound to whichever loop created it
+    ("attached to a different loop"). Suites that override ``get_db`` with an
+    engine of their own must build it inside the test coroutine.
+    """
+    engine = create_async_engine(
+        url, poolclass=NullPool, connect_args={"check_same_thread": False}
+    )
+    event.listen(engine.sync_engine, "connect", database._configure_sqlite_connection)
+    return engine
 
 
 @pytest.fixture(scope="session")
@@ -163,44 +198,19 @@ def event_loop():
 
 @pytest_asyncio.fixture(scope="session", autouse=True)
 async def setup_db():
-    """Provision test tables once per session — WITHOUT skipping the suite.
+    """Provision the test schema once per session on the per-run SQLite file.
 
-    Historically this fixture called ``pytest.skip()`` when Postgres was
-    unreachable, which silently skipped the ENTIRE suite (648 tests, exit 0):
-    `make test` looked green while running nothing. Now the failure is
-    recorded and only tests that actually need the database (via the ``db``
-    / ``client`` fixtures below) skip; pure-unit tests run regardless.
+    Every DB-backed test in the suite resolves to THIS file (the ``db`` /
+    ``client`` fixtures below, and the loop-local engines some suites build
+    from ``TEST_DATABASE_URL``), so nothing skips: SQLite is always there.
     """
-    global _DB_AVAILABLE, _DB_ERROR
-    try:
-        async with test_engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
-        _DB_AVAILABLE = True
-        yield
-    except Exception as e:
-        _DB_AVAILABLE = False
-        _DB_ERROR = str(e)
-        warnings.warn(
-            f"Postgres unavailable at {TEST_DATABASE_URL} ({e}); "
-            f"DB-backed tests will skip, unit tests still run. "
-            f"The lite stack ships no Postgres service, so point "
-            f"TEST_DATABASE_URL at your own instance if you need them.",
-            stacklevel=2,
-        )
-        yield
-    finally:
-        if _DB_AVAILABLE:
-            try:
-                async with test_engine.begin() as conn:
-                    await conn.run_sync(Base.metadata.drop_all)
-            except Exception:
-                pass
+    async with test_engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    yield
 
 
 @pytest_asyncio.fixture
 async def db():
-    if not _DB_AVAILABLE:
-        pytest.skip(f"Database not available: {_DB_ERROR}")
     async with TestSession() as session:
         yield session
         await session.rollback()

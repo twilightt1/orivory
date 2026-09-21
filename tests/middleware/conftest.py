@@ -1,14 +1,14 @@
 """Conftest for middleware tests (DB-free unit tests).
 
-Mirrors tests/services/conftest.py: provide env so app import works, and run
-with `pytest --confcutdir=tests/middleware tests/middleware` to stay clear of
-the root conftest's autouse Postgres fixture.
+Provide env so app import works, and run with
+`pytest --confcutdir=tests/middleware tests/middleware` to stay clear of the
+root conftest's shared session fixtures.
 """
 import os
+import tempfile
 
 _MW_TEST_ENV_DEFAULTS = {
-    "DATABASE_URL": "sqlite+aiosqlite:////tmp/orivory_middleware_test.db",
-    "REDIS_URL": "",
+    "DATABASE_URL": f"sqlite+aiosqlite:///{tempfile.mkdtemp(prefix='orivory-middleware-')}/mw-test.db",
     "JWT_SECRET_KEY": "test-secret-key-for-testing-only",
     "ENVIRONMENT": "test",
 }
