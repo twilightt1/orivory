@@ -7,9 +7,11 @@ or write an ambient database (pattern: ``tests/rag/conftest.py``).
 """
 
 import os
+import tempfile
 
-os.environ.setdefault("DATABASE_URL", "postgresql+asyncpg://postgres:password@localhost:5432/ragdb_test")
-os.environ.setdefault("REDIS_URL", "redis://localhost:6379/0")
+os.environ.setdefault(
+    "DATABASE_URL", f"sqlite+aiosqlite:///{tempfile.mkdtemp(prefix='orivory-services-')}/services-ambient.db"
+)
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-change-in-production")
 os.environ.setdefault("ENVIRONMENT", "test")
 

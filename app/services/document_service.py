@@ -142,7 +142,7 @@ async def delete_document(db: AsyncSession, document: Document, conversation: Co
     try:
         await storage.remove_object(document.file_path)
     except Exception as e:
-        log.warning("MinIO delete failed", extra={"error": str(e)})
+        log.warning("Storage delete failed", extra={"error": str(e)})
 
     # Unify (P1.1): also remove the cross-conversation memories derived from
     # this document. Rows AND their durable delete intents ride the commit

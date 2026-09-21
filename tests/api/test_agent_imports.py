@@ -3,8 +3,6 @@
 The imports endpoint accepts TWO auth modes: human JWT (default path) and
 agent tokens (oa_...). These tests cover the agent-token path end-to-end
 over HTTP: attribution, ledger recording, and auth boundaries.
-
-Requires the test Postgres (ragdb_test) — same as test_hub_security.py.
 """
 from __future__ import annotations
 
@@ -15,25 +13,15 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.ext.asyncio import async_sessionmaker as _mk_session
-from sqlalchemy.ext.asyncio import create_async_engine as _mk_engine
-from sqlalchemy.pool import NullPool as _NullPool
 
 from app.database import get_db
 from app.main import app
 from app.models.agent_client import AgentClient
 from app.models.user import User
 from app.services.agent_token_service import generate_token, hash_token
+from tests.conftest import make_async_test_engine
 
 pytestmark = pytest.mark.api
-
-
-@pytest.fixture(autouse=True)
-async def _require_test_database():
-    """These suites manage their own loop-local engines (not the shared `db`
-    fixture), so they probe Postgres directly and skip when it is down."""
-    from tests.conftest import require_db_available
-
-    await require_db_available()
 
 
 async def _seed_agent(monkey=None, name="capture-agent",
@@ -43,12 +31,9 @@ async def _seed_agent(monkey=None, name="capture-agent",
     coroutine — the app's global engine binds connections to whichever loop
     touched them first, so sharing it across pytest-asyncio's per-test
     loops deadlocks ("attached to a different loop")."""
-    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-    from sqlalchemy.pool import NullPool
+    from sqlalchemy.ext.asyncio import async_sessionmaker
 
-    eng = create_async_engine(
-        "postgresql+asyncpg://postgres:password@localhost:55432/ragdb_test",
-        poolclass=NullPool)
+    eng = make_async_test_engine()
     Sess = async_sessionmaker(eng, class_=AsyncSession, expire_on_commit=False)
     user_id = uuid.uuid4()
     token = generate_token()
@@ -69,17 +54,12 @@ async def _seed_agent(monkey=None, name="capture-agent",
 
 
 def _TestSession():
-    eng = _mk_engine(
-        "postgresql+asyncpg://postgres:password@localhost:55432/ragdb_test",
-        poolclass=_NullPool,
-    )
+    eng = make_async_test_engine()
     return _mk_session(eng, class_=AsyncSession, expire_on_commit=False)()
 
 
 async def _client():
-    test_engine = _mk_engine(
-        "postgresql+asyncpg://postgres:password@localhost:55432/ragdb_test",
-        poolclass=_NullPool)
+    test_engine = make_async_test_engine()
     test_session = _mk_session(test_engine, class_=AsyncSession,
                                expire_on_commit=False)
 
@@ -189,9 +169,7 @@ async def test_revoked_agent_token_import_fails():
     from app.database import AsyncSessionLocal as _Session3
 
     async with _Session3() as db:
-        eng = _mk_engine(
-        "postgresql+asyncpg://postgres:password@localhost:55432/ragdb_test",
-        poolclass=_NullPool)
+        eng = make_async_test_engine()
     Sess = _mk_session(eng, class_=AsyncSession, expire_on_commit=False)
     async with Sess() as db:
         row = await db.get(AgentClient, agent_env["client_id"])

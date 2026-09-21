@@ -49,7 +49,6 @@ docker run -d --name orivory-lite \
   -p "$PORT":8000 \
   -v "$DIR/data:/data" \
   --restart unless-stopped \
-  -e LITE_MODE=1 \
   "$IMAGE" >/dev/null
 
 say "waiting for health"

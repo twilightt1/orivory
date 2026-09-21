@@ -1,12 +1,9 @@
 """Behavioral REST security tests for the memory hub.
 
-Real request/response semantics through the ASGI app against live Postgres:
+Real request/response semantics through the ASGI app against the suite's SQLite
+file:
 auth boundaries, cross-user isolation (no existence leaks), payload-shape
 contracts — the properties the final code reviews flagged as untested.
-
-Requires the test Postgres (ragdb_test on :55432) — tables are created
-from model metadata inside each test (asyncpg loop binding means setup
-must happen on the same loop as the test).
 """
 from __future__ import annotations
 
@@ -16,7 +13,6 @@ import uuid
 import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.pool import NullPool
 
 from app.database import get_db
 from app.main import app
@@ -24,17 +20,9 @@ from app.models.agent_client import AgentClient
 from app.models.memory import Memory
 from app.models.user import User
 from app.utils.dependencies import get_current_verified_user
+from tests.conftest import make_async_test_engine
 
 pytestmark = pytest.mark.api
-
-
-@pytest.fixture(autouse=True)
-async def _require_test_database():
-    """These suites manage their own loop-local engines (not the shared `db`
-    fixture), so they probe Postgres directly and skip when it is down."""
-    from tests.conftest import require_db_available
-
-    await require_db_available()
 
 
 def _agent_row(user_id: uuid.UUID, name: str) -> AgentClient:
@@ -70,10 +58,9 @@ async def _auth_client(user_id: uuid.UUID) -> AsyncClient:
     overridden with a per-test engine instead (loop-bound by construction —
     created inside the test's coroutine).
     """
-    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+    from sqlalchemy.ext.asyncio import async_sessionmaker
 
-    test_url = "postgresql+asyncpg://postgres:password@localhost:55432/ragdb_test"
-    test_engine = create_async_engine(test_url, poolclass=NullPool)
+    test_engine = make_async_test_engine()
     test_session = async_sessionmaker(test_engine, class_=AsyncSession,
                                       expire_on_commit=False)
 
@@ -115,11 +102,9 @@ def no_chroma(monkeypatch):
 
 
 def _session_factory():
-    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-    from sqlalchemy.pool import NullPool
+    from sqlalchemy.ext.asyncio import async_sessionmaker
 
-    test_url = "postgresql+asyncpg://postgres:password@localhost:55432/ragdb_test"
-    engine = create_async_engine(test_url, poolclass=NullPool)
+    engine = make_async_test_engine()
     return engine, async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 

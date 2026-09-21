@@ -1,28 +1,13 @@
 import httpx
 import pytest
 
-from app.database import IS_SQLITE
 from app.services import health_service
 
 pytestmark = pytest.mark.service
 
-# The two checker-map tests assert the full-stack map (postgres + minio + …);
-# lite mode deliberately exposes its own map (sqlite + storage + …), so they
-# only apply under a Postgres-shaped DATABASE_URL. The probe test below is
-# backend-agnostic and must NOT inherit that skip — it is the only pin on the
-# server-mode endpoint.
-full_stack_only = pytest.mark.skipif(
-    IS_SQLITE, reason="full-stack readiness map; lite mode exposes its own checks"
-)
-lite_only = pytest.mark.skipif(
-    not IS_SQLITE, reason="lite readiness map; only a SQLite install exposes it"
-)
-
-
-@lite_only
 @pytest.mark.asyncio
 async def test_check_readiness_lite_key_set(monkeypatch):
-    """Mirror of the full-stack key-set pin: lite answers sqlite/storage."""
+    """The one-container key set: sqlite/storage, never postgres/minio."""
     async def ok():
         return None
 
@@ -39,26 +24,6 @@ async def test_check_readiness_lite_key_set(monkeypatch):
     assert all(check["status"] == "ok" for check in result["checks"].values())
 
 
-@full_stack_only
-@pytest.mark.asyncio
-async def test_check_readiness_ok(monkeypatch):
-    async def ok():
-        return None
-
-    monkeypatch.setattr(health_service, "_check_postgres", ok)
-    monkeypatch.setattr(health_service, "_check_redis", ok)
-    monkeypatch.setattr(health_service, "_check_minio", ok)
-    monkeypatch.setattr(health_service, "_check_qdrant", ok)
-    monkeypatch.setattr(health_service, "_check_mcp_hub", ok)
-
-    result = await health_service.check_readiness()
-
-    assert result["status"] == "ok"
-    assert set(result["checks"]) == {"postgres", "redis", "minio", "qdrant", "mcp_hub"}
-    assert all(check["status"] == "ok" for check in result["checks"].values())
-
-
-@full_stack_only
 @pytest.mark.asyncio
 async def test_check_readiness_degraded_when_dependency_fails(monkeypatch):
     async def ok():
@@ -67,9 +32,9 @@ async def test_check_readiness_degraded_when_dependency_fails(monkeypatch):
     async def failed():
         raise RuntimeError("connection refused to test dependency")
 
-    monkeypatch.setattr(health_service, "_check_postgres", ok)
+    monkeypatch.setattr(health_service, "_check_sqlite", ok)
     monkeypatch.setattr(health_service, "_check_redis", ok)
-    monkeypatch.setattr(health_service, "_check_minio", ok)
+    monkeypatch.setattr(health_service, "_check_storage", ok)
     monkeypatch.setattr(health_service, "_check_qdrant", failed)
     monkeypatch.setattr(health_service, "_check_mcp_hub", ok)
 
@@ -78,7 +43,7 @@ async def test_check_readiness_degraded_when_dependency_fails(monkeypatch):
     assert result["status"] == "degraded"
     assert result["checks"]["qdrant"]["status"] == "failed"
     assert "connection refused" in result["checks"]["qdrant"]["error"]
-    assert result["checks"]["postgres"]["status"] == "ok"
+    assert result["checks"]["sqlite"]["status"] == "ok"
 
 
 def test_sanitize_error_limits_length_and_removes_newlines():

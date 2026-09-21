@@ -48,18 +48,18 @@ class _DocRow:
 def test_build_config_summary_excludes_secret_values(monkeypatch):
     monkeypatch.setattr(diagnostics_service.settings, "JWT_SECRET_KEY", "super-secret-jwt")
     monkeypatch.setattr(diagnostics_service.settings, "OPENAI_API_KEY", "sk-secret")
-    monkeypatch.setattr(diagnostics_service.settings, "DATABASE_URL", "postgres://secret")
-    monkeypatch.setattr(diagnostics_service.settings, "REDIS_URL", "redis://secret")
+    monkeypatch.setattr(diagnostics_service.settings, "DATABASE_URL", "sqlite:////data/secret.db")
+    monkeypatch.setattr(diagnostics_service.settings, "SENDGRID_API_KEY", "SG.secret")
 
     summary = diagnostics_service.build_config_summary()
     flattened = str(summary)
 
     assert "super-secret-jwt" not in flattened
     assert "sk-secret" not in flattened
-    assert "postgres://secret" not in flattened
-    assert "redis://secret" not in flattened
+    assert "sqlite:////data/secret.db" not in flattened
+    assert "SG.secret" not in flattened
     assert summary["llm_model"]
-    assert summary["minio_bucket"]
+    assert summary["storage_backend"]
 
 
 @pytest.mark.asyncio

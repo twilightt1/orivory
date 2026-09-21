@@ -18,20 +18,9 @@ from app.main import app
 from app.schemas.Orivory import ImportSummary
 from app.services import import_service
 
-
-@pytest.fixture(autouse=True)
-async def _require_test_database():
-    """These suites manage their own loop-local engines (not the shared `db`
-    fixture), so they probe Postgres directly and skip when it is down."""
-    from tests.conftest import require_db_available
-
-    await require_db_available()
-
-
 # The two DB-FREE pins — the summary shape (T4's `suppressed_skipped`) and the
 # byte-exact full-request seam — live in tests/api/test_import_summary_shape.py
-# and nowhere else: this module's autouse probe above would skip them whenever
-# Postgres is down, which is exactly the run the P4b CI step (no services) is.
+# and nowhere else.
 # Everything left here needs a live session.
 
 

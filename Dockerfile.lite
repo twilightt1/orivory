@@ -4,7 +4,7 @@
 #
 #   docker build -f Dockerfile.lite -t orivory:lite .
 #   docker run -d -p 8000:8000 -v orivory-data:/data \
-#     -e LITE_MODE=1 -e OPENAI_API_KEY=sk-... orivory:lite
+#     -e OPENAI_API_KEY=sk-... orivory:lite
 #
 # The Next.js frontend is NOT included (lite targets agents via /mcp + API).
 
@@ -13,9 +13,7 @@ FROM python:3.13-slim
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    LITE_MODE=1 \
     DATABASE_URL=sqlite+aiosqlite:////data/orivory.db \
-    REDIS_URL= \
     QDRANT_MODE=local \
     QDRANT_LOCAL_PATH=/data/qdrant \
     LOCAL_E5_DIR=/data/models/e5 \

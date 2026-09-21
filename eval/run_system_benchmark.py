@@ -17,7 +17,7 @@ ranking via the retriever). Nothing fabricated. This is the FIRST
 system-vs-baseline comparison — same seed, same judge, same n.
 
 Usage (from a checkout with .env, dataset under eval/benchmarks/data/):
-    LITE_MODE=1 QDRANT_MODE=local python3 eval/run_system_benchmark.py \
+    QDRANT_MODE=local python3 eval/run_system_benchmark.py \
         --n 20 [--seed 20260906] [--concurrency 4]
 """
 from __future__ import annotations
@@ -45,11 +45,10 @@ for line in ENV_FILE.open():
         key, _, value = line.partition("=")
         os.environ.setdefault(key.strip(), value.strip())
 
-# Lite-mode stack: SQLite + in-process Qdrant (no external services).
-# NOTE: hard overrides, not setdefault — pydantic Settings reads .env
-# (which carries a postgres DATABASE_URL), and os.environ BEATS env_file,
-# so these must land in os.environ unconditionally.
-os.environ["LITE_MODE"] = "1"
+# The shipped stack: SQLite + in-process Qdrant (no external services).
+# NOTE: hard overrides, not setdefault — pydantic Settings reads .env (which
+# may carry a DATABASE_URL), and os.environ BEATS env_file, so these must
+# land in os.environ unconditionally.
 os.environ["QDRANT_MODE"] = "local"
 os.environ["JWT_SECRET_KEY"] = "benchmark-run-secret-key-not-for-prod"
 _RESULTS_DIR = ROOT / "eval/benchmarks/results"

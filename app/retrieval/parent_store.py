@@ -149,14 +149,7 @@ async def _load_batch_from_db(
 
 
 def store_parents_sync(conversation_id: str, parents: list[dict]) -> None:
-    from app.config import settings
-
-    if not settings.REDIS_URL:  # lite mode: async path uses InMemoryRedis
-        return
-    import redis as redis_lib
-
-    r    = redis_lib.from_url(settings.REDIS_URL, decode_responses=True)
-    pipe = r.pipeline()
-    for p in parents:
-        pipe.setex(_key(conversation_id, p["id"]), TTL, json.dumps(p))
-    pipe.execute()
+    # The parent cache lives in the process-local InMemoryRedis, which only the
+    # async path can reach (`get_redis()` is a coroutine): `store_parents`
+    # owns the write.
+    return None

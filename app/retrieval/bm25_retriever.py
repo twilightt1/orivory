@@ -8,12 +8,12 @@ from rank_bm25 import BM25Okapi
 
 log = logging.getLogger(__name__)
 
-# Redis key holding a monotonically increasing "generation" per conversation.
-# Any mutation to a conversation's parent chunks (ingestion complete, document
-# delete, conversation delete) bumps this counter. Each worker process records
-# the generation its in-memory index was built at and rebuilds lazily when it
-# falls behind. This keeps the per-process BM25 indexes consistent across
-# uvicorn workers and Celery workers without a shared search service.
+# In-process counter holding a monotonically increasing "generation" per
+# conversation. Any mutation to a conversation's parent chunks (ingestion
+# complete, document delete, conversation delete) bumps it, and each reader
+# records the generation its in-memory index was built at and rebuilds lazily
+# when it falls behind. The one-container stack runs a single process, so the
+# store behind it is the process-local InMemoryRedis.
 _GEN_KEY = "bm25_gen:{cid}"
 
 _TOKEN_RE = re.compile(r"\w+", re.UNICODE)
@@ -54,18 +54,6 @@ class BM25Retriever:
 
             redis = await get_redis()
             await redis.incr(_GEN_KEY.format(cid=conversation_id))
-        except Exception as exc:
-            log.warning("BM25 generation bump failed", extra={"conversation_id": conversation_id, "error": str(exc)})
-
-    @staticmethod
-    def _bump_generation_sync(conversation_id: str) -> None:
-        try:
-            import redis as redis_lib
-
-            from app.config import settings
-
-            r = redis_lib.from_url(settings.REDIS_URL, decode_responses=True)
-            r.incr(_GEN_KEY.format(cid=conversation_id))
         except Exception as exc:
             log.warning("BM25 generation bump failed", extra={"conversation_id": conversation_id, "error": str(exc)})
 
@@ -166,14 +154,14 @@ class BM25Retriever:
     # ── publish: mutate + bump shared generation ────────────────────────
 
     def publish_build_sync(self, conversation_id: str, parents: list[dict]) -> None:
-        """Build the local index and signal other processes to rebuild.
+        """Build the local index. Called from the (synchronous) ingestion task
+        after chunks are committed.
 
-        Called from the (synchronous) ingestion task after chunks are
-        committed. Bumps the shared generation so uvicorn workers rebuild
-        from the DB on their next query.
+        Nothing to signal in the one-container stack: the index built here IS
+        the one this process serves, and the in-process generation counter is
+        only reachable from a coroutine.
         """
         self.build_from_parents(conversation_id, parents)
-        self._bump_generation_sync(conversation_id)
 
     async def publish_rebuild_async(self, db, conversation_id: str) -> None:
         """Rebuild the local index from the DB and signal other processes."""

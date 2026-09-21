@@ -7,8 +7,8 @@ Start here. Everything else is organized by purpose:
 | Doc | Contents |
 |---|---|
 | [../README.md](../README.md) | Product overview + quick start |
-| [LITE_MODE.md](LITE_MODE.md) | One-container lite mode (SQLite, no external services) |
-| [LOCAL_RUN_GUIDE.md](LOCAL_RUN_GUIDE.md) | Run the stack locally (dev mode, per-service) |
+| [LITE_MODE.md](LITE_MODE.md) | One container (SQLite + embedded Qdrant, no external services) — the whole product |
+| [LOCAL_RUN_GUIDE.md](LOCAL_RUN_GUIDE.md) | Run the stack locally (dev mode) |
 | [DEPLOYMENT_GUIDE.md](DEPLOYMENT_GUIDE.md) | Production deployment |
 | [OPERATIONS_RUNBOOK.md](OPERATIONS_RUNBOOK.md) | Day-2 ops: logs, backups rotation, common failures |
 | [BACKUP_RESTORE.md](BACKUP_RESTORE.md) | Backup/restore procedures |

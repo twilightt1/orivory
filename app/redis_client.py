@@ -1,36 +1,22 @@
-"""Redis access with a zero-dependency lite-mode fallback.
+"""Redis access: the in-process ``InMemoryRedis`` stand-in, always.
 
-Full-stack deployments set ``REDIS_URL`` and get a real Redis connection
-pool. Lite mode (``REDIS_URL`` empty, as ``LITE_MODE=1`` defaults) returns
-an in-process ``InMemoryRedis`` that covers the exact API surface the app
-uses — get/set/setex/delete/incr/expire/ping plus the sorted-set calls of
-the rate limiter — so caches and rate limiting keep working without Redis.
+One container, zero external services: there is no Redis server to talk to,
+so ``get_redis()`` hands every caller the same process-local client. It
+covers the exact API surface the app uses — get/set/setex/delete/mget/incr/
+expire/ping, the scan forms of the cache invalidators, and the sorted-set
+calls of the rate limiter — so caches and rate limiting keep working without
+Redis. Data is per-process and lost on restart: acceptable for caches and
+rate limits, which is all this store is used for.
 """
 from __future__ import annotations
 
-import asyncio
 import time
 from collections.abc import AsyncIterator
-from typing import TYPE_CHECKING, Any
-
-if TYPE_CHECKING:  # pragma: no cover — imported lazily in get_pool()
-    from redis.asyncio import ConnectionPool, Redis
-
-from app.config import settings
-
-_pool: ConnectionPool | None = None
-_pool_loop: object | None = None
-_memory_redis: InMemoryRedis | None = None
+from typing import Any
 
 
 class InMemoryRedis:
-    """Process-local Redis stand-in (single-instance lite mode only).
-
-    Implements the subset of redis.asyncio.Redis that Orivory calls:
-    string ops, counters, expiry, and the sorted-set operations of the
-    rate limiter. Data is per-process and lost on restart — acceptable for
-    caches and rate limits, which is all lite mode uses Redis for.
-    """
+    """Process-local Redis stand-in (single-process deployment only)."""
 
     def __init__(self) -> None:
         self._data: dict[str, str] = {}
@@ -43,14 +29,29 @@ class InMemoryRedis:
         if expires is not None and expires < time.monotonic():
             self._data.pop(key, None)
             self._zsets.pop(key, None)
+            self._sets.pop(key, None)
             self._expiry.pop(key, None)
             return False
-        return key in self._data or key in self._zsets
+        return key in self._data or key in self._zsets or key in self._sets
 
     async def get(self, key: str) -> str | None:
         return self._data.get(key) if self._live(key) else None
 
-    async def set(self, key: str, value: Any, ex: int | None = None) -> bool:
+    async def mget(self, keys: list[str]) -> list[str | None]:
+        return [self._data.get(key) if self._live(key) else None for key in keys]
+
+    async def set(
+        self, key: str, value: Any, ex: int | None = None, nx: bool = False
+    ) -> bool | None:
+        """SET with the redis-py NX contract.
+
+        ``nx=True`` sets only when the key does not exist, answering True on
+        the set and None when it already exists (the atomic-window pattern
+        ``_count_with_window`` relies on). Without ``nx`` it always sets and
+        answers True.
+        """
+        if nx and self._live(key):
+            return None
         self._data[key] = str(value)
         if ex is not None:
             self._expiry[key] = time.monotonic() + ex
@@ -59,7 +60,8 @@ class InMemoryRedis:
         return True
 
     async def setex(self, key: str, seconds: int, value: Any) -> bool:
-        return await self.set(key, value, ex=seconds)
+        await self.set(key, value, ex=seconds)
+        return True
 
     async def delete(self, *keys: str) -> int:
         removed = 0
@@ -68,6 +70,7 @@ class InMemoryRedis:
                 removed += 1
             self._data.pop(key, None)
             self._zsets.pop(key, None)
+            self._sets.pop(key, None)
             self._expiry.pop(key, None)
         return removed
 
@@ -103,6 +106,8 @@ class InMemoryRedis:
         return added
 
     async def srem(self, key: str, *members: str) -> int:
+        if not self._live(key):
+            return 0
         members_set = self._sets.get(key, set())
         removed = 0
         for member in members:
@@ -112,7 +117,7 @@ class InMemoryRedis:
         return removed
 
     async def smembers(self, key: str) -> set[str]:
-        return set(self._sets.get(key, set()))
+        return set(self._sets.get(key, set())) if self._live(key) else set()
 
     # sorted sets (rate limiter)
     async def zadd(self, key: str, mapping: dict[str, float]) -> int:
@@ -135,16 +140,34 @@ class InMemoryRedis:
             del zset[member]
         return len(stale)
 
-    async def scan_iter(self, match: str | None = None) -> AsyncIterator[str]:
-        import fnmatch
+    async def scan(
+        self, cursor: int = 0, match: str | None = None, count: int | None = None
+    ) -> tuple[int, list[str]]:
+        """One-shot SCAN: every matching live key, with a terminal cursor.
 
-        for key in list(self._data):
-            if self._live(key) and (match is None or fnmatch.fnmatch(key, match)):
+        The in-process store has no bucket to page through, so the first call
+        answers ``(0, keys)`` and every caller's ``while True`` loop exits on
+        the same check it already makes.
+        """
+        return 0, [key for key in self._scan_keys() if match is None or _match(key, match)]
+
+    async def scan_iter(self, match: str | None = None) -> AsyncIterator[str]:
+        for key in self._scan_keys():
+            if match is None or _match(key, match):
                 yield key
+
+    def _scan_keys(self) -> list[str]:
+        return [key for key in list(self._data) if self._live(key)]
 
     # async-iterator-less contexts some callers may use
     def pipeline(self):  # pragma: no cover — unused by current call sites
         return _InMemoryPipeline(self)
+
+
+def _match(key: str, pattern: str) -> bool:
+    import fnmatch
+
+    return fnmatch.fnmatch(key, pattern)
 
 
 class _InMemoryPipeline:
@@ -204,33 +227,15 @@ class _InMemoryPipeline:
         return results
 
 
-def get_pool() -> ConnectionPool:
-    global _pool, _pool_loop
-    try:
-        current_loop = asyncio.get_running_loop()
-    except RuntimeError:
-        current_loop = None
-
-    if _pool is None or (_pool_loop is not None and current_loop is not None and _pool_loop is not current_loop):
-        from redis.asyncio import ConnectionPool as _ConnectionPool
-
-        _pool = _ConnectionPool.from_url(
-            settings.REDIS_URL,
-            max_connections=settings.REDIS_POOL_MAX,
-            decode_responses=True,
-        )
-        _pool_loop = current_loop
-    return _pool
+_memory_redis: InMemoryRedis | None = None
 
 
-async def get_redis() -> Redis | InMemoryRedis:
-    """Return the shared Redis client, or the in-memory stand-in in lite mode."""
+async def get_redis() -> InMemoryRedis:
+    """Return the shared in-process client (there is no other kind)."""
     global _memory_redis
-    if not settings.REDIS_URL:
-        if _memory_redis is None:
-            _memory_redis = InMemoryRedis()
-        return _memory_redis
-    return Redis(connection_pool=get_pool())
+    if _memory_redis is None:
+        _memory_redis = InMemoryRedis()
+    return _memory_redis
 
 
-__all__ = ["InMemoryRedis", "get_pool", "get_redis"]
+__all__ = ["InMemoryRedis", "get_redis"]

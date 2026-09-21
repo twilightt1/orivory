@@ -7,11 +7,9 @@ import pytest
 import pytest_asyncio
 
 _TEST_ENV_DEFAULTS = {
-    # The lite shape these live modules run against: SQLite + embedded Qdrant +
+    # The shape these live modules run against: SQLite + embedded Qdrant +
     # filesystem storage, i.e. the one container `docker compose up -d` boots.
-    "LITE_MODE": "1",
     "DATABASE_URL": "sqlite+aiosqlite:////tmp/orivory-live-integration.db",
-    "REDIS_URL": "",
     "JWT_SECRET_KEY": "test-secret-key-change-in-production",
     "STORAGE_BACKEND": "fs",
     "FS_STORAGE_PATH": "/tmp/orivory-live-storage",

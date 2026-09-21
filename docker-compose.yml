@@ -3,24 +3,25 @@
 # background work eager in-process. Celery/Redis/MinIO/Flower and the
 # Postgres/Qdrant servers were dropped on the slim branch.
 #
-#   docker compose up -d          # http://localhost:8000  (MCP: /mcp)
+#   docker compose up -d          # http://127.0.0.1:8000  (MCP: /mcp)
 #
 # The host directory below holds EVERYTHING stateful — the paths come from
 # app/config.py: /data/orivory.db (SQLite), /data/qdrant (embedded Qdrant),
 # /data/uploads (uploaded files). On a Linux host make it writable by the
 # image's `app` user before the first boot:  mkdir -p data && chmod 777 data
+#
+# The API binds 127.0.0.1 on the HOST (loopback only) — put a reverse proxy in
+# front of it to expose it. The container itself listens on 0.0.0.0.
 services:
   app:
     build: .
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     env_file: .env
     environment:
-      LITE_MODE: "1"
-      # Pinned so a full-stack .env cannot silently retarget the lite store
+      # Pinned so a stale .env cannot silently retarget the store
       # (env_file values lose to this block).
       DATABASE_URL: sqlite+aiosqlite:////data/orivory.db
-      REDIS_URL: ""
       QDRANT_MODE: local
       QDRANT_LOCAL_PATH: /data/qdrant
       STORAGE_BACKEND: fs

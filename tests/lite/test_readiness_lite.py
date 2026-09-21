@@ -16,7 +16,7 @@ from app.services import health_service
 
 
 def _lite(monkeypatch, folder) -> None:
-    """LITE_MODE's shape: embedded Qdrant, no external services."""
+    """The shipped shape: embedded Qdrant, no external services."""
     monkeypatch.setattr(settings, "QDRANT_MODE", "local")
     monkeypatch.setattr(settings, "QDRANT_LOCAL_PATH", str(folder))
 

@@ -77,10 +77,10 @@ async def register_email(db: AsyncSession, email: str, password: str) -> User:
         raise HTTPException(409, detail=detail)
 
     user = User(email=email, hashed_password=await _hash_async(password), auth_provider="email",
-                # ponytail: single-user lite with no email provider has no way to
-                # deliver OTPs — verification mail would be a mock into the void.
-                # Trust local registration; full-stack keeps the OTP gate.
-                is_verified=(settings.LITE_MODE and not settings.SENDGRID_API_KEY),
+                # ponytail: single-user self-host with no email provider has no
+                # way to deliver OTPs — verification mail would be a mock into
+                # the void. Trust local registration when SendGrid is unset.
+                is_verified=(not settings.SENDGRID_API_KEY),
                 onboarding_done=False)
     db.add(user)
     try:

@@ -15,8 +15,8 @@ class GUID(_SaUuid):
 
     SQLAlchemy's native ``Uuid`` type rejects str-bound values on SQLite
     when the value arrives as a string (e.g. straight from Pydantic).
-    This subclass coerces str → uuid.UUID before binding so every driver
-    (asyncpg, sqlite) sees a real UUID object.
+    This subclass coerces str → uuid.UUID before binding so the driver
+    sees a real UUID object.
     """
 
     def bind_processor(self, dialect):

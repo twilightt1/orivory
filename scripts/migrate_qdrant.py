@@ -189,35 +189,34 @@ def data_generation(kind: str) -> str:
 
 @contextmanager
 def _session(readonly: bool = False) -> Iterator[Session]:
+    # SQLite only, like the app: app.database refuses any other DATABASE_URL
+    # at import, so there is no other dialect for this CLI to open.
     url = settings.DATABASE_URL
-    if url.startswith("sqlite"):
-        path = make_url(url).database
-        if readonly:
-            # Strictly read-only (R28): the file cannot be written, not even a
-            # journal — `inventory` must never touch the operator's data.
-            engine = create_engine(
-                f"sqlite:///file:{path}?mode=ro&uri=true", poolclass=NullPool
-            )
-            try:
-                with engine.connect() as probe:
-                    probe.execute(text("SELECT 1"))
-            except OperationalError as exc:
-                engine.dispose()
-                raise MigrationRefused(
-                    "cannot open the database read-only: a non-empty WAL needs its "
-                    "`-shm` sidecar, which this file does not have. Checkpoint the "
-                    "copy first (`sqlite3 <db> 'PRAGMA wal_checkpoint(TRUNCATE)'`), or "
-                    f"run `backup` first and inventory the snapshot ({exc})"
-                ) from exc
-        else:
-            engine = create_engine(
-                url.replace("+aiosqlite", ""),
-                connect_args={"check_same_thread": False},
-                poolclass=NullPool,
-            )
-            event.listen(engine, "connect", database._configure_sqlite_connection)
+    path = make_url(url).database
+    if readonly:
+        # Strictly read-only (R28): the file cannot be written, not even a
+        # journal — `inventory` must never touch the operator's data.
+        engine = create_engine(
+            f"sqlite:///file:{path}?mode=ro&uri=true", poolclass=NullPool
+        )
+        try:
+            with engine.connect() as probe:
+                probe.execute(text("SELECT 1"))
+        except OperationalError as exc:
+            engine.dispose()
+            raise MigrationRefused(
+                "cannot open the database read-only: a non-empty WAL needs its "
+                "`-shm` sidecar, which this file does not have. Checkpoint the "
+                "copy first (`sqlite3 <db> 'PRAGMA wal_checkpoint(TRUNCATE)'`), or "
+                f"run `backup` first and inventory the snapshot ({exc})"
+            ) from exc
     else:
-        engine = create_engine(url.replace("+asyncpg", "+psycopg2"), pool_pre_ping=True)
+        engine = create_engine(
+            url.replace("+aiosqlite", ""),
+            connect_args={"check_same_thread": False},
+            poolclass=NullPool,
+        )
+        event.listen(engine, "connect", database._configure_sqlite_connection)
     session = sessionmaker(bind=engine, expire_on_commit=False, autoflush=False)()
     try:
         yield session

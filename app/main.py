@@ -109,13 +109,12 @@ def _refuse_multi_owner_local_qdrant() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     _refuse_multi_owner_local_qdrant()
-    log.info("Starting RAG backend", environment=settings.ENVIRONMENT, lite=settings.LITE_MODE)
-    if settings.DATABASE_URL.startswith("sqlite"):
-        # Lite mode: versioned fresh-install bootstrap; an existing unversioned
-        # SQLite schema fails closed until a reviewed migration is applied.
-        from app.database import bootstrap_sqlite
-        await bootstrap_sqlite()
-        log.info("SQLite schema bootstrapped")
+    log.info("Starting RAG backend", environment=settings.ENVIRONMENT)
+    # Versioned fresh-install bootstrap; an existing unversioned SQLite schema
+    # fails closed until a reviewed migration is applied.
+    from app.database import bootstrap_sqlite
+    await bootstrap_sqlite()
+    log.info("SQLite schema bootstrapped")
     from app.retrieval.memory.drain_loop import start_drain_loop, stop_drain_loop
 
     # The session is built BEFORE the boot drain: the drain embeds too, and a

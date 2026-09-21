@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import logging
 
-from app.config import settings
 from app.redis_client import get_redis
 
 log = logging.getLogger(__name__)
@@ -56,13 +55,7 @@ async def invalidate_query_cache(conversation_id: str) -> int:
 
 
 def invalidate_query_cache_sync(conversation_id: str) -> int:
-    if not settings.REDIS_URL:  # lite mode: async path uses InMemoryRedis
-        return 0
-    import redis as redis_lib
-
-    redis = redis_lib.from_url(settings.REDIS_URL, decode_responses=True)
-    pattern = f"{query_cache_prefix(conversation_id)}*"
-    deleted = 0
-    for key in redis.scan_iter(match=pattern, count=100):
-        deleted += redis.delete(key)
-    return deleted
+    # The cache lives in the process-local InMemoryRedis, which only the async
+    # path can reach (`get_redis()` is a coroutine): a synchronous caller has
+    # nothing to invalidate — `invalidate_query_cache` owns it.
+    return 0

@@ -2,14 +2,16 @@
 #   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
 #
 # The lite stack has no internal services to hide: the only published port is
-# the API's own 8000. `!override` REPLACES the sequence (Compose merges
-# sequences otherwise), so the dev bind mount of ./data cannot survive into
-# prod — the deployment writes into a named volume instead.
+# the API's own 8000, loopback-only on the host. `!override` REPLACES the
+# sequence (Compose merges sequences otherwise), so the dev bind mount of
+# ./data cannot survive into prod — the deployment writes into a named volume
+# instead — and the published port is pinned to 127.0.0.1 either way.
 services:
   app:
     environment:
       ENVIRONMENT: production
-      LITE_MODE: "1"
+    ports: !override
+      - "127.0.0.1:8000:8000"
     volumes: !override
       - orivory-data:/data
     # Embedded Qdrant is owned by exactly ONE process (the store folder is
