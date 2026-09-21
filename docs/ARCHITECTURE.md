@@ -3,7 +3,7 @@
 > Single source of truth for how Orivory works. Supersedes the pre-pivot
 > `architecture.md` / `TECHNICAL_ARCHITECTURE_v2.md` /
 > `SOTA_TECHNICAL_SPECIFICATION.md` / `AI_ML_OVERVIEW.md` (removed — history
-> lives in git). Last verified against the code: 2026-09-17.
+> lives in git). Last verified against the code: 2026-09-22.
 
 Orivory is a **memory hub for AI agents**. One mental model:
 
@@ -11,17 +11,21 @@ Orivory is a **memory hub for AI agents**. One mental model:
                     ┌─────────────────────────────────────┐
    AI agents        │            Orivory (self-hosted)    │
    (Claude, Cursor, │                                     │
-   OpenClaw, …) ────┼─▶ /mcp  ──▶ mcp_hub (scoped tools)  │
-   second-brain  ───┼─▶ /api/v1  ──▶ REST (chat, memories,│
-   web app       ───┤             imports, erasure, …)    │
+   OpenClaw, …) ────┼─▶ /mcp    ──▶ mcp_hub (scoped tools)│
                     │                                     │
-                    │   memory store (Postgres + Qdrant)  │
-                    │   knowledge graph · access ledger   │
+                    │  ─▶ /api/v1 ──▶ REST (memories,     │
+                    │                imports, erasure, …) │
+                    │                                     │
+                    │   memory store (SQLite + embedded   │
+                    │   Qdrant) · knowledge graph         │
+                    │   access ledger · erasure receipts  │
                     └─────────────────────────────────────┘
 ```
 
-Everything — REST and MCP — funnels into the same memory store, so the
-second-brain web app and any connected agent share one brain.
+Everything — REST and MCP — funnels into the same memory store, so every
+connected agent reads and writes one brain. The whole thing is ONE process in
+one container: no server to talk to beyond the API itself, no second service to
+keep alive.
 
 ## 1. The memory spine
 
@@ -29,14 +33,14 @@ The core claim: **one brain, many ways to ask.** Two worlds used to live
 side by side (per-conversation documents vs per-user memories); the hub
 unifies them.
 
-- **`memories`** (Postgres) — the source of truth. Every memory carries
+- **`memories`** (SQLite) — the source of truth. Every memory carries
   `user_id`, `source_type` (manual_note, chatgpt_import, claude_import,
   generic_import, mcp_agent, conversation_excerpt, …), `source_ref`
   (dedup key), `content`, `tags`, and the salience fields
   (`salience`, `recall_count`, `last_used_at`).
 - **Namespace (P4a) — an authorization boundary, not a tag.** Every memory row
   carries `namespace` (`VARCHAR(32) NOT NULL DEFAULT 'personal'`, index on
-  `(namespace, user_id)`; SQLite ladder v5, Alembic revision for Postgres). Two
+  `(namespace, user_id)`; SQLite ladder v5). Two
   rows with the same text in two namespaces are two facts with different
   owners' permissions: every reader/writer/admin/export composes
   `visibility.namespace_predicate(...)` — the ONE spelling, built from
@@ -57,24 +61,26 @@ unifies them.
   [OPERATIONS_RUNBOOK.md](OPERATIONS_RUNBOOK.md) §P4a.
 - **Qdrant** — the vector index, one generation per kind and embedding
   contract (`orivory_memories__<contract>`, `orivory_chunks__<contract>`),
-  written best-effort after every DB write (Postgres is truth; the reindex
-  task rebuilds vectors from rows). Which generation is active per kind is a
-  row in `index_generations`; a store that cannot name its contract is
-  quarantined rather than served (P1b cutover, see §7).
+  written best-effort after every DB write (SQLite is truth; the drain loop
+  rebuilds vectors from rows). Which generation is active per kind is a row in
+  `index_generations`; a store that cannot name its contract is quarantined
+  rather than served.
 - **Lexical leg + reranking (P2)** — memory recall is DENSE-only by default.
   A SQLite FTS5 lexical leg (`memory_fts`, schema ladder v4) can be fused with
   the dense page by RRF when `RETRIEVAL_HYBRID_ENABLED=true` — it ships OFF,
   and only the T7 ablation artifact (`eval/ablation_retrieval_p2.json`) may
   enable it. Where a vector outage hits, the SQLite lexical leg answers alone
-  (typed 503 on Postgres, which has no lexical leg). Cross-encoder rerank
+  (a typed 503 where no lexical leg exists). Cross-encoder rerank
   (`RETRIEVAL_SEMANTIC_RERANK`) is opt-in per deployment; a reranked head is
   MERGED into dense order, so the served count never shrinks because rerank ran.
 - **Salience loop** — memories used in answers get bumped; untouched ones
   decay. Ranking is salience × recency × relevance (the Generative-Agents
   scoring, reinforced on access); the decay is computed when a memory is
-  scored, not by a periodic job (the slim branch has no beat/scheduler).
-- **Knowledge graph** — `entities` / `relations` extracted per memory;
-  graph snapshot/related endpoints power the UI; graph context feeds RAG.
+  scored, not by a periodic job (there is no beat/scheduler).
+- **Knowledge graph** — `entities` / `relations` extracted per memory and
+  written back best-effort after the row commits (`app/graph/builder.py`,
+  scheduled off the write path); nothing serves the graph — no router is mounted
+  for it, and recall builds its context from the recalled memories.
 - **Lifecycle states (P4b) — one state machine, one closure.** `state_of`
   (`app/retrieval/memory/correction.py`) labels every row
   `invalidated > superseded > dirty > needs-check > current`, mirrored in SQL by
@@ -132,7 +138,9 @@ where identity, permissions and audit live.
 — the per-client token IS the identity, resolved at the hub.
 
 **Ledger.** `memory_access_logs` is append-only: one row per authorized tool
-call (`mcp_search/get/list/add/delete/forget`) with principal attribution.
+call (`mcp_search`, `mcp_get`, `mcp_list`, `mcp_add`, `mcp_correct`,
+`mcp_delete`, `mcp_forget`) with principal attribution, plus `import` for an
+agent-token upload and `retention_expired` from the retention sweep.
 Ledger rows survive memory deletion (`memory_id` is SET NULL) — an audit
 trail records that access happened before deletion.
 
@@ -210,27 +218,32 @@ memories:
 - **Honest notes** — Rewind/Limitless have no adapter (SQLCipher-encrypted
   local SQLite, no official export); ChatGPT "Memory" feature contents are
   not in the data export; OpenRecall converts via one sqlite3 query
-  (recipe in docs/API.md §15).
+  (recipe in docs/API.md §9).
 
-## 5. Multi-agent RAG (`app/agents/`)
+## 5. LLM seams (`app/agents/`)
 
-LangGraph pipeline with specialized agents (router → context → retrieval →
-grounding → answer, plus evaluator / hallucination / feedback /
-graph-context / discovery / insight agents) and **corrective RAG**:
-self-evaluated retrieval quality, web-search fallback, hallucination
-detection before delivery, per-answer grounding confidence surfaced in SSE
-and persisted in `agent_trace` (admin quality-trend endpoint aggregates it).
+There is no agent graph: the LangGraph chat workflow went with the chat surface.
+What remains is the shared LLM plumbing that every server-side seam calls.
 
-Answer temperature is pinned to 0.0 for factual recall; contexts are budgeted
-by characters before the LLM call; the fallback answer is an explicit
-"I don't recall that in your memories" (never silent invention).
+| Module | Role |
+|---|---|
+| `llm_client.py` | ONE client factory + `complete()` wrapper: api key / base URL / timeout, the `LLM_MAX_CONCURRENCY` shared gate, and a cost hook that records usage |
+| `llm_parsing.py` | Structured-output parsing (`parse_llm_json_object`) |
+| `state.py` | The `AgentState` TypedDict the retrieval seams pass around |
+
+Callers: recall's query rewrite + entity extraction
+(`app/retrieval/memory/query_rewriter.py` — a failed or malformed rewrite falls
+back to the original query with an empty entity list), the graph write-back
+(`app/graph/extraction.py`), the consolidation rule
+(`app/retrieval/memory/consolidation.py`, `tag-summary.v1`) and HyDE
+(`app/retrieval/hyde_agent.py`). `routing.py` holds the old graph's routing
+helpers and has no caller left in the tree.
 
 ## 6. Evaluation (`eval/`)
 
 - **RAG eval** — golden dataset + deterministic offline metrics
-  (source-hit, keyword coverage, citation rate, fallback accuracy) and an
-  opt-in live-API mode with SSE trace collection. See
-  `docs/EVALUATION_GUIDE.md`.
+  (source-hit, keyword coverage, citation rate, fallback accuracy). One lane:
+  `python eval/run_eval.py --mode offline`. See `docs/EVALUATION_GUIDE.md`.
 - **Benchmarks** (`eval/benchmarks/`) — LongMemEval-S (primary; ICLR 2025)
   and MemoryAgentBench (secondary; the only benchmark scoring selective
   forgetting) adapters with a phased runner. The no-fabrication guarantee is
@@ -239,76 +252,50 @@ by characters before the LLM call; the fallback answer is an explicit
   baseline, deviations) are reserved. Protocol rationale and the LoCoMo
   never-lead rule: [PAPERS_AGENT_MEMORY.md §3](https://github.com/twilightt1/orivory-private/blob/main/docs/research/PAPERS_AGENT_MEMORY.md) (private).
 
-## 7. Data & migrations
+## 7. Data, storage and the schema ladder
 
-- Postgres 16 (SQLAlchemy 2.0 async + Alembic), Redis 7 (cache/queue),
-  Qdrant (vectors), MinIO (attachments).
-- Migrations are part of `docker compose up`: the one-shot `migrate`
-  service runs `alembic upgrade head`, and `app` gates on
-  `service_completed_successfully` — a server can never start against a
-  table-less database. Migrations were dry-run-verified on disposable
-  Postgres 16 (upgrade / downgrade / re-upgrade / INSERT probes).
-- Health: `/health` liveness; `/ready` per-dependency checks (postgres,
-  redis, minio, qdrant, mcp_hub) with latencies and sanitized errors.
-- **P1b migration before serving.** The vector store moved from Chroma to
-  Qdrant and the embedding contract from masked mean to CLS. Until `cutover`
-  flips the generation pointers the install keeps serving its OLD generation.
-  Where that pointer names a contract the new code no longer matches (the
-  lite/P1a transitional row: masked mean) the read path deliberately **fails
-  loud** — it raises `EmbeddingDimensionMismatch` ("same dim but different
-  embedding contract") instead of serving vectors it cannot verify. With NO
-  active manifest row it does not: `outbox.active_generation()` falls back to
-  the transitional generation name with no fingerprint, an EMPTY generation is
-  allowed, and reads answer `[]`. That is the state on Postgres (P1a never
-  seeded `index_generations` there). An unchanged-contract install is empty for
-  a different reason: its row is ACTIVE and the guard passes on token equality,
-  but that row names the same pre-P1b transitional generation, whose Qdrant
-  collection is empty. SQL stays canonical; the migration rebuilds the vectors.
-  The offline sequence — `inventory → backup → backfill → verify →
-  cutover`, app stopped throughout — is in
-  [OPERATIONS_RUNBOOK.md](OPERATIONS_RUNBOOK.md), and the one-release swap-back
-  in [ROLLBACK_P1B.md](ROLLBACK_P1B.md).
-- **Index drain (P3).** A background drain loop replays pending
-  `index_outbox` intents against the vector store, and it runs on **both**
-  dialects — a Postgres deployment no longer accumulates a backlog waiting for
-  a restart (P1b's SQLite-only gate and boot-only role are gone; the boot still
-  replays one bounded batch as a warm start). One round every
-  `OUTBOX_DRAIN_INTERVAL_SECONDS` (default 5s), or immediately after a batch
-  that applied anything, so a backlog drains at full speed. Write-through is
-  unaffected (every write still embeds inline); the loop owns the RETRY path.
-  Memory recall is guarded by the freshness barrier: it waits for the calling
-  tenant's own pending intents, bounded by `RECALL_FRESHNESS_BUDGET_SECONDS`
-  (default 2.0s), and **fails closed** with a typed 503
-  (`index_freshness_timeout`) instead of answering an empty result for a write
-  that has not landed. Operationally: [OPERATIONS_RUNBOOK.md](OPERATIONS_RUNBOOK.md).
-- **SQLite schema v5 (P4a).** The ladder adds `memories.namespace` + its
-  `(namespace, user_id)` index on the `v4 -> v5` transition (ONCE; the column
-  default IS the backfill) and takes its own `<db>.pre-p4.bak` milestone
-  snapshot. A pre-P4 binary refuses a v5 file
-  (`unsupported SQLite schema version 5; expected 4`); the documented way back
-  and forward is [ROLLBACK_P1B.md](ROLLBACK_P1B.md) §7. Postgres gets the same
-  column from an Alembic revision (server default `'personal'`, NOT NULL).
-- **SQLite schema v6/v7 (P4b).** v6 adds `memory_suppressions.namespace` +
-  `content_hash` (both NULLABLE — NULL is the honest "unknown", and the hash is
-  computed at UPLOAD time by the T4 guards, never backfilled, R38); v7 adds
-  `users.retention_enabled` (NOT NULL, constant default → the ADD COLUMN IS the
-  backfill: every pre-existing user is OFF) + `users.retention_days` (NULLABLE —
-  "no window chosen" is a real state and 0 would expire everything). The v5→v6
-  transition takes the `<db>.pre-p4b.bak` milestone snapshot; Alembic carries
-  the same objects on Postgres.
+- **One file, one store.** `DATABASE_URL` must be SQLite
+  (`app/database.py` refuses any other URL); WAL mode, foreign keys enforced.
+  Uploads go to the filesystem (`STORAGE_BACKEND=fs`) and vectors into the
+  embedded Qdrant folder — all of it under `/data` in the container.
+- **The ladder.** `bootstrap_sqlite()` runs in the app lifespan, before any
+  traffic: a versioned ladder (v1 .. v7) upgrades an older file step by step and
+  takes a `<db>.pre-pN.bak` milestone snapshot as it goes (never overwritten). A
+  file NEWER than the code is refused rather than repaired
+  (`unsupported SQLite schema version N; expected M`). What the steps added: v2
+  the durable `index_outbox` / `index_generations` / `memory_suppressions`
+  tables; v4 the FTS5 lexical index + its triggers; v5 `memories.namespace` +
+  its index (P4a); v6 `memory_suppressions.namespace` and `content_hash`; v7
+  `users.retention_enabled` / `retention_days`.
+- **One process owns the vectors.** `QDRANT_MODE=local` (the default) refuses to
+  boot when the launcher asked for more than one process — an embedded storage
+  folder is exclusive.
+- **Writes are durable before they are indexed.** Every canonical write stamps an
+  `index_outbox` intent in the same commit; the drain loop replays whatever did
+  not land against the current SQL state, and a recall that outlives its
+  freshness budget answers a typed 503 instead of a false no-match. Operationally:
+  [OPERATIONS_RUNBOOK.md](OPERATIONS_RUNBOOK.md).
+- **Health.** `/health` is liveness; `/ready` is the per-check readiness payload
+  (`sqlite`, `redis`, `storage`, `qdrant`, `mcp_hub`).
+- **Backup.** `scripts/migrate_qdrant.py backup` (VACUUM INTO + sha256 manifest)
+  and `verify --restore-drill`; the unit of backup is the whole `/data`
+  directory. See [BACKUP_RESTORE.md](BACKUP_RESTORE.md).
 
 ## 8. REST surface map
 
 | Route prefix | Purpose |
 |---|---|
-| `/api/v1/auth`, `/users` | JWT + OAuth auth, registration, quotas |
-| `/api/v1/chat` | Streaming RAG chat (SSE traces) |
-| `/api/v1/memories` | Memory CRUD + recall + digest |
-| `/api/v1/agents` | Agent client registration/revoke + access ledger |
+| `/api/v1/users` | The local owner: profile + retention settings |
+| `/api/v1/memories` | Memory CRUD + recall + stats + digest |
+| `/api/v1/agents` | Agent-token mint/list/revoke + the access ledger |
 | `/api/v1/erasure-receipts` | Create/list/fetch erasure receipts |
-| `/api/v1/imports` | One-shot export upload |
-| `/api/v1/entities`, `/sources`, `/insights`, `/discovery`, `/workspaces`, `/analytics`, `/referral` | Second-brain surfaces — **dormant/unmounted on the slim branch** (`app/api/v1/router.py`; the files stay in tree and their memory reads are still covered by the namespace fence) |
-| `/mcp` | MCP server (agents) |
+| `/api/v1/imports` | One-shot provider-export upload |
+| `/mcp` | MCP server (agents), mounted while `MCP_HUB_ENABLED` |
 | `/health`, `/ready` | Liveness + readiness |
+
+`app/api/v1/router.py` mounts exactly those five routers. The rest of the
+second-brain REST surface — account auth, chat, admin, analytics, discovery,
+entities, insights, referral, sources, workspaces, … — was removed with the
+full-stack product; the deleted modules are in git history.
 
 Full request/response reference: [API.md](API.md).

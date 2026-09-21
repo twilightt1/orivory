@@ -48,7 +48,7 @@ fi
 say "starting Orivory (lite) on :$PORT — data in $DIR"
 docker rm -f orivory-lite >/dev/null 2>&1 || true
 docker run -d --name orivory-lite \
-  -p "$PORT":8000 \
+  -p "127.0.0.1:$PORT":8000 \
   -v "$DIR/data:/data" \
   --restart unless-stopped \
   "$IMAGE" >/dev/null

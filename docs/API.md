@@ -1,42 +1,51 @@
-# Orivory API Documentation v2.0
+# Orivory API
 
-**RAG-native Answer Engine for Researchers**
+An Orivory install is **one container**: the REST API, the MCP hub, SQLite, an
+embedded Qdrant and the uploads directory, with no external services. It has
+**one identity** — the local owner — and it is built to be reached by agents on
+the host it runs on.
 
-Base URL: `https://api.orivory.io/api/v1`
+Base URL on a default install:
+
+```
+http://localhost:8000
+```
+
+Two surfaces:
+
+| Surface | Routes | Credential |
+|---|---|---|
+| REST | `/api/v1/*`, `/health`, `/ready` | none — a request **without** an `Authorization` header IS the local owner |
+| MCP | `/mcp` (streamable HTTP) | an agent token: `Authorization: Bearer oa_…` or `X-Orivory-Agent-Token: oa_…` |
+
+`POST /api/v1/imports` is the one REST route that *also* accepts an agent token.
+
+**The endpoint catalogue below is taken from the app's own schema**, which the
+running install serves:
+
+```bash
+curl -s http://localhost:8000/openapi.json | python -m json.tool
+```
+
+Swagger UI (`GET /docs`) is served only when `ENVIRONMENT` is not
+`production`. If this file and `/openapi.json` ever disagree, the schema wins.
+
+## Table of contents
+
+1. [Identity](#1-identity)
+2. [Errors, rate limits and pagination](#2-errors-rate-limits-and-pagination)
+3. [Health and readiness](#3-health-and-readiness)
+4. [Memories](#4-memories)
+5. [Users](#5-users)
+6. [Agent clients and the access ledger](#6-agent-clients-and-the-access-ledger)
+7. [MCP hub](#7-mcp-hub)
+8. [Erasure receipts](#8-erasure-receipts)
+9. [Import paths](#9-import-paths)
+10. [Appendix: worked examples](#10-appendix-worked-examples)
 
 ---
 
-## Table of Contents
-
-1. [Overview](#1-overview)
-2. [Authentication](#2-authentication)
-3. [Conversations & Chat (RAG Core)](#3-conversations--chat-rag-core)
-4. [Memory (Second Brain)](#4-memory-second-brain)
-5. [Knowledge Graph](#5-knowledge-graph)
-6. [Sources & Connectors](#6-sources--connectors)
-7. [Feedback & Calibration (NEW)](#7-feedback--calibration-new)
-8. [Insights (NEW)](#8-insights-new)
-9. [Admin API](#9-admin-api)
-10. [Webhooks (Future)](#10-webhooks-future)
-11. [Rate Limits & Quotas](#11-rate-limits--quotas)
-12. [Error Reference](#12-error-reference)
-13. [Agent Clients & MCP Hub](#13-agent-clients--mcp-hub)
-14. [Erasure Receipts](#14-erasure-receipts)
-15. [Import Paths](#15-import-paths)
-16. [Appendix A: OpenAPI Schema (YAML)](#appendix-a-openapi-schema-yaml)
-17. [Appendix B: SDK Examples](#appendix-b-sdk-examples)
-
----
-
-## 1. Overview
-
-### Base URL
-
-```
-https://api.orivory.io/api/v1
-```
-
-### Authentication
+## 1. Identity
 
 There is **no account auth**: an Orivory install is one container with one
 operator, so it has exactly one identity — the **local owner** (the `users`
@@ -44,7 +53,7 @@ row named by `LOCAL_OWNER_EMAIL`, default `owner@orivory.local`).
 
 - A request with **no** Authorization header IS the local owner. Nothing to
   log in to, nothing to expire, no 401 for a missing token.
-- A request with an **agent token** (`Authorization: Bearer *** minted by
+- A request with an **agent token** (`Authorization: Bearer oa_…`, minted by
   `POST /api/v1/agents`) acts as that client on the **MCP endpoint** and on
   `POST /api/v1/imports`, which is where the token's scopes
   (`memory:read` / `memory:write`) are enforced and where every write is
@@ -53,2689 +62,215 @@ row named by `LOCAL_OWNER_EMAIL`, default `owner@orivory.local`).
   wrong surface — serving its owner there would bypass scopes).
 
 Register / login / email verification / OAuth / password reset / JWT were
-removed with account auth; those endpoints no longer exist.
+removed with account auth; those endpoints no longer exist. The same wave
+removed chat + SSE, admin, analytics, experiments, discovery, sources,
+workspaces, system_settings, entities and the knowledge-graph routes: the
+routes in this file are the whole surface. `GET /openapi.json` lists it.
 
 ---
 
-### Rate Limiting
+## 2. Errors, rate limits and pagination
 
-Rate limits are enforced per user per endpoint tier.
+### Errors
 
-| Tier      | Requests/Minute | Requests/Day |
-|-----------|----------------|--------------|
-| Free      | 60             | 1,000        |
-| Pro       | 300            | 10,000       |
-| Enterprise| 1,000          | 100,000      |
+Errors use FastAPI's standard `{"detail": ...}` shape, except the readiness
+answers of `POST /api/v1/memories/recall`, which are typed:
 
-Rate limit headers are returned on every response:
+| Status | Body | Raised by |
+|---|---|---|
+| 400 | `{"detail": "unknown scope: … (allowed: ('memory:read', 'memory:write'))"}` | `POST /api/v1/agents` |
+| 401 | `{"detail": "The REST API serves the local owner; agent tokens are used with the MCP endpoint and POST /api/v1/imports."}` | any REST route called with an `Authorization` header |
+| 403 | `{"detail": "Agent token lacks the memory:write scope."}` | `POST /api/v1/imports` called with a read-only token |
+| 404 | `{"detail": "Memory not found."}` · `"Erasure receipt not found."` · `"Agent client not found."` · `"Memory not found or not shared"` | owned-resource lookups — a foreign or unknown id reads `404`, never an existence leak |
+| 413 | `{"detail": "Import file exceeds the 20 MiB synchronous cap."}` | `POST /api/v1/imports` |
+| 422 | FastAPI validation body, or a parse message (`unknown source_format: …`, `Uploaded file is empty.`) | bad query/body/form, undecodable or unparseable import |
+| 429 | `{"detail": {"error": "rate_limit_exceeded", "retry_after": 60, "limit": 60}}` | the recall guard's per-60-second window (below) |
+| 429 | `{"detail": "Daily quota exceeded."}` · `"Monthly quota exceeded."` | the same guard's quota half (`app/services/quota_service.py`) |
+| 503 | `{"error": "embedding_contract_mismatch"}` · `{"error": "vector_unavailable"}` · `{"error": "index_freshness_timeout"}` | `POST /api/v1/memories/recall` — a readiness answer instead of a silent empty recall |
 
-```http
-X-RateLimit-Limit: 300
-X-RateLimit-Remaining: 299
-X-RateLimit-Reset: 1704067200
-```
+Every response carries `X-Request-ID` (the logging middleware sets one when the
+request did not bring it).
 
-When a limit is exceeded, the API returns `429 Too Many Requests` with a `Retry-After` header.
+### Rate limits and quota
 
----
+The guard (`app/utils/dependencies.py:enforce_llm_quota`) runs on
+`POST /api/v1/memories/recall`, the route that spends embedding/LLM calls. It
+is keyed on the owner, not on a token, because the owner is the only principal:
 
-### Error Codes
+- per-60-second window: `RATE_LIMIT_PER_MINUTE` (default **60**), enforced by
+  `app/middleware/rate_limiter.py:check_rate_limit` → the `rate_limit_exceeded`
+  body above;
+- the quota half of the same guard (`quota_service.check_and_increment`) checks a
+  `user_quotas` row when the database has one: `daily_limit` (server default
+  **100**) → `429 {"detail": "Daily quota exceeded."}`, `monthly_limit` (server
+  default **2000**) → `"Monthly quota exceeded."`. No row means unlimited, and
+  nothing in this tree creates one — a fresh install is bounded by the window
+  alone.
 
-All errors follow a consistent JSON structure:
-
-```json
-{
-  "error": {
-    "code": "RESOURCE_NOT_FOUND",
-    "message": "The requested conversation does not exist.",
-    "details": {
-      "resource_type": "conversation",
-      "resource_id": "abc123"
-    },
-    "request_id": "req_abc123xyz"
-  }
-}
-```
-
-| HTTP Status | Error Code                | Description                           |
-|-------------|---------------------------|---------------------------------------|
-| 400         | `VALIDATION_ERROR`        | Invalid request parameters            |
-| 401         | `UNAUTHORIZED`            | Missing or invalid token              |
-| 403         | `FORBIDDEN`               | Insufficient permissions              |
-| 404         | `RESOURCE_NOT_FOUND`      | Resource does not exist               |
-| 409         | `CONFLICT`                | Resource already exists               |
-| 422         | `UNPROCESSABLE_ENTITY`    | Semantically invalid input            |
-| 429         | `RATE_LIMIT_EXCEEDED`     | Too many requests                     |
-| 500         | `INTERNAL_ERROR`          | Server error                          |
-| 503         | `SERVICE_UNAVAILABLE`     | Maintenance or overload               |
-
----
+No `X-RateLimit-*` headers are returned; the window `429` carries `retry_after`
+and `limit`, the quota `429` is a plain `detail` string. (The per-tier
+Free/Pro/Enterprise table the previous catalogue documented belonged to the
+account product and is gone.)
 
 ### Pagination
 
-List endpoints support cursor-based pagination:
+List routes page with `limit` / `offset` — there are no cursors:
 
-```http
-GET /api/v1/chat/conversations?limit=20&cursor=eyJpZCI6MTIzfQ
-```
+| Route | `limit` (default / max) | `offset` | Order |
+|---|---|---|---|
+| `GET /api/v1/memories` | 50 / 200 | yes (`ge=0`) | `sort=newest` (default) · `salience` · `last_used` |
+| `GET /api/v1/agents` | no paging — every client | — | newest first |
+| `GET /api/v1/agents/access-log` | 50 / 200 | yes | newest first |
+| `GET /api/v1/erasure-receipts` | 50 / 200 | yes | newest first |
 
-**Query Parameters:**
-
-| Parameter | Type    | Default | Max | Description                          |
-|-----------|---------|---------|-----|--------------------------------------|
-| `limit`   | integer | 20      | 100 | Number of items per page             |
-| `cursor`  | string  | null    | —   | Opaque cursor for next page          |
-| `sort`    | string  | `desc`  | —   | Sort order: `asc` or `desc`          |
-| `order_by`| string  | varies  | —   | Field to sort by (endpoint-specific) |
-
-**Pagination Response Headers:**
-
-```http
-X-Pagination-HasMore: true
-X-Pagination-NextCursor: eyJpZCI6MTQzfQ
-X-Pagination-TotalCount: 247
-```
+`items` come back with a `total`, counted with the same predicate as the page.
 
 ---
 
-### Versioning
+## 3. Health and readiness
 
-The API is versioned via the URL path (`/api/v1`). When a breaking change is introduced, a new version (`/api/v2`) is released with a 12-month deprecation window for the previous version.
+| Route | Answers |
+|---|---|
+| `GET /health` | `{"status": "ok", "version": "1.1.0"}` — liveness; touches no dependency |
+| `GET /ready` | the readiness payload with `200` when every check passes, `503` when one fails |
 
-Non-breaking additions (new optional fields, new endpoints) are added to the current version without version bumps.
-
----
-
-## 2. Authentication
-
-> **Removed.** Account auth went with the self-hosted single-operator shape —
-> there is no register / login / email verification / OAuth / password reset /
-> JWT session any more. Every endpoint below in this section returns `404`.
-> See §1 for how identity actually works now (local owner + agent tokens);
-> this section is kept only until the endpoint catalogue is rewritten.
-
-### POST /api/v1/auth/register
-
-Register a new user account.
-
-**Request:**
-
-```json
-{
-  "email": "researcher@university.edu",
-  "password": "SecureP@ssw0rd!",
-  "full_name": "Dr. Jane Smith",
-  "research_focus": "computational biology",
-  "accept_terms": true
-}
-```
-
-| Field           | Type    | Required | Description                          |
-|-----------------|---------|----------|--------------------------------------|
-| `email`         | string  | Yes      | Valid email address (unique)         |
-| `password`      | string  | Yes      | Min 8 chars, 1 uppercase, 1 number |
-| `full_name`     | string  | Yes      | Display name                         |
-| `research_focus`| string  | No       | Primary research domain              |
-| `accept_terms`  | boolean | Yes      | Must be `true`                       |
-
-**Response `201 Created`:**
-
-```json
-{
-  "user": {
-    "id": "usr_a1b2c3d4",
-    "email": "researcher@university.edu",
-    "full_name": "Dr. Jane Smith",
-    "research_focus": "computational biology",
-    "created_at": "2025-01-15T10:30:00Z",
-    "plan": "free"
-  },
-  "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
-  "refresh_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
-}
-```
+`/ready` checks the SQLite connection (`SELECT 1`), the vector store (in the
+shipped lite shape, opening the process's ONE embedded Qdrant client is the
+check; server mode polls `{QDRANT_URL}/readyz` with a 2-second bound), the
+in-memory Redis shim (`ping`), and the upload storage backend.
 
 ---
 
-### POST /api/v1/auth/login
-
-Authenticate and obtain tokens.
-
-**Request:**
-
-```json
-{
-  "email": "researcher@university.edu",
-  "password": "SecureP@ssw0rd!"
-}
-```
-
-**Response `200 OK`:**
-
-```json
-{
-  "user": {
-    "id": "usr_a1b2c3d4",
-    "email": "researcher@university.edu",
-    "full_name": "Dr. Jane Smith",
-    "plan": "pro",
-    "mfa_enabled": false
-  },
-  "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
-  "refresh_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
-  "expires_in": 3600
-}
-```
-
-**Response `401 Unauthorized` (invalid credentials):**
-
-```json
-{
-  "error": {
-    "code": "INVALID_CREDENTIALS",
-    "message": "Email or password is incorrect.",
-    "request_id": "req_xyz789"
-  }
-}
-```
-
-**Response `401 Unauthorized` (MFA required):**
-
-```json
-{
-  "error": {
-    "code": "MFA_REQUIRED",
-    "message": "Multi-factor authentication is required.",
-    "details": {
-      "mfa_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
-    }
-  }
-}
-```
-
----
-
-### POST /api/v1/auth/refresh
-
-Obtain a new access token using a refresh token.
-
-**Request:**
-
-```json
-{
-  "refresh_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
-}
-```
-
-**Response `200 OK`:**
-
-```json
-{
-  "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
-  "refresh_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
-  "token_type": "Bearer",
-  "expires_in": 3600
-}
-```
-
-**Response `401 Unauthorized` (token expired or revoked):**
-
-```json
-{
-  "error": {
-    "code": "TOKEN_EXPIRED",
-    "message": "The refresh token has expired. Please log in again."
-  }
-}
-```
-
----
-
-### POST /api/v1/auth/logout
-
-Revoke the current refresh token and invalidate the session.
-
-**Request:**
-
-```json
-{
-  "refresh_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
-}
-```
-
-**Response `204 No Content`**
-
----
-
-### GET /api/v1/auth/google/authorize
-
-Initiate Google OAuth flow. Redirects the user to Google's consent screen.
-
-**Query Parameters:**
-
-| Parameter | Type   | Required | Description                          |
-|-----------|--------|----------|--------------------------------------|
-| `redirect_uri` | string | Yes   | OAuth callback URL                   |
-| `state`   | string | Yes      | CSRF protection token                |
-
-**Response:** Redirect to Google consent screen.
-
-After consent, Google redirects to your `redirect_uri` with:
-
-```
-https://your-app.com/callback?code=4/0Adeu5B...&state=csrf_token
-```
-
-Exchange the code via `/api/v1/auth/google/callback`:
-
----
-
-### POST /api/v1/auth/google/callback
-
-Exchange a Google OAuth code for Orivory tokens.
-
-**Request:**
-
-```json
-{
-  "code": "4/0Adeu5B...",
-  "redirect_uri": "https://your-app.com/callback"
-}
-```
-
-**Response `200 OK`:**
-
-```json
-{
-  "user": {
-    "id": "usr_a1b2c3d4",
-    "email": "researcher@gmail.com",
-    "full_name": "Jane Smith",
-    "oauth_provider": "google"
-  },
-  "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
-  "refresh_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
-}
-```
-
----
-
-### POST /api/v1/auth/forgot-password
-
-Initiate password reset flow. Sends an email with a reset link.
-
-**Request:**
-
-```json
-{
-  "email": "researcher@university.edu"
-}
-```
-
-**Response `200 OK`:**
-
-```json
-{
-  "message": "If an account with that email exists, a password reset link has been sent."
-}
-```
-
----
-
-### POST /api/v1/auth/reset-password
-
-Reset password using a token from the forgot-password email.
-
-**Request:**
-
-```json
-{
-  "reset_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
-  "new_password": "NewSecureP@ss123!"
-}
-```
-
-**Response `200 OK`:**
-
-```json
-{
-  "message": "Password has been reset successfully."
-}
-```
-
----
-
-### GET /api/v1/auth/me
-
-Get the currently authenticated user's profile.
-
-**Response `200 OK`:**
-
-```json
-{
-  "id": "usr_a1b2c3d4",
-  "email": "researcher@university.edu",
-  "full_name": "Dr. Jane Smith",
-  "research_focus": "computational biology",
-  "plan": "pro",
-  "mfa_enabled": false,
-  "created_at": "2025-01-15T10:30:00Z",
-  "last_login": "2025-01-20T14:22:00Z",
-  "settings": {
-    "default_model": "claude-3-5-sonnet",
-    "email_notifications": true,
-    "digest_frequency": "daily"
-  }
-}
-```
-
----
-
-### PATCH /api/v1/users/me/change-password
-
-Change the authenticated user's password.
-
-**Request:**
-
-```json
-{
-  "current_password": "OldSecureP@ss!",
-  "new_password": "NewSecureP@ss123!"
-}
-```
-
-**Response `200 OK`:**
-
-```json
-{
-  "message": "Password changed successfully."
-}
-```
-
----
-
-### PATCH /api/v1/users/me/settings
-
-Write the opt-in retention setting (P4b/T6, spec §8.1) — the ONLY way retention
-is ever enabled. `GET /api/v1/users/me` reads both fields back.
-
-**Request:**
-
-```json
-{
-  "retention_enabled": true,
-  "retention_days": 30
-}
-```
-
-| Field               | Type    | Required | Description                                                                 |
-|---------------------|---------|----------|-----------------------------------------------------------------------------|
-| `retention_enabled` | boolean | No (default `false`) | Whether the retention sweep runs for this user at all |
-| `retention_days`    | integer | No (default `null`, `> 0`) | Rows the system has held longer than this are expired. Choosing the window alone (retention off) is allowed |
-
-> **The body is a FULL REPLACE, not a merge.** A body that omits a field writes
-> that field's default: `{}` turns retention OFF and clears the window. That is
-> the fail-safe direction — a partial PATCH can never silently *narrow* a
-> user's window or leave a setting enabled that the caller did not restate.
-
-**Response `200 OK`:**
-
-```json
-{ "retention_enabled": true, "retention_days": 30 }
-```
-
-`422` when `retention_enabled: true` arrives without `retention_days`: an
-enabled user with no window is a setting that says nothing about WHEN to
-expire, and the sweep would have to invent one — the boundary refuses it
-instead of storing a config that silently does nothing.
-
-**What the sweep does (and does not) do.** It invalidates each expired row
-(soft — the row keeps its content and provenance, see [§14](#14-erasure-receipts))
-and appends one `retention_expired` row to the access ledger per memory. The
-clock is `indexed_at` — how long this install has held the memory. `pinned`
-memories are exempt; explicit `forget_memory`/erasure still wins over a pin.
-Retention is **per row, not per closure**: it writes NO suppression row (auto
-expiry is not the user forgetting a source), so a re-import after a row
-expired is caught only by the ordinary `source_ref` dedup
-(`skipped_duplicates`) — and a derived view whose sources expired keeps
-serving until its OWN age expires.
-
----
-
-## 3. Conversations & Chat (RAG Core)
-
-### GET /api/v1/chat/conversations
-
-List all conversations for the authenticated user.
-
-**Query Parameters:**
-
-| Parameter    | Type    | Default | Description                        |
-|--------------|---------|---------|-----------------------------------|
-| `limit`      | integer | 20      | Items per page (max 100)           |
-| `cursor`     | string  | null    | Pagination cursor                  |
-| `sort`       | string  | `desc`  | Sort by `updated_at`: `asc`/`desc`|
-| `search`     | string  | null    | Full-text search in conversation   |
-| `date_from`  | string  | null    | ISO 8601 date filter (e.g., `2025-01-01`) |
-| `date_to`    | string  | null    | ISO 8601 date filter              |
-
-**Response `200 OK`:**
-
-```json
-{
-  "conversations": [
-    {
-      "id": "cnv_a1b2c3d4",
-      "title": "CRISPR-Cas9 off-target effects",
-      "created_at": "2025-01-15T10:30:00Z",
-      "updated_at": "2025-01-20T14:22:00Z",
-      "message_count": 47,
-      "document_count": 3,
-      "tags": ["crispr", "gene-editing"],
-      "model_used": "claude-3-5-sonnet",
-      "last_message": {
-        "id": "msg_xyz789",
-        "role": "assistant",
-        "content_preview": "The off-target cleavage activity of eSpCas9 variants...",
-        "created_at": "2025-01-20T14:22:00Z"
-      }
-    }
-  ],
-  "pagination": {
-    "has_more": true,
-    "next_cursor": "eyJpZCI6ImNudl9hYmMxMjMifQ",
-    "total_count": 156
-  }
-}
-```
-
----
-
-### POST /api/v1/chat/conversations
-
-Create a new conversation.
-
-**Request:**
-
-```json
-{
-  "title": "CRISPR-Cas9 off-target effects",
-  "tags": ["crispr", "gene-editing"],
-  "model": "claude-3-5-sonnet",
-  "system_prompt": "You are a helpful research assistant specializing in molecular biology.",
-  "temperature": 0.7,
-  "metadata": {
-    "project_id": "proj_abc123",
-    "grant_number": "NIH-R01-12345"
-  }
-}
-```
-
-| Field         | Type    | Required | Description                        |
-|---------------|---------|----------|-----------------------------------|
-| `title`       | string  | Yes      | Conversation title (max 200 chars)|
-| `tags`        | string[]| No       | Array of tag strings              |
-| `model`       | string  | No       | Model ID (defaults to user setting)|
-| `system_prompt`| string | No       | Custom system instructions         |
-| `temperature` | number  | No       | 0.0–1.0, default 0.7             |
-| `metadata`    | object  | No       | Arbitrary key-value pairs         |
-
-**Response `201 Created`:**
-
-```json
-{
-  "id": "cnv_a1b2c3d4",
-  "title": "CRISPR-Cas9 off-target effects",
-  "created_at": "2025-01-20T14:22:00Z",
-  "updated_at": "2025-01-20T14:22:00Z",
-  "tags": ["crispr", "gene-editing"],
-  "model_used": "claude-3-5-sonnet",
-  "temperature": 0.7,
-  "metadata": {
-    "project_id": "proj_abc123",
-    "grant_number": "NIH-R01-12345"
-  }
-}
-```
-
----
-
-### GET /api/v1/chat/conversations/{id}
-
-Get a single conversation by ID.
-
-**Response `200 OK`:**
-
-```json
-{
-  "id": "cnv_a1b2c3d4",
-  "title": "CRISPR-Cas9 off-target effects",
-  "created_at": "2025-01-15T10:30:00Z",
-  "updated_at": "2025-01-20T14:22:00Z",
-  "message_count": 47,
-  "document_count": 3,
-  "tags": ["crispr", "gene-editing"],
-  "model_used": "claude-3-5-sonnet",
-  "temperature": 0.7,
-  "metadata": {
-    "project_id": "proj_abc123",
-    "grant_number": "NIH-R01-12345"
-  }
-}
-```
-
----
-
-### PATCH /api/v1/chat/conversations/{id}
-
-Update a conversation's title, tags, or metadata.
-
-**Request:**
-
-```json
-{
-  "title": "CRISPR-Cas9 Off-Target Analysis (Revised)",
-  "tags": ["crispr", "gene-editing", "review"],
-  "metadata": {
-    "project_id": "proj_abc123",
-    "status": "in-review"
-  }
-}
-```
-
-**Response `200 OK`:**
-
-```json
-{
-  "id": "cnv_a1b2c3d4",
-  "title": "CRISPR-Cas9 Off-Target Analysis (Revised)",
-  "updated_at": "2025-01-20T15:00:00Z",
-  "tags": ["crispr", "gene-editing", "review"],
-  "metadata": {
-    "project_id": "proj_abc123",
-    "status": "in-review"
-  }
-}
-```
-
----
-
-### DELETE /api/v1/chat/conversations/{id}
-
-Permanently delete a conversation and all its messages.
-
-**Response `204 No Content`**
-
-> **Warning:** This action is irreversible. All messages, documents, and memories associated with this conversation will be deleted.
-
----
-
-### GET /api/v1/chat/conversations/{id}/messages
-
-List messages in a conversation (for history display).
-
-**Query Parameters:**
-
-| Parameter    | Type    | Default | Description                        |
-|--------------|---------|---------|-----------------------------------|
-| `limit`      | integer | 50      | Items per page (max 200)          |
-| `cursor`     | string  | null    | Pagination cursor                  |
-| `include_metadata` | boolean | false | Include confidence/reasoning if available |
-
-**Response `200 OK`:**
-
-```json
-{
-  "messages": [
-    {
-      "id": "msg_aaa111",
-      "role": "user",
-      "content": "What are the main off-target effects of CRISPR-Cas9?",
-      "created_at": "2025-01-20T14:22:00Z",
-      "attachments": []
-    },
-    {
-      "id": "msg_aaa222",
-      "role": "assistant",
-      "content": "CRISPR-Cas9 can cause off-target effects where...",
-      "created_at": "2025-01-20T14:22:05Z",
-      "sources": [
-        {
-          "document_id": "doc_xyz789",
-          "chunk_id": "chk_abc123",
-          "relevance_score": 0.94,
-          "text_excerpt": "...off-target cleavage sites were identified..."
-        }
-      ]
-    }
-  ],
-  "pagination": {
-    "has_more": false,
-    "total_count": 47
-  }
-}
-```
-
----
-
-### POST /api/v1/chat/conversations/{id}/message [SSE]
-
-Send a message and receive a streaming response via Server-Sent Events (SSE).
-
-#### Request
-
-**Headers:**
-
-```http
-Content-Type: application/json
-Accept: text/event-stream
-```
-
-**Body:**
-
-```json
-{
-  "content": "Compare the off-target profiles of eSpCas9 and HiFi Cas9",
-  "attachments": ["doc_xyz789", "doc_abc123"],
-  "stream": true
-}
-```
-
-| Field         | Type     | Required | Description                              |
-|---------------|----------|----------|------------------------------------------|
-| `content`     | string   | Yes      | Message content (max 10,000 chars)      |
-| `attachments` | string[] | No       | Document IDs to include as context       |
-| `stream`      | boolean  | No       | Enable streaming (default: true)         |
-
-#### Enhanced Query Parameters (v2.0)
-
-| Parameter              | Type    | Description                                        |
-|------------------------|---------|---------------------------------------------------|
-| `?include_confidence=true` | boolean | Add per-claim confidence scores to response   |
-| `?include_reasoning=true` | boolean | Add chain-of-thought reasoning trace          |
-| `?temporal=true`      | boolean | Enable temporal reasoning over time-ordered context |
-| `?multi_hop=true`      | boolean | Enable multi-hop reasoning across documents      |
-
-**Example with enhanced parameters:**
-
-```http
-POST /api/v1/chat/conversations/cnv_a1b2c3d4/message?include_confidence=true&include_reasoning=true&multi_hop=true
-```
-
-#### Response (SSE Events)
-
-The response is a stream of SSE events. Each event type is described below:
-
-##### `message_start`
-
-```json
-event: message_start
-data: {"message_id": "msg_new_123", "conversation_id": "cnv_a1b2c3d4"}
-```
-
-##### `content_block_start`
-
-```json
-event: content_block_start
-data: {"index": 0, "type": "text"}
-```
-
-##### `content_block_delta`
-
-```json
-event: content_block_delta
-data: {"index": 0, "type": "text", "delta": "CRISPR-Cas9 off-target effects arise from..."}
-```
-
-##### `content_block_stop`
-
-```json
-event: content_block_stop
-data: {"index": 0}
-```
-
-##### `sources` (with relevance data)
-
-```json
-event: sources
-data: {
-  "sources": [
-    {
-      "document_id": "doc_xyz789",
-      "chunk_id": "chk_abc123",
-      "title": "CRISPR Off-Target Analysis Paper",
-      "relevance_score": 0.94,
-      "text_excerpt": "...off-target cleavage sites in human genome...",
-      "page_number": 3,
-      "url": null
-    },
-    {
-      "document_id": "doc_def456",
-      "chunk_id": "chk_ghi789",
-      "title": "eSpCas9 Optimization Study",
-      "relevance_score": 0.89,
-      "text_excerpt": "...high-fidelity variants reduce off-target...",
-      "page_number": 12,
-      "url": null
-    }
-  ]
-}
-```
-
-##### `confidence` (when `include_confidence=true`)
-
-```json
-event: confidence
-data: {
-  "overall": 0.87,
-  "claims": [
-    {
-      "claim": "eSpCas9 has 10-fold lower off-target activity",
-      "confidence": 0.92,
-      "supporting_sources": ["doc_xyz789"]
-    },
-    {
-      "claim": "HiFi Cas9 uses modified sgRNA architecture",
-      "confidence": 0.78,
-      "supporting_sources": ["doc_def456"],
-      "uncertainty_note": "Source does not provide direct comparison"
-    }
-  ]
-}
-```
-
-##### `reasoning` (when `include_reasoning=true`)
-
-```json
-event: reasoning
-data: {
-  "steps": [
-    {
-      "step": 1,
-      "thought": "The user is asking about off-target profiles comparison",
-      "action": "Retrieving documents mentioning eSpCas9 or HiFi Cas9",
-      "sources_consulted": ["doc_xyz789", "doc_def456"]
-    },
-    {
-      "step": 2,
-      "thought": "Found relevant sections in both documents about specificity",
-      "action": "Comparing quantitative off-target rates",
-      "documents_analyzed": 2,
-      "relevant_chunks": 5
-    },
-    {
-      "step": 3,
-      "thought": "Synthesizing comparison based on retrieved evidence",
-      "action": "Generating comparative response with citations",
-      "claims_generated": 4
-    }
-  ]
-}
-```
-
-##### `citation`
-
-```json
-event: citation
-data: {
-  "index": 156,
-  "length": 24,
-  "source": {
-    "document_id": "doc_xyz789",
-    "chunk_id": "chk_abc123",
-    "relevance_score": 0.94
-  }
-}
-```
-
-##### `message_stop`
-
-```json
-event: message_stop
-data: {"stop_reason": "end_turn"}
-```
-
----
-
-### Document Endpoints
-
-#### POST /api/v1/chat/conversations/{id}/documents
-
-Upload a document to a conversation for context.
-
-**Request:** `multipart/form-data`
-
-| Field      | Type   | Required | Description                          |
-|------------|--------|----------|--------------------------------------|
-| `file`     | file   | Yes      | PDF, DOCX, TXT, MD (max 50MB)        |
-| `title`    | string | No       | Display title (defaults to filename)  |
-| `metadata` | object | No       | Custom key-value metadata            |
-
-**Supported file types:**
-
-- `application/pdf`
-- `application/vnd.openxmlformats-officedocument.wordprocessingml.document`
-- `text/plain`
-- `text/markdown`
-
-**Response `202 Accepted`:**
-
-```json
-{
-  "document_id": "doc_xyz789",
-  "filename": "crispr-paper.pdf",
-  "title": "CRISPR Off-Target Analysis",
-  "status": "processing",
-  "created_at": "2025-01-20T14:22:00Z",
-  "processing_progress": {
-    "stage": "chunking",
-    "percent_complete": 15
-  }
-}
-```
-
----
-
-#### GET /api/v1/chat/conversations/{id}/documents/{doc_id}/status
-
-Check document processing status.
-
-**Response `200 OK`:**
-
-```json
-{
-  "document_id": "doc_xyz789",
-  "status": "completed",
-  "processing_info": {
-    "stage": "completed",
-    "percent_complete": 100,
-    "chunks_created": 127,
-    "entities_extracted": 43,
-    "processing_time_ms": 4521
-  },
-  "metadata": {
-    "page_count": 24,
-    "word_count": 8432,
-    "language": "en"
-  }
-}
-```
-
-Possible status values: `pending`, `processing`, `completed`, `failed`, `quarantined`
-
----
-
-#### GET /api/v1/chat/conversations/{id}/documents
-
-List all documents in a conversation.
-
-**Response `200 OK`:**
-
-```json
-{
-  "documents": [
-    {
-      "document_id": "doc_xyz789",
-      "filename": "crispr-paper.pdf",
-      "title": "CRISPR Off-Target Analysis",
-      "status": "completed",
-      "created_at": "2025-01-20T14:22:00Z",
-      "page_count": 24,
-      "chunks_indexed": 127
-    }
-  ],
-  "pagination": {
-    "has_more": false,
-    "total_count": 3
-  }
-}
-```
-
----
-
-#### DELETE /api/v1/chat/conversations/{id}/documents/{doc_id}
-
-Remove a document from a conversation and delete its indexed chunks.
-
-**Response `204 No Content`**
-
----
-
-## 4. Memory (Second Brain)
-
-Orivory's memory system stores and retrieves knowledge using semantic search and temporal reasoning.
-
-> **Namespace boundary (P4a, personal-only).** Every memory endpoint — list,
-> digest, stats, get, create, patch, delete, recall, share — is scoped to the
-> caller's namespace, and a row of the caller's own account that lives outside
-> it (a workspace/team row, once sharing ships) is answered exactly like a
-> foreign tenant's: `404`, same body as a missing id, no existence oracle. The
-> public share link is scoped too: it serves rows of the public namespace only.
-> `namespace` is **not** a request field and **not** a response field anywhere in
-> this API — it is never derived from client input, no response carries it, and
-> the response shapes are unchanged by P4a. The only namespace in P4a is
-> `personal`, so on a single-user deployment this note changes nothing visible.
+## 4. Memories
+
+The memory spine: create, list, read, update, delete, digest, recall, stats and
+the public share link. All routes here serve the owner's own rows; a foreign id
+is a `404`.
 
 ### POST /api/v1/memories
 
-Create a new memory entry.
+Create one memory. Returns `201` with the `MemoryResponse`.
 
-**Request:**
+| Field | Type | Notes |
+|---|---|---|
+| `content` | string | **required** |
+| `title` | string ≤ 500 | optional |
+| `summary` | string ≤ 4000 | optional |
+| `source_type` | string | default `manual_note` |
+| `source_ref` / `source_url` | string ≤ 500 / ≤ 1000 | optional |
+| `tags` | string[] | optional |
+| `captured_at` | datetime | optional |
+| `parent_id` | uuid | must be an existing memory of the owner, else `404` |
+| `pinned` | bool | default `false` |
+| `metadata` | object | client metadata; server-owned `cm_*` keys are preserved |
+| `auto_compress` | bool | default `false` |
 
-```json
-{
-  "content": "Dr. Chen's lab discovered that eSpCas9 shows 8-fold higher specificity compared to wild-type Cas9 in human cell lines.",
-  "type": "finding",
-  "tags": ["crispr", "espCas9", "specificity", "chen-lab"],
-  "source_document_id": "doc_xyz789",
-  "source_chunk_id": "chk_abc123",
-  "confidence": 0.95,
-  "expires_at": "2026-01-20T00:00:00Z",
-  "metadata": {
-    "experiment_id": "exp_001",
-    "cell_line": "HEK293T"
-  }
-}
+```bash
+curl -s -X POST http://localhost:8000/api/v1/memories \
+  -H "Content-Type: application/json" \
+  -d '{"content": "Orivory stores memories in SQLite and Qdrant.", "title": "Stack", "tags": ["stack"]}'
 ```
-
-| Field              | Type     | Required | Description                            |
-|--------------------|----------|----------|----------------------------------------|
-| `content`          | string   | Yes      | Memory content (max 5,000 chars)      |
-| `type`             | string   | No       | `finding`, `hypothesis`, `note`, `reference` (default: `note`) |
-| `tags`             | string[] | No       | Array of tag strings                   |
-| `source_document_id` | string | No       | Linked document ID                     |
-| `source_chunk_id`  | string   | No       | Linked chunk ID                        |
-| `confidence`       | number   | No       | 0.0–1.0 confidence score             |
-| `expires_at`       | string   | No       | ISO 8601 expiration datetime           |
-| `metadata`         | object   | No       | Arbitrary key-value pairs              |
-
-**Response `201 Created`:**
-
-```json
-{
-  "id": "mem_abc123def456",
-  "content": "Dr. Chen's lab discovered that eSpCas9 shows 8-fold higher specificity...",
-  "type": "finding",
-  "tags": ["crispr", "espCas9", "specificity", "chen-lab"],
-  "created_at": "2025-01-20T14:22:00Z",
-  "updated_at": "2025-01-20T14:22:00Z",
-  "source_document_id": "doc_xyz789",
-  "source_chunk_id": "chk_abc123",
-  "confidence": 0.95,
-  "expires_at": "2026-01-20T00:00:00Z",
-  "metadata": {
-    "experiment_id": "exp_001",
-    "cell_line": "HEK293T"
-  }
-}
-```
-
----
 
 ### GET /api/v1/memories
 
-List memories with filtering and semantic search.
+List the owner's memories, filtered and paged:
 
-**Query Parameters:**
+| Query | Type | Notes |
+|---|---|---|
+| `source_type` | enum | `manual_note`, `file_upload`, `google_drive`, `notion`, `gmail`, `web_clipper`, `rss`, `conversation_excerpt`, `chatgpt_import`, `claude_import`, `gemini_import`, `copilot_import`, `openclaw_import`, `generic_import`, `other` |
+| `tag` | string | exact match |
+| `query` | string | case-insensitive substring in title OR content |
+| `pinned` | bool | optional |
+| `sort` | enum | `newest` (default) · `salience` · `last_used` |
+| `limit` / `offset` | int | 50 (max 200) / 0 |
 
-| Parameter   | Type    | Default | Description                               |
-|-------------|---------|---------|------------------------------------------|
-| `q`         | string  | null    | Semantic search query                    |
-| `type`      | string  | null    | Filter by type                           |
-| `tags`      | string  | null    | Comma-separated tag filter               |
-| `date_from` | string  | null    | ISO 8601 date filter                     |
-| `date_to`   | string  | null    | ISO 8601 date filter                     |
-| `limit`     | integer | 20      | Items per page (max 100)                 |
-| `cursor`    | string  | null    | Pagination cursor                        |
-| `sort`      | string  | `desc`  | Sort by `created_at`: `asc` or `desc`   |
+Dirty rows are never listed; superseded rows are listed with
+`state="superseded"` — history stays readable, labelled.
 
-**Response `200 OK`:**
+### GET /api/v1/memories/{memory_id}
 
-```json
-{
-  "memories": [
-    {
-      "id": "mem_abc123def456",
-      "content": "Dr. Chen's lab discovered that eSpCas9 shows 8-fold higher specificity...",
-      "type": "finding",
-      "tags": ["crispr", "espCas9", "specificity"],
-      "created_at": "2025-01-20T14:22:00Z",
-      "relevance_score": 0.94,
-      "source_document_id": "doc_xyz789"
-    }
-  ],
-  "pagination": {
-    "has_more": false,
-    "total_count": 24
-  }
-}
-```
+One memory (`MemoryResponse`), or `404`.
 
-> **Note — `total` counts visible rows only:** dirty (stale-derived) and invalidated (forgotten or retention-expired) memories are excluded from the page and from the total; superseded rows stay listed, labeled `state: "superseded"`.
+### PATCH /api/v1/memories/{memory_id}
 
-> **Note — the lifecycle state, and where the `derived` label lives (P4b):** every memory response carries `state` — one of `current`, `superseded`, `dirty`, `needs-check`, `invalidated` (`correction.state_of`, mirrored in SQL by `visibility.state_expression`). Serving surfaces (this list, recall, MCP `search_memory`/`list_recent`) exclude `dirty` and `invalidated`; direct reads (`GET /memories/{id}`, MCP `get_memory`) and MCP `timeline` still answer for them, labeled — invalidated rows are history, dirty rows are wrong data (hidden even from `timeline`). A derived summary is marked in two places and they are NOT the same surface: the REST/compact payload carries only the raw metadata marker `metadata.cm_assertion == "derived"` (plus `metadata.cm_derived_from` / `cm_source_revisions` / `cm_rule_version`), while the computed `derived: true|false` flag with `derived_from`/`source_revisions`/`rule_version` is attached by the MCP provenance (`get_memory`, `add_memory`, `correct_memory`). A REST consumer must read the marker; only MCP switches on `derived`.
+Partial update — send only the fields you are changing (`title`, `summary`,
+`tags`, `salience`, `pinned`, `metadata`). Bumps `revision`, enqueues the
+re-index intent, and writes through to the vector store best-effort: the
+response's `indexing` is `"ready"` when the vector write landed, `"pending"`
+when the durable outbox owns it, and omitted on a no-op PATCH.
 
-> **Note — memory filter language (P1b, Qdrant):** the `where` object accepted by the memory search/recall path takes one operator per field, restricted to the allowlist `source_type`, `captured_at`, `salience`, `pinned`, `tags` (`user_id` is always the authenticated principal and is rejected as a filter). Values must be scalars (`bool`/`int`/`str`) or, for `$in`/`$nin`, a list. Tightened against the Chroma-era behaviour, each of these now raises `ValueError`: a **float** operand on `$eq`/`$ne`/`$in`/`$nin`/`$contains` (a float is a range question — use `$gt`/`$gte`/`$lt`/`$lte` on `salience`), a non-scalar operand where a scalar is required (e.g. `{"tags": {"$contains": ["a", "b"]}}` — `$contains` takes ONE element and matches it against the list), and range operators on fields that are not ranges (`pinned`, `tags`, `source_type`). `$ne` and `$nin` compile to `must_not` clauses, and because a missing field never matches an include, a memory carrying no `tags` key is still returned by `tags: {"$ne": "x"}`.
+### DELETE /api/v1/memories/{memory_id}
 
----
-
-### GET /api/v1/memories/{id}
-
-Get a single memory by ID.
-
-**Response `200 OK`:**
-
-```json
-{
-  "id": "mem_abc123def456",
-  "content": "Dr. Chen's lab discovered that eSpCas9 shows 8-fold higher specificity...",
-  "type": "finding",
-  "tags": ["crispr", "espCas9", "specificity", "chen-lab"],
-  "created_at": "2025-01-20T14:22:00Z",
-  "updated_at": "2025-01-20T14:22:00Z",
-  "source_document_id": "doc_xyz789",
-  "source_chunk_id": "chk_abc123",
-  "confidence": 0.95,
-  "metadata": {
-    "experiment_id": "exp_001",
-    "cell_line": "HEK293T"
-  }
-}
-```
-
----
-
-### PATCH /api/v1/memories/{id}
-
-Update a memory entry.
-
-**Request:**
-
-```json
-{
-  "content": "Updated content with additional findings...",
-  "tags": ["crispr", "espCas9", "specificity", "chen-lab", "updated"],
-  "confidence": 0.97
-}
-```
-
-**Response `200 OK`:** Updated memory object.
-
----
-
-### DELETE /api/v1/memories/{id}
-
-Delete a memory entry.
-
-**Response `204 No Content`**
-
----
+`204`. Runs the durable erasure path (row + derived closure + vectors, with a
+receipt) — see §8.
 
 ### GET /api/v1/memories/digest
 
-Generate a daily digest of recent memories organized by topic.
+What you saved recently plus "on this day" resurfacing. `window_days` is
+`7` by default (`ge=1, le=90`). Returns `generated_at`, `window_days`,
+`recent_count`, `top_themes[]`, `recent_memories[]` and `resurfaced[]`
+(each with `memory`, `age_label`, `age_days`).
 
-**Query Parameters:**
+### GET /api/v1/memories/stats
 
-| Parameter    | Type    | Default   | Description                        |
-|--------------|---------|-----------|-----------------------------------|
-| `date`       | string  | today     | ISO 8601 date (e.g., `2025-01-20`) |
-| `topic`      | string  | null      | Filter by primary topic tag        |
-| `format`     | string  | `summary` | `summary`, `timeline`, `by-topic` |
-
-**Response `200 OK`:**
-
-```json
-{
-  "date": "2025-01-20",
-  "topic": "crispr",
-  "format": "by-topic",
-  "digest": {
-    "crispr": {
-      "findings": 3,
-      "summary": "Today's CRISPR research focused on off-target effects, with new data from Dr. Chen's lab confirming improved specificity of eSpCas9 variants.",
-      "memories": [
-        {
-          "id": "mem_abc123",
-          "content": "eSpCas9 shows 8-fold higher specificity...",
-          "created_at": "2025-01-20T14:22:00Z"
-        }
-      ]
-    },
-    "gene-editing": {
-      "findings": 1,
-      "summary": "One new reference added regarding base editing applications."
-    }
-  },
-  "generated_at": "2025-01-20T23:00:00Z"
-}
-```
-
----
+Aggregate counts for a dashboard, computed over the owner's visible rows:
+`total_memories`, `entities`, `relationships`, `observations`, `concepts`,
+`recent_activity[]`, `top_tags[]`.
 
 ### POST /api/v1/memories/recall
 
-Semantic recall — search across all memories using natural language.
-
-#### Standard Recall
-
-**Request:**
+The retrieval entry point — **the only route with the rate limit/quota guard**.
 
 ```json
-{
-  "query": "What did we learn about eSpCas9 specificity?",
-  "limit": 10,
-  "tags": ["crispr"]
-}
+{"query": "what did I say about SQLite?", "top_k": 10, "include_personal_context": true}
 ```
 
-**Response `200 OK`:**
+| Field | Type | Default |
+|---|---|---|
+| `query` | string | required |
+| `top_k` | int | 10 |
+| `include_personal_context` | bool | true |
 
-```json
-{
-  "query": "What did we learn about eSpCas9 specificity?",
-  "results": [
-    {
-      "id": "mem_abc123def456",
-      "content": "Dr. Chen's lab discovered that eSpCas9 shows 8-fold higher specificity...",
-      "type": "finding",
-      "relevance_score": 0.96,
-      "tags": ["crispr", "espCas9", "specificity"],
-      "source_document_id": "doc_xyz789",
-      "created_at": "2025-01-20T14:22:00Z",
-      "recalled_at": "2025-01-20T16:00:00Z"
-    }
-  ],
-  "total_found": 3,
-  "recalled_at": "2025-01-20T16:00:00Z"
-}
-```
+Pipeline: personal context (pinned + recent) → LLM query rewrite + entity
+extraction → vector search in Qdrant → hydrate, entity boost, time decay →
+`top_k` results with a `trace` (rewritten query, entities, `latency_ms`,
+`num_candidates`, `num_results`, `stage_ms`, `counts`, rewrite fallback flags).
 
-#### Enhanced Recall with Temporal Reasoning (v2.0)
+Every step degrades gracefully (empty `results` plus a `trace`) with the three
+typed `503`s in §2 as the exceptions. On SQLite, a vector outage answers from
+the FTS5 lexical leg with `trace.counts["lexical"]` set and no `dense` key
+rather than refusing.
 
-When `temporal=true`, the system orders results by temporal relevance and annotates temporal relationships between memories.
+### GET /api/v1/memories/{memory_id}/share
 
-**Request:**
-
-```json
-{
-  "query": "How has our understanding of Cas9 specificity evolved?",
-  "temporal": true,
-  "limit": 15
-}
-```
-
-**Response:**
-
-```json
-{
-  "query": "How has our understanding of Cas9 specificity evolved?",
-  "results": [
-    {
-      "id": "mem_001",
-      "content": "Initial paper review suggests Cas9 has significant off-target activity",
-      "created_at": "2025-01-10T09:00:00Z",
-      "temporal_position": "earliest",
-      "temporal_annotation": {
-        "position": "beginning",
-        "relationship": "baseline"
-      }
-    },
-    {
-      "id": "mem_002",
-      "content": "eSpCas9 variant shows reduced off-target cleavage",
-      "created_at": "2025-01-15T11:30:00Z",
-      "temporal_position": "intermediate",
-      "temporal_annotation": {
-        "position": "middle",
-        "relationship": "confirmation",
-        "builds_on": "mem_001"
-      }
-    },
-    {
-      "id": "mem_003",
-      "content": "Chen lab confirms 8-fold specificity improvement with eSpCas9",
-      "created_at": "2025-01-20T14:22:00Z",
-      "temporal_position": "latest",
-      "temporal_annotation": {
-        "position": "current",
-        "relationship": "refinement",
-        "builds_on": "mem_002",
-        "contradicts": null
-      }
-    }
-  ],
-  "temporal_insights": {
-    "trend": "improving",
-    "confidence_direction": "increasing",
-    "span": "10 days",
-    "trajectory_summary": "Understanding evolved from initial concern about off-target effects to confirmed improvement with engineered variants"
-  },
-  "total_found": 3
-}
-```
-
-#### Enhanced Recall with Multi-Hop Reasoning (v2.0) — not implemented
-
-> **Not implemented in this release.** The shipped
-> `POST /api/v1/memories/recall` accepts only `query`, `top_k` and
-> `include_personal_context` (`RecallRequest`), and no response carries
-> `chains` or `insights`. The sketch below is a v2.0 design note, not a
-> buildable example.
-
-The v2.0 design: with `multi_hop=true`, the system chains across multiple memories to answer complex questions that require connecting disparate pieces of knowledge.
-
-**Request:**
-
-```json
-{
-  "query": "Is there a connection between Dr. Chen's eSpCas9 findings and the base editing research?",
-  "multi_hop": true,
-  "max_hops": 3,
-  "limit": 20
-}
-```
-
-**Response:**
-
-```json
-{
-  "query": "Is there a connection between Dr. Chen's eSpCas9 findings and the base editing research?",
-  "multi_hop": true,
-  "results": [
-    {
-      "type": "direct",
-      "id": "mem_chen_001",
-      "content": "Dr. Chen's lab discovered that eSpCas9 shows 8-fold higher specificity...",
-      "relevance_score": 0.94
-    },
-    {
-      "type": "direct",
-      "id": "mem_base_001",
-      "content": "Base editing provides an alternative to double-strand breaks...",
-      "relevance_score": 0.88
-    }
-  ],
-  "chains": [
-    {
-      "chain_id": "chain_001",
-      "length": 3,
-      "path": ["mem_chen_001", "mem_common_001", "mem_base_001"],
-      "connection_explanation": "Both Chen's eSpCas9 work and base editing research address the specificity challenge in genome editing. They share a common theme: reducing unintended genomic modifications.",
-      "strength": 0.82,
-      "intermediate_memory": {
-        "id": "mem_common_001",
-        "content": "The overarching goal across CRISPR variants is minimizing off-target genomic modifications"
-      }
-    }
-  ],
-  "insights": [
-    {
-      "type": "synthesis",
-      "description": "eSpCas9 and base editing represent complementary approaches to the same fundamental challenge",
-      "confidence": 0.79
-    }
-  ],
-  "total_chains_found": 1,
-  "total_found": 8
-}
-```
-
-#### Recall trace (the shipped shape)
-
-Every recall answers with a `trace`. It is a contract in both directions — the
-path may only write the keys declared here, so treat them as the shape to build
-dashboards and alerts on:
-
-- **`stage_ms`** — one entry per stage that RAN, plus the declared zero-valued
-  keys the schema always carries: `context`, `queue_wait`, `rewrite_ms`,
-  `embed_ms`, `embed_compute`, `search_ms`, `hydrate_ms`, `refill`, `lexical`,
-  `rerank`, `eligibility`, `score`, `serialization`, `total`. Every key starts at
-  `0.0` except **`refill`**, which appears only when the bounded refill really
-  ran — an absent `refill` means "not needed", never "ran in 0 ms".
-- **`counts`** — per-leg candidate counts, present only for the legs that ran:
-  `dense` (the pre-filter fetch), `refill` (rows the refill ADDED),
-  `eligible` (rows that entered scoring), `reranked` (the reranked head that
-  merged), `hydrated` (see below), `returned` (the served count), plus
-  `lexical` / `fused` on the hybrid path. An absent key means the leg did not
-  run; a `0` is a measured zero.
-- **`hydrated` is the size of the hydration map at scoring**, not the result
-  count. After a rerank round the pipeline re-reads the whole MERGED pool from
-  SQL, so `hydrated` may exceed `eligible` (and always ≥ `returned`). Read it as
-  "rows the SQL layer produced for scoring".
-- **`counts.dense == 0` is ambiguous.** It is the dense leg's page size when the
-  store answered (empty index, tenant with no points, or a filter that matched
-  nothing) AND it is what an untyped store failure leaves behind (the failed leg
-  logs `search_memories failed`, and the MCP seam surfaces it as a degraded
-  leg). Do not read a lone `0` as proof of an empty index — check the store's
-  health and the logs. The typed readiness failures do not end in a trace at
-  all: they answer `503` with `embedding_contract_mismatch`,
-  `vector_unavailable` or `index_freshness_timeout`.
-- **Vector outage (SQLite):** the answer comes from the FTS5 lexical leg —
-  `counts.lexical` is set, `dense` is ABSENT (the leg never answered), and the
-  `retrieval.vector_unavailable` fallback counter increments. On a deployment
-  without a lexical index (Postgres) the outage keeps its typed `503`.
-- **Hybrid recall** (`RETRIEVAL_HYBRID_ENABLED=true`, opt-in) adds
-  `counts.lexical` and `counts.fused` and fills `stage_ms.lexical`; the default
-  OFF path is dense-only and writes none of them.
+**Public, no auth.** Returns `SharedMemoryResponse` (`id`, `title`, `content`,
+`summary`, `tags`, `created_at`, `source_type`) for a memory with
+`is_shared=true` in the personal namespace; anything else is `404`.
 
 ---
 
-## 5. Knowledge Graph
+## 5. Users
 
-### Entities
+### GET /api/v1/users/me
 
-#### POST /api/v1/entities
+The local owner: `id`, `email`, `display_name`, `avatar_url`, `auth_provider`,
+`role`, `is_active`, `is_deleted`, `is_verified`, `onboarding_done`,
+`retention_enabled`, `retention_days`, `created_at`.
 
-Create a new entity.
+### PATCH /api/v1/users/me/settings
 
-**Request:**
+Retention settings for the owner:
 
-```json
-{
-  "name": "eSpCas9",
-  "type": "protein",
-  "aliases": ["enhanced SpCas9", "high-fidelity Cas9"],
-  "description": "Engineered Cas9 variant with reduced off-target activity",
-  "properties": {
-    "organism": "Streptococcus pyogenes",
-    "modification_type": "point mutations",
-    "specificity_improvement": "8-fold"
-  },
-  "source_document_id": "doc_xyz789",
-  "source_chunk_id": "chk_abc123"
-}
-```
+| Field | Type | Notes |
+|---|---|---|
+| `retention_enabled` | bool | default `false` |
+| `retention_days` | int \| null | `> 0`, max 36500 |
 
-| Field               | Type     | Required | Description                            |
-|--------------------|----------|----------|----------------------------------------|
-| `name`             | string   | Yes      | Entity name (max 200 chars)            |
-| `type`             | string   | Yes      | Entity type (see below)               |
-| `aliases`          | string[] | No       | Alternative names                      |
-| `description`      | string   | No       | Natural language description           |
-| `properties`       | object   | No       | Structured key-value properties       |
-| `source_document_id` | string | No       | Source document                        |
-| `source_chunk_id`  | string   | No       | Source chunk                           |
-
-**Entity Types:**
-
-`protein`, `gene`, `disease`, `drug`, `cell_line`, `lab`, `researcher`, `paper`, `grant`, `concept`, `method`, `organism`, `compound`, `custom`
-
-**Response `201 Created`:**
-
-```json
-{
-  "id": "ent_abc123",
-  "name": "eSpCas9",
-  "type": "protein",
-  "aliases": ["enhanced SpCas9", "high-fidelity Cas9"],
-  "description": "Engineered Cas9 variant with reduced off-target activity",
-  "properties": {
-    "organism": "Streptococcus pyogenes",
-    "modification_type": "point mutations",
-    "specificity_improvement": "8-fold"
-  },
-  "created_at": "2025-01-20T14:22:00Z",
-  "updated_at": "2025-01-20T14:22:00Z",
-  "relation_count": 5,
-  "source_document_id": "doc_xyz789"
-}
-```
+Returns the stored `{"retention_enabled": …, "retention_days": …}`.
 
 ---
 
-#### GET /api/v1/entities
-
-List all entities.
-
-**Query Parameters:**
-
-| Parameter   | Type    | Default | Description                        |
-|-------------|---------|---------|-----------------------------------|
-| `type`      | string  | null    | Filter by entity type             |
-| `q`         | string  | null    | Search by name or description     |
-| `limit`     | integer | 20      | Items per page (max 100)          |
-| `cursor`    | string  | null    | Pagination cursor                 |
-
-**Response `200 OK`:**
-
-```json
-{
-  "entities": [
-    {
-      "id": "ent_abc123",
-      "name": "eSpCas9",
-      "type": "protein",
-      "aliases": ["enhanced SpCas9"],
-      "description": "Engineered Cas9 variant with reduced off-target activity",
-      "relation_count": 5,
-      "created_at": "2025-01-20T14:22:00Z"
-    }
-  ],
-  "pagination": {
-    "has_more": true,
-    "next_cursor": "eyJpZCI6ImVudF9hYmMxMjMifQ",
-    "total_count": 342
-  }
-}
-```
-
----
-
-#### GET /api/v1/entities/{id}
-
-Get a single entity.
-
-**Response `200 OK`:**
-
-```json
-{
-  "id": "ent_abc123",
-  "name": "eSpCas9",
-  "type": "protein",
-  "aliases": ["enhanced SpCas9", "high-fidelity Cas9"],
-  "description": "Engineered Cas9 variant with reduced off-target activity",
-  "properties": {
-    "organism": "Streptococcus pyogenes",
-    "modification_type": "point mutations",
-    "specificity_improvement": "8-fold"
-  },
-  "created_at": "2025-01-20T14:22:00Z",
-  "updated_at": "2025-01-20T14:22:00Z",
-  "source_document_id": "doc_xyz789",
-  "related_memories": [
-    {
-      "id": "mem_xyz789",
-      "content": "Chen lab's eSpCas9 validation...",
-      "created_at": "2025-01-20T14:22:00Z"
-    }
-  ]
-}
-```
-
----
-
-#### PATCH /api/v1/entities/{id}
-
-Update an entity.
-
-**Request:**
-
-```json
-{
-  "aliases": ["enhanced SpCas9", "high-fidelity Cas9", "eSpCas9 v1.1"],
-  "properties": {
-    "organism": "Streptococcus pyogenes",
-    "specificity_improvement": "10-fold"
-  }
-}
-```
-
-**Response `200 OK`:** Updated entity object.
-
----
-
-#### DELETE /api/v1/entities/{id}
-
-Delete an entity and all its relations.
-
-**Response `204 No Content`**
-
----
-
-### Relations
-
-#### POST /api/v1/relations
-
-Create a relation between two entities.
-
-**Request:**
-
-```json
-{
-  "from_entity_id": "ent_abc123",
-  "to_entity_id": "ent_def456",
-  "relation_type": "improves",
-  "strength": 0.92,
-  "bidirectional": false,
-  "description": "eSpCas9 shows improved specificity compared to wild-type Cas9",
-  "source_document_id": "doc_xyz789"
-}
-```
-
-| Field              | Type    | Required | Description                            |
-|-------------------|---------|----------|----------------------------------------|
-| `from_entity_id`  | string  | Yes      | Source entity ID                       |
-| `to_entity_id`    | string  | Yes      | Target entity ID                       |
-| `relation_type`   | string  | Yes      | Relation type (see below)             |
-| `strength`        | number  | No       | 0.0–1.0, default 1.0                 |
-| `bidirectional`   | boolean | No       | If true, creates reverse relation too  |
-| `description`     | string  | No       | Natural language description           |
-| `source_document_id` | string | No    | Source document                        |
-
-**Relation Types:**
-
-`interacts_with`, `regulates`, `inhibits`, `activates`, `associates_with`, `encodes`, `expressed_in`, `located_in`, `similar_to`, `improves`, `derived_from`, `parent_of`, `child_of`, `part_of`, `related_to`, `cites`, `authored_by`, `funded_by`, `contradicts`, `supports`, `custom`
-
-**Response `201 Created`:**
-
-```json
-{
-  "id": "rel_abc123",
-  "from_entity_id": "ent_abc123",
-  "to_entity_id": "ent_def456",
-  "relation_type": "improves",
-  "strength": 0.92,
-  "bidirectional": false,
-  "description": "eSpCas9 shows improved specificity compared to wild-type Cas9",
-  "created_at": "2025-01-20T14:22:00Z"
-}
-```
-
----
-
-#### GET /api/v1/relations
-
-List relations with filtering.
-
-**Query Parameters:**
-
-| Parameter      | Type    | Default | Description                        |
-|----------------|---------|---------|-----------------------------------|
-| `from_entity_id` | string | null   | Filter by source entity           |
-| `to_entity_id`   | string | null   | Filter by target entity           |
-| `relation_type`  | string | null   | Filter by relation type           |
-| `limit`          | integer | 20    | Items per page (max 100)          |
-| `cursor`         | string  | null   | Pagination cursor                 |
-
-**Response `200 OK`:**
-
-```json
-{
-  "relations": [
-    {
-      "id": "rel_abc123",
-      "from_entity_id": "ent_abc123",
-      "to_entity_id": "ent_def456",
-      "relation_type": "improves",
-      "strength": 0.92,
-      "description": "eSpCas9 shows improved specificity...",
-      "created_at": "2025-01-20T14:22:00Z"
-    }
-  ],
-  "pagination": {
-    "has_more": false,
-    "total_count": 127
-  }
-}
-```
-
----
-
-#### DELETE /api/v1/relations/{id}
-
-Delete a relation.
-
-**Response `204 No Content`**
-
----
-
-### Graph Visualization Endpoints
-
-#### GET /api/v1/graph/snapshot
-
-Get the entire knowledge graph as nodes and edges.
-
-**Query Parameters:**
-
-| Parameter  | Type    | Default | Description                        |
-|------------|---------|---------|-----------------------------------|
-| `depth`    | integer | 2       | Traversal depth (max 5)           |
-| `node_types` | string | null   | Comma-separated entity types      |
-| `limit`    | integer | 500     | Max nodes to return (max 1000)    |
-
-**Response `200 OK`:**
-
-```json
-{
-  "nodes": [
-    {
-      "id": "ent_abc123",
-      "name": "eSpCas9",
-      "type": "protein",
-      "properties": {
-        "specificity_improvement": "8-fold"
-      }
-    },
-    {
-      "id": "ent_def456",
-      "name": "wild-type Cas9",
-      "type": "protein",
-      "properties": {}
-    }
-  ],
-  "edges": [
-    {
-      "id": "rel_abc123",
-      "source": "ent_abc123",
-      "target": "ent_def456",
-      "type": "improves",
-      "strength": 0.92
-    }
-  ],
-  "stats": {
-    "total_nodes": 2,
-    "total_edges": 1,
-    "node_type_distribution": {
-      "protein": 2
-    },
-    "relation_type_distribution": {
-      "improves": 1
-    }
-  },
-  "generated_at": "2025-01-20T16:00:00Z"
-}
-```
-
----
-
-#### GET /api/v1/graph/clusters
-
-Identify topic clusters in the knowledge graph using community detection.
-
-**Query Parameters:**
-
-| Parameter   | Type    | Default | Description                        |
-|-------------|---------|---------|-----------------------------------|
-| `algorithm` | string  | `louvain` | Algorithm: `louvain`, `label_propagation` |
-| `threshold` | number  | 0.3    | Minimum relation strength         |
-
-**Response `200 OK`:**
-
-```json
-{
-  "clusters": [
-    {
-      "cluster_id": "cluster_001",
-      "name": "CRISPR Specificity",
-      "entities": [
-        {
-          "id": "ent_abc123",
-          "name": "eSpCas9",
-          "type": "protein"
-        },
-        {
-          "id": "ent_def456",
-          "name": "wild-type Cas9",
-          "type": "protein"
-        }
-      ],
-      "relations": 5,
-      "density": 0.83,
-      "primary_topic": "genome editing specificity"
-    }
-  ],
-  "algorithm": "louvain",
-  "total_clusters": 7,
-  "generated_at": "2025-01-20T16:00:00Z"
-}
-```
-
----
-
-#### GET /api/v1/graph/related/{entity_name}
-
-Find entities and relations connected to a specific entity.
-
-**Path Parameters:**
-
-| Parameter      | Type   | Description                              |
-|---------------|--------|----------------------------------------|
-| `entity_name` | string | Entity name (URL-encoded)              |
-
-**Query Parameters:**
-
-| Parameter  | Type    | Default | Description                        |
-|------------|---------|---------|-----------------------------------|
-| `max_depth` | integer | 2      | Maximum traversal depth (max 4)   |
-| `relation_types` | string | null | Comma-separated relation types  |
-| `limit`    | integer | 50      | Max related entities (max 200)   |
-
-**Example:**
-
-```http
-GET /api/v1/graph/related/eSpCas9?max_depth=2&limit=20
-```
-
-**Response `200 OK`:**
-
-```json
-{
-  "center_entity": {
-    "id": "ent_abc123",
-    "name": "eSpCas9",
-    "type": "protein"
-  },
-  "related": [
-    {
-      "entity": {
-        "id": "ent_def456",
-        "name": "wild-type Cas9",
-        "type": "protein"
-      },
-      "relation": {
-        "type": "improves",
-        "strength": 0.92,
-        "direction": "outgoing"
-      },
-      "depth": 1
-    },
-    {
-      "entity": {
-        "id": "ent_chenlab",
-        "name": "Chen Lab",
-        "type": "lab"
-      },
-      "relation": {
-        "type": "authored_by",
-        "strength": 1.0,
-        "direction": "outgoing"
-      },
-      "depth": 2,
-      "path": ["ent_abc123", "ent_paper001", "ent_chenlab"]
-    }
-  ],
-  "stats": {
-    "total_related": 15,
-    "unique_depths": [1, 2],
-    "entity_types": ["protein", "lab", "paper", "method"]
-  }
-}
-```
-
----
-
-## 6. Sources & Connectors
-
-### Sources
-
-#### POST /api/v1/sources
-
-Register an external source (RSS feed, URL, or connector).
-
-**Request (RSS):**
-
-```json
-{
-  "type": "rss",
-  "name": "Nature Biotechnology RSS",
-  "url": "https://www.nature.com/nbt/rss",
-  "schedule": "daily",
-  "tags": ["nature", "biotechnology", "crispr"],
-  "filters": {
-    "keywords_include": ["crispr", "gene editing"],
-    "keywords_exclude": ["clinical trial phase 3"]
-  }
-}
-```
-
-**Request (URL / Web Clipper):**
-
-```json
-{
-  "type": "webpage",
-  "name": "eSpCas9 Paper",
-  "url": "https://www.science.org/doi/10.1126/science.aa",
-  "tags": ["espCas9", "specificity"]
-}
-```
-
-**Request (Connector):**
-
-```json
-{
-  "type": "connector",
-  "connector_type": "zotero",
-  "name": "Zotero Library",
-  "config": {
-    "library_id": "zotero-lib-123"
-  },
-  "schedule": "weekly",
-  "tags": ["zotero", "library"]
-}
-```
-
-| Field            | Type    | Required | Description                            |
-|-----------------|---------|----------|----------------------------------------|
-| `type`          | string  | Yes      | `rss`, `webpage`, `connector`          |
-| `name`          | string  | Yes      | Display name                           |
-| `url`           | string  | Conditional | Required for `rss` and `webpage`    |
-| `schedule`      | string  | No       | `hourly`, `daily`, `weekly`, `manual` |
-| `tags`          | string[]| No       | Tag strings                            |
-| `filters`       | object  | No       | Keyword filters                        |
-| `connector_type`| string  | Conditional | Required for `connector` type       |
-| `config`        | object  | Conditional | Required for `connector` type       |
-
-**Connector Types:** `zotero`, `endnote`, `mendeley`, `pocket`, `instapaper`, `readwise`
-
-**Response `201 Created`:**
-
-```json
-{
-  "id": "src_abc123",
-  "type": "rss",
-  "name": "Nature Biotechnology RSS",
-  "status": "active",
-  "last_sync": null,
-  "next_sync": "2025-01-21T00:00:00Z",
-  "items_captured": 0,
-  "created_at": "2025-01-20T14:22:00Z"
-}
-```
-
----
-
-#### GET /api/v1/sources
-
-List all registered sources.
-
-**Response `200 OK`:**
-
-```json
-{
-  "sources": [
-    {
-      "id": "src_abc123",
-      "type": "rss",
-      "name": "Nature Biotechnology RSS",
-      "status": "active",
-      "last_sync": "2025-01-20T00:00:00Z",
-      "next_sync": "2025-01-21T00:00:00Z",
-      "items_captured": 47,
-      "schedule": "daily"
-    }
-  ],
-  "pagination": {
-    "has_more": false,
-    "total_count": 5
-  }
-}
-```
-
----
-
-#### DELETE /api/v1/sources/{id}
-
-Remove a source and optionally delete all associated documents.
-
-**Query Parameters:**
-
-| Parameter              | Type    | Default | Description                        |
-|------------------------|---------|---------|-----------------------------------|
-| `delete_documents`     | boolean | false   | Also delete all indexed documents |
-
-**Response `204 No Content`**
-
----
-
-#### POST /api/v1/sources/{id}/sync
-
-Manually trigger a sync for a source.
-
-**Response `202 Accepted`:**
-
-```json
-{
-  "source_id": "src_abc123",
-  "status": "queued",
-  "estimated_items": 12,
-  "queue_position": 1
-}
-```
-
----
-
-### Sync Endpoints
-
-#### GET /api/v1/sources/{id}/sync/status
-
-Check sync status for a source.
-
-**Response `200 OK`:**
-
-```json
-{
-  "source_id": "src_abc123",
-  "sync_status": "completed",
-  "started_at": "2025-01-20T14:22:00Z",
-  "completed_at": "2025-01-20T14:22:45Z",
-  "items_processed": 12,
-  "items_new": 3,
-  "items_updated": 9,
-  "errors": []
-}
-```
-
----
-
-## 7. Feedback & Calibration (NEW)
-
-### POST /api/v1/feedback
-
-Submit feedback on an answer to improve model calibration.
-
-**Request:**
-
-```json
-{
-  "query_id": "msg_new_123",
-  "answer_id": "msg_aaa222",
-  "feedback_type": "accuracy",
-  "rating": 4,
-  "details": {
-    "was_helpful": true,
-    "was_accurate": true,
-    "was_complete": false,
-    "had_hallucination": false,
-    "had_omission": true,
-    "omission_description": "Did not mention the 2024 update to HiFi Cas9 specificity data",
-    "citation_correct": true
-  },
-  "corrections": [
-    {
-      "claim": "HiFi Cas9 uses modified sgRNA architecture",
-      "correction": "This is incorrect. HiFi Cas9 uses high-fidelity Cas9 protein mutations, not modified sgRNA."
-    }
-  ],
-  "preferred_response": "The correct description should include the point mutations in the HNH domain..."
-}
-```
-
-| Field               | Type     | Required | Description                            |
-|--------------------|----------|----------|----------------------------------------|
-| `query_id`         | string   | Yes      | ID of the user query message          |
-| `answer_id`       | string   | Yes      | ID of the assistant answer             |
-| `feedback_type`   | string   | Yes      | `accuracy`, `relevance`, `format`, `safety` |
-| `rating`          | integer  | Yes      | 1–5 star rating                       |
-| `details`         | object   | No       | Structured feedback details           |
-| `corrections`     | object[] | No       | Array of factual corrections           |
-| `preferred_response` | string | No       | User's preferred answer                |
-
-**Feedback Types:**
-
-- `accuracy`: Factual correctness of the answer
-- `relevance`: Whether the answer addressed the query
-- `format`: Presentation quality (citations, structure, etc.)
-- `safety`: Content safety concerns
-
-**Response `201 Created`:**
-
-```json
-{
-  "feedback_id": "fb_abc123",
-  "query_id": "msg_new_123",
-  "answer_id": "msg_aaa222",
-  "feedback_type": "accuracy",
-  "rating": 4,
-  "submitted_at": "2025-01-20T14:22:00Z",
-  "calibration_impact": {
-    "model_confidence_adjustment": -0.03,
-    "calibration_updated": true,
-    "affected_claims": ["claim_001", "claim_003"]
-  }
-}
-```
-
----
-
-### GET /api/v1/feedback/accuracy
-
-Get accuracy metrics for the authenticated user's feedback history.
-
-**Query Parameters:**
-
-| Parameter   | Type    | Default | Description                        |
-|-------------|---------|---------|-----------------------------------|
-| `period`    | string  | `30d`   | `7d`, `30d`, `90d`, `all`        |
-| `model`     | string  | null    | Filter by model ID                |
-
-**Response `200 OK`:**
-
-```json
-{
-  "period": "30d",
-  "metrics": {
-    "total_feedback": 47,
-    "average_rating": 4.2,
-    "rating_distribution": {
-      "1": 2,
-      "2": 1,
-      "3": 5,
-      "4": 24,
-      "5": 15
-    },
-    "accuracy_score": 0.89,
-    "relevance_score": 0.92,
-    "format_score": 0.85,
-    "improvement_trend": "increasing",
-    "trend_delta": "+0.04"
-  },
-  "feedback_by_type": {
-    "accuracy": {
-      "count": 28,
-      "avg_rating": 4.1,
-      "corrections_submitted": 3
-    },
-    "relevance": {
-      "count": 12,
-      "avg_rating": 4.5
-    },
-    "format": {
-      "count": 7,
-      "avg_rating": 3.9
-    }
-  },
-  "calibration_status": {
-    "calibrated": true,
-    "last_calibration": "2025-01-19T10:00:00Z",
-    "calibration_interval": "weekly",
-    "next_scheduled": "2025-01-26T10:00:00Z"
-  },
-  "model_breakdown": {
-    "claude-3-5-sonnet": {
-      "accuracy_score": 0.91,
-      "feedback_count": 32
-    },
-    "gpt-4o": {
-      "accuracy_score": 0.86,
-      "feedback_count": 15
-    }
-  },
-  "generated_at": "2025-01-20T16:00:00Z"
-}
-```
-
----
-
-### POST /api/v1/feedback/calibration
-
-Trigger a recalibration of the model's confidence estimates based on accumulated feedback.
-
-**Request:**
-
-```json
-{
-  "scope": "targeted",
-  "target_model": "claude-3-5-sonnet",
-  "focus_areas": ["protein_entities", "crispr_methods"],
-  "force": false
-}
-```
-
-| Field         | Type    | Required | Description                            |
-|---------------|---------|----------|----------------------------------------|
-| `scope`       | string  | No       | `full`, `targeted`, `incremental` (default: `incremental`) |
-| `target_model`| string  | No       | Specific model to recalibrate          |
-| `focus_areas` | string[]| No       | Entity/relation types to focus on      |
-| `force`       | boolean | No       | Force recalibration even if not due    |
-
-**Response `202 Accepted`:**
-
-```json
-{
-  "calibration_id": "cal_abc123",
-  "status": "queued",
-  "scope": "targeted",
-  "target_model": "claude-3-5-sonnet",
-  "focus_areas": ["protein_entities", "crispr_methods"],
-  "estimated_completion": "2025-01-20T16:05:00Z",
-  "feedback_samples_used": 142,
-  "threshold_met": true
-}
-```
-
----
-
-## 8. Insights (NEW)
-
-### GET /api/v1/insights/unexpected
-
-**"What I Didn't Know I Knew"** — Discover unexpected connections and knowledge gaps filled by your corpus.
-
-**Query Parameters:**
-
-| Parameter   | Type    | Default | Description                              |
-|-------------|---------|---------|----------------------------------------|
-| `limit`     | integer | 10      | Number of insights (max 50)             |
-| `threshold` | number  | 0.6     | Minimum surprise score (0.0–1.0)        |
-| `categories` | string | null    | Comma-separated: `connection`, `gap`, `pattern` |
-
-**Response `200 OK`:**
-
-```json
-{
-  "insights": [
-    {
-      "id": "ins_abc123",
-      "category": "connection",
-      "type": "unexpected_bridge",
-      "title": "Unexpected connection between CRISPR base editing and RNA research",
-      "description": "Analysis revealed that your base editing research corpus contains 3 papers that cite RNA helicase mechanisms, connecting to your prior RNA research.",
-      "surprise_score": 0.84,
-      "entities_involved": [
-        {"id": "ent_be", "name": "Base Editing", "type": "method"},
-        {"id": "ent_rna", "name": "RNA Helicases", "type": "protein"}
-      ],
-      "supporting_evidence": [
-        {
-          "document_id": "doc_paper1",
-          "title": "RNA-guided base editing with helicase co-factors",
-          "relevance": 0.91
-        }
-      ],
-      "potential_use_cases": [
-        "Cross-validate base editing efficiency using RNA helicase assays",
-        "Explore helicase-assisted delivery mechanisms"
-      ],
-      "discovered_at": "2025-01-20T16:00:00Z"
-    },
-    {
-      "id": "ins_def456",
-      "category": "gap",
-      "type": "knowledge_gap",
-      "title": "Knowledge gap: Recent developments in prime editing",
-      "description": "Your corpus contains limited coverage of prime editing (2 papers) compared to base editing (18 papers), despite prime editing representing a significant advancement.",
-      "surprise_score": 0.72,
-      "gap_details": {
-        "topic": "prime editing",
-        "existing_coverage": 2,
-        "recommended_coverage": 15,
-        "gap_ratio": 0.13
-      },
-      "suggested_sources": [
-        "Anzalone et al. (2019) — Prime editing original paper",
-        "Chen et al. (2021) — Prime editing 2.0"
-      ],
-      "discovered_at": "2025-01-20T16:00:00Z"
-    },
-    {
-      "id": "ins_ghi789",
-      "category": "pattern",
-      "type": "temporal_pattern",
-      "title": "Increasing focus on specificity in recent research",
-      "description": "Over the past 6 months, 67% of new papers added focus on specificity optimization, compared to 34% in the prior period.",
-      "surprise_score": 0.65,
-      "pattern_details": {
-        "metric": "specificity_mentions",
-        "current_period_ratio": 0.67,
-        "prior_period_ratio": 0.34,
-        "change_direction": "increasing",
-        "change_magnitude": "+0.33"
-      },
-      "discovered_at": "2025-01-20T16:00:00Z"
-    }
-  ],
-  "summary": {
-    "total_insights": 10,
-    "by_category": {
-      "connection": 4,
-      "gap": 3,
-      "pattern": 3
-    },
-    "avg_surprise_score": 0.71
-  },
-  "generated_at": "2025-01-20T16:00:00Z"
-}
-```
-
----
-
-### GET /api/v1/insights/connections
-
-Discover multi-hop connections across your knowledge graph.
-
-**Query Parameters:**
-
-| Parameter     | Type    | Default | Description                              |
-|--------------|---------|---------|----------------------------------------|
-| `entity_a`   | string  | null    | Start entity name                       |
-| `entity_b`   | string  | null    | Target entity name                      |
-| `max_hops`   | integer | 3       | Maximum path length (max 5)            |
-| `relation_types` | string | null  | Comma-separated relation types to allow |
-| `limit`      | integer | 10      | Number of connection sets (max 50)     |
-
-**Response `200 OK`:**
-
-```json
-{
-  "query": {
-    "entity_a": "eSpCas9",
-    "entity_b": "RNA helicase",
-    "max_hops": 3
-  },
-  "connections": [
-    {
-      "connection_id": "conn_001",
-      "path": [
-        {
-          "entity": {"id": "ent_esp", "name": "eSpCas9", "type": "protein"},
-          "relation": null,
-          "depth": 0
-        },
-        {
-          "entity": {"id": "ent_delivery", "name": "AAV Delivery", "type": "method"},
-          "relation": {"type": "uses", "strength": 0.88},
-          "depth": 1
-        },
-        {
-          "entity": {"id": "ent_rna", "name": "RNA Helicase", "type": "protein"},
-          "relation": {"type": "associated_with", "strength": 0.72},
-          "depth": 2
-        }
-      ],
-      "path_length": 2,
-      "path_strength": 0.63,
-      "explanation": "eSpCas9 research often discusses AAV delivery methods, which involve RNA helicase activity for unpackaging.",
-      "confidence": 0.78,
-      "supporting_sources": [
-        {
-          "document_id": "doc_delivery_1",
-          "title": "AAV Vector Unpackaging in Neurons",
-          "relevance": 0.85
-        }
-      ]
-    },
-    {
-      "connection_id": "conn_002",
-      "path": [
-        {
-          "entity": {"id": "ent_esp", "name": "eSpCas9", "type": "protein"},
-          "relation": null,
-          "depth": 0
-        },
-        {
-          "entity": {"id": "ent_paper1", "name": "High-Fidelity Cas9 Review", "type": "paper"},
-          "relation": {"type": "reviewed_in", "strength": 1.0},
-          "depth": 1
-        },
-        {
-          "entity": {"id": "ent_rna", "name": "RNA Helicase", "type": "protein"},
-          "relation": {"type": "cited_by", "strength": 0.65},
-          "depth": 2
-        }
-      ],
-      "path_length": 2,
-      "path_strength": 0.65,
-      "explanation": "The high-fidelity Cas9 review paper cites a reference discussing RNA helicase interactions.",
-      "confidence": 0.71,
-      "supporting_sources": []
-    }
-  ],
-  "statistics": {
-    "total_connections": 2,
-    "avg_path_length": 2.0,
-    "avg_path_strength": 0.64,
-    "entity_type_pairs": [
-      {"from_type": "protein", "to_type": "method", "count": 1},
-      {"from_type": "protein", "to_type": "paper", "count": 1}
-    ]
-  },
-  "generated_at": "2025-01-20T16:00:00Z"
-}
-```
-
----
-
-## 9. Admin API
-
-> **Note:** Admin endpoints require an admin-scoped access token. Contact support to obtain admin credentials.
-
-### User Management
-
-#### GET /api/v1/admin/users
-
-List all users (admin only).
-
-**Query Parameters:**
-
-| Parameter  | Type    | Default | Description                        |
-|------------|---------|---------|-----------------------------------|
-| `limit`    | integer | 50      | Items per page (max 100)          |
-| `cursor`   | string  | null    | Pagination cursor                 |
-| `plan`     | string  | null    | Filter by plan: `free`, `pro`, `enterprise` |
-| `status`   | string  | null    | Filter by status: `active`, `suspended`, `pending` |
-
-**Response `200 OK`:**
-
-```json
-{
-  "users": [
-    {
-      "id": "usr_a1b2c3d4",
-      "email": "researcher@university.edu",
-      "full_name": "Dr. Jane Smith",
-      "plan": "pro",
-      "status": "active",
-      "created_at": "2025-01-15T10:30:00Z",
-      "last_login": "2025-01-20T14:22:00Z",
-      "usage": {
-        "conversations_created": 47,
-        "documents_indexed": 12,
-        "memories_created": 243,
-        "api_calls_this_month": 3847
-      }
-    }
-  ],
-  "pagination": {
-    "has_more": true,
-    "next_cursor": "eyJ1c2VyX2lkIjoiMTIzNDU2Nzg5YWJjZGVmIn0",
-    "total_count": 1523
-  }
-}
-```
-
----
-
-#### PATCH /api/v1/admin/users/{user_id}
-
-Update a user's account status, plan, or quotas.
-
-**Request:**
-
-```json
-{
-  "plan": "enterprise",
-  "status": "active",
-  "quotas": {
-    "conversations_per_day": 500,
-    "documents_per_month": 1000,
-    "api_calls_per_month": 100000
-  }
-}
-```
-
-**Response `200 OK`:**
-
-```json
-{
-  "id": "usr_a1b2c3d4",
-  "plan": "enterprise",
-  "status": "active",
-  "quotas": {
-    "conversations_per_day": 500,
-    "documents_per_month": 1000,
-    "api_calls_per_month": 100000
-  },
-  "updated_at": "2025-01-20T16:00:00Z"
-}
-```
-
----
-
-### Diagnostics
-
-#### GET /api/v1/admin/diagnostics
-
-Get system health and performance diagnostics.
-
-**Query Parameters:**
-
-| Parameter   | Type    | Default | Description                        |
-|-------------|---------|---------|-----------------------------------|
-| `component` | string  | null    | Filter by component               |
-
-**Components:** `api`, `vector_store`, `llm_gateway`, `document_processor`, `memory_store`, `graph_engine`, `sync_service`
-
-**Response `200 OK`:**
-
-```json
-{
-  "timestamp": "2025-01-20T16:00:00Z",
-  "overall_status": "healthy",
-  "components": {
-    "api": {
-      "status": "healthy",
-      "latency_p50_ms": 45,
-      "latency_p95_ms": 120,
-      "latency_p99_ms": 250,
-      "error_rate": 0.002
-    },
-    "vector_store": {
-      "status": "healthy",
-      "latency_p50_ms": 12,
-      "latency_p95_ms": 35,
-      "error_rate": 0.0001
-    },
-    "llm_gateway": {
-      "status": "healthy",
-      "latency_p50_ms": 850,
-      "latency_p95_ms": 2100,
-      "error_rate": 0.008
-    },
-    "document_processor": {
-      "status": "degraded",
-      "queue_depth": 847,
-      "processing_rate_per_min": 12,
-      "error_rate": 0.015
-    }
-  }
-}
-```
-
----
-
-### Quality Metrics
-
-#### GET /api/v1/admin/metrics/quality
-
-Get aggregated quality metrics across all users.
-
-**Query Parameters:**
-
-| Parameter  | Type    | Default | Description                        |
-|------------|---------|---------|-----------------------------------|
-| `period`   | string  | `30d`   | `7d`, `30d`, `90d`               |
-
-**Response `200 OK`:**
-
-```json
-{
-  "period": "30d",
-  "metrics": {
-    "total_queries": 487293,
-    "total_users": 1523,
-    "avg_answer_quality_score": 0.87,
-    "avg_source_relevance_score": 0.84,
-    "avg_citation_accuracy": 0.92,
-    "hallucination_rate": 0.008,
-    "user_satisfaction": {
-      "nps_score": 67,
-      "avg_rating": 4.3,
-      "response_rate": 0.99
-    },
-    "model_performance": {
-      "claude-3-5-sonnet": {
-        "usage_share": 0.62,
-        "avg_quality_score": 0.89,
-        "avg_latency_ms": 1200
-      },
-      "gpt-4o": {
-        "usage_share": 0.38,
-        "avg_quality_score": 0.85,
-        "avg_latency_ms": 1500
-      }
-    }
-  },
-  "generated_at": "2025-01-20T16:00:00Z"
-}
-```
-
----
-
-## 10. Webhooks (Future)
-
-Webhooks will allow your application to receive real-time notifications when events occur in Orivory.
-
-### Event Types
-
-| Event                    | Description                                      |
-|-------------------------|------------------------------------------------|
-| `conversation.created`  | A new conversation was created                  |
-| `conversation.updated`  | A conversation was updated                     |
-| `document.processed`    | A document finished processing                 |
-| `document.failed`       | A document failed processing                   |
-| `memory.created`        | A new memory was created                       |
-| `source.synced`         | A source finished syncing                      |
-| `user.quota_exceeded`   | A user exceeded their API quota                |
-
-### Payload Format
-
-```json
-{
-  "event": "document.processed",
-  "timestamp": "2025-01-20T14:22:00Z",
-  "data": {
-    "document_id": "doc_xyz789",
-    "conversation_id": "cnv_a1b2c3d4",
-    "status": "completed",
-    "chunks_created": 127
-  },
-  "signature": "sha256=..."
-}
-```
-
-### Security
-
-Each webhook delivery includes an `X-Orivory-Signature` header containing an HMAC-SHA256 signature of the payload, using your webhook secret.
-
-**Verification Example (Python):**
-
-```python
-import hmac
-import hashlib
-
-def verify_webhook(payload_body: bytes, secret: str, signature_header: str) -> bool:
-    expected = hmac.new(
-        secret.encode(),
-        payload_body,
-        hashlib.sha256
-    ).hexdigest()
-    expected_header = f"sha256={expected}"
-    return hmac.compare_digest(expected_header, signature_header)
-```
-
----
-
-## 11. Rate Limits & Quotas
-
-### Per-Tier Limits
-
-| Feature                   | Free      | Pro        | Enterprise    |
-|--------------------------|-----------|------------|--------------|
-| API requests/minute       | 60        | 300        | 1,000        |
-| API requests/day          | 1,000     | 10,000     | 100,000      |
-| Conversations             | 50 total  | Unlimited  | Unlimited    |
-| Documents indexed         | 5         | 500/month  | 10,000/month |
-| Memory entries            | 200       | 10,000     | Unlimited    |
-| Entities                  | 100       | 5,000      | Unlimited    |
-| SSE streaming              | Yes       | Yes        | Yes          |
-| RAG retrieval              | Yes       | Yes        | Yes          |
-| Knowledge graph            | View only | Full access| Full access  |
-| Temporal reasoning         | No        | Yes        | Yes          |
-| Multi-hop reasoning        | No        | Yes        | Yes          |
-| Confidence scoring         | No        | Yes        | Yes          |
-| Chain-of-thought          | No        | Yes        | Yes          |
-| Webhooks                   | No        | Yes        | Yes          |
-| Admin API                  | No        | No         | Yes          |
-
-### Rate Limit Headers
-
-```http
-HTTP/1.1 200 OK
-X-RateLimit-Limit: 300
-X-RateLimit-Remaining: 284
-X-RateLimit-Reset: 1704067460
-X-RateLimit-Policy: 300;w=60
-```
-
-### Quota Exceeded Response
-
-When a quota is exceeded, the API returns `429 Too Many Requests`:
-
-```json
-{
-  "error": {
-    "code": "QUOTA_EXCEEDED",
-    "message": "Daily document quota exceeded. Upgrade to Pro for 500 documents/month.",
-    "details": {
-      "quota_type": "documents_per_month",
-      "current_usage": 500,
-      "quota_limit": 500,
-      "reset_date": "2025-02-01T00:00:00Z",
-      "upgrade_url": "/pricing"
-    },
-    "request_id": "req_abc123"
-  }
-}
-```
-
----
-
-## 12. Error Reference
-
-### Standard Error Format
-
-Every error response follows this structure:
-
-```json
-{
-  "error": {
-    "code": "ERROR_CODE",
-    "message": "Human-readable description.",
-    "details": {},
-    "request_id": "req_abc123xyz"
-  }
-}
-```
-
-### Error Code Index
-
-| Code                       | HTTP Status | Description & Common Causes                               |
-|---------------------------|-------------|----------------------------------------------------------|
-| `VALIDATION_ERROR`        | 400         | Invalid request body or query parameters               |
-| `UNAUTHORIZED`            | 401         | Missing or invalid access token                        |
-| `TOKEN_EXPIRED`           | 401         | Access token has expired                               |
-| `REFRESH_TOKEN_INVALID`   | 401         | Refresh token is invalid, revoked, or expired          |
-| `FORBIDDEN`               | 403         | Insufficient permissions for this resource             |
-| `RESOURCE_NOT_FOUND`      | 404         | Entity does not exist or is not accessible             |
-| `CONVERSATION_NOT_FOUND`  | 404         | Conversation ID does not exist                         |
-| `DOCUMENT_NOT_FOUND`      | 404         | Document ID does not exist                             |
-| `MEMORY_NOT_FOUND`        | 404         | Memory ID does not exist                               |
-| `ENTITY_NOT_FOUND`        | 404         | Entity does not exist in knowledge graph               |
-| `CONFLICT`                | 409         | Resource with same identifier already exists            |
-| `DUPLICATE_EMAIL`         | 409         | Email already registered                               |
-| `UNPROCESSABLE_ENTITY`    | 422         | Semantically invalid input (e.g., circular relation)   |
-| `FILE_TOO_LARGE`          | 413         | Document exceeds 50MB limit                          |
-| `UNSUPPORTED_FILE_TYPE`   | 415         | File type not supported (see supported types)          |
-| `RATE_LIMIT_EXCEEDED`     | 429         | Too many requests; see `Retry-After` header           |
-| `QUOTA_EXCEEDED`          | 429         | Monthly or daily quota exceeded                        |
-| `SERVICE_UNAVAILABLE`     | 503         | Maintenance window or system overload                  |
-| `INTERNAL_ERROR`          | 500         | Unexpected server error; include `request_id` in bug reports |
-
-### Troubleshooting
-
-| Symptom                       | Likely Cause                    | Solution                               |
-|------------------------------|---------------------------------|---------------------------------------|
-| `401 UNAUTHORIZED` on all requests | Token not passed or expired  | Re-authenticate via `/auth/login`      |
-| `429 RATE_LIMIT_EXCEEDED`   | Too many rapid requests         | Implement exponential backoff          |
-| `429 QUOTA_EXCEEDED`        | Monthly limit reached            | Wait for reset or upgrade plan         |
-| `503 SERVICE_UNAVAILABLE`   | System maintenance              | Check status page, retry after 5 min   |
-| SSE stream stalls            | Connection timeout              | Reconnect with fresh token            |
-| Document processing stuck    | Large file or encoding issue     | Split file or convert to PDF/TXT      |
-
----
-
-## 13. Agent Clients & MCP Hub
+## 6. Agent clients and the access ledger
 
 The Open Memory Hub lets external AI agents (Claude Desktop, Claude Code, OpenClaw, Cursor, custom agents) read and write your memory over MCP (Model Context Protocol). Access is controlled by **agent clients**: per-agent tokens with scoped permissions (`memory:read` / `memory:write`), and every authorized call is recorded in an **access ledger** — which AI read or wrote what, and when.
 
@@ -2748,8 +283,7 @@ Register an agent client. Returns the plaintext token — **shown exactly once**
 **Request:**
 
 ```bash
-curl -s -X POST https://api.orivory.io/api/v1/agents \
-  -H "Authorization: Bearer $ACCESS_TOKEN" \
+curl -s -X POST http://localhost:8000/api/v1/agents \
   -H "Content-Type: application/json" \
   -d '{"name": "Claude Desktop", "scopes": ["memory:read", "memory:write"]}'
 ```
@@ -2776,7 +310,7 @@ curl -s -X POST https://api.orivory.io/api/v1/agents \
 
 ### GET /api/v1/agents
 
-List the current user's agent clients, newest first. Never includes token material.
+List the owner's agent clients, newest first. Never includes token material.
 
 **Response `200 OK`:**
 
@@ -2797,9 +331,9 @@ List the current user's agent clients, newest first. Never includes token materi
 }
 ```
 
-### DELETE /api/v1/agents/{id}
+### DELETE /api/v1/agents/{client_id}
 
-Revoke an agent client. The token stops working immediately and revocation is idempotent (re-revoking the caller's own already-revoked client still returns `204`).
+Revoke an agent client by `client_id` (uuid). The token stops working immediately and revocation is idempotent (re-revoking the caller's own already-revoked client still returns `204`).
 
 **Response `204 No Content`**
 
@@ -2833,11 +367,11 @@ The access ledger: every authorized MCP call, newest first. Which agent did what
 }
 ```
 
-Ledger `action` values: `mcp_search`, `mcp_get`, `mcp_list`, `mcp_add`, `mcp_delete`, `mcp_forget`. `memory_id` is null for search/list actions.
+Ledger `action` values: `mcp_search`, `mcp_get`, `mcp_list`, `mcp_add`, `mcp_correct`, `mcp_delete`, `mcp_forget`, plus `import` for `POST /api/v1/imports` calls made with an agent token. `memory_id` is null for search/list actions.
 
 ---
 
-### MCP Endpoint
+## 7. MCP hub
 
 The hub speaks **streamable HTTP MCP** at:
 
@@ -2857,7 +391,7 @@ X-Orivory-Agent-Token: oa_9f8e7d6c5b4a3210fedcba9876543210
 
 Requests without a valid token — or with a revoked token — are rejected before any tool runs; only authorized calls are ledgered.
 
-#### Tools
+### Tools
 
 | Tool            | Scope         | Description                                          |
 |-----------------|---------------|------------------------------------------------------|
@@ -2868,10 +402,10 @@ Requests without a valid token — or with a revoked token — are rejected befo
 | `add_memory`    | `memory:write`| Store a new memory (title, content, optional tags)    |
 | `correct_memory`| `memory:write`| Supersede a fact (correction) with provenance — a same-slot race answers `status: "conflict"` (see below) |
 | `delete_memory` | `memory:write`| Delete one memory by ID (hard erase + receipt)        |
-| `forget_memory` | `memory:write`| Soft-forget memories: invalidate them and pin their sources against re-import (see below and [§14](#14-erasure-receipts)) |
+| `forget_memory` | `memory:write`| Soft-forget memories: invalidate them and pin their sources against re-import (see below and [§8](#8-erasure-receipts)) |
 
-Every tool is scoped to the caller's namespace as well as to the caller's
-account (the token's owner), and `timeline` filters its neighbours by that
+Every tool is scoped to the caller's namespace as well as to the token's
+owner, and `timeline` filters its neighbours by that
 namespace and by the dirty rule — a stale derived row no longer appears beside
 the anchor, while superseded rows still do (labelled). A revoked token (or one
 whose owner lost the scope) is refused before any tool runs, and the boundary is
@@ -2879,7 +413,7 @@ enforced again below the identity layer, on the SQL that reads the rows.
 
 Scopes are enforced per call: a token with only `memory:read` cannot `add_memory` or `delete_memory`.
 
-#### correct_memory: the correction state machine
+### correct_memory: the correction state machine
 
 `correct_memory` never overwrites: it creates a new version and, when the fact
 is a slot it can match (same normalized `subject` + `attribute` + `scope`), it
@@ -2900,7 +434,7 @@ slot holding MORE than one exact candidate is refused the same way — the tool
 never supersedes a candidate the caller did not name (the whole apply stands
 down, the named candidate included).
 
-#### Connecting an MCP Client (Claude Desktop example)
+### Connecting an MCP client
 
 ```json
 {
@@ -2924,11 +458,11 @@ down, the named candidate included).
 
 ---
 
-## 14. Erasure Receipts
+## 8. Erasure receipts
 
-Erasing a memory removes the row **and every derived artifact** (child memories, entity links, source links, vector-store entries), then runs a post-deletion verification pass: re-query the vector store and re-count residual DB rows per target. Each erasure call returns one **receipt** with per-target detail. Receipts are user-scoped and are deleted with the user.
+Erasing a memory removes the row **and every derived artifact** (child memories, entity links, source links, vector-store entries), then runs a post-deletion verification pass: re-query the vector store and re-count residual DB rows per target. Each erasure call returns one **receipt** with per-target detail. Receipts are scoped to the owner and are deleted with the user row.
 
-> **Two shapes share this receipt table (P4b).** The erasure endpoints and MCP `delete_memory` are HARD: rows deleted, vectors purged, absence positively verified. MCP `forget_memory` is SOFT ([§13](#13-agent-clients--mcp-hub)): rows are invalidated in place, every affected source is suppressed against re-import, and the verification is a serving-off readback. A soft receipt carries `detail.mode: "soft"` (hard receipts keep their earlier shape — no `mode` key) and the shared status vocabulary reads differently for it: `completed` means "no target is visible to a serving surface any more", never "the rows are gone".
+> **Two shapes share this receipt table (P4b).** The erasure endpoints and MCP `delete_memory` are HARD: rows deleted, vectors purged, absence positively verified. MCP `forget_memory` is SOFT ([§7](#7-mcp-hub)): rows are invalidated in place, every affected source is suppressed against re-import, and the verification is a serving-off readback. A soft receipt carries `detail.mode: "soft"` (hard receipts keep their earlier shape — no `mode` key) and the shared status vocabulary reads differently for it: `completed` means "no target is visible to a serving surface any more", never "the rows are gone".
 
 > **Honest v0 verification:** v0 verifies erasure by **absence-checks** — the receipt confirms that vectors and DB rows are *gone*. It does not probe whether facts can be re-inferred from correlated knowledge-graph data (KG-correlation re-inference probing is a planned follow-up). Also note that `Entity`/`Relation` nodes themselves survive memory erasure in v0 (link counts are recorded in the receipt; orphan pruning is a follow-up). Don't market this as "adversarially verified" until the deeper protocol ships.
 
@@ -2939,8 +473,7 @@ Erase memories owned by the caller. Foreign or unknown ids are recorded in the r
 **Request:**
 
 ```bash
-curl -s -X POST https://api.orivory.io/api/v1/erasure-receipts \
-  -H "Authorization: Bearer $ACCESS_TOKEN" \
+curl -s -X POST http://localhost:8000/api/v1/erasure-receipts \
   -H "Content-Type: application/json" \
   -d '{"memory_ids": ["3fa85f64-5717-4562-b3fc-2c963f66afa6"]}'
 ```
@@ -2992,13 +525,13 @@ Rollup precedence: `completed_with_errors` > `completed_with_residual` > `comple
 
 The no-op branch of a **soft** forget follows the same rule: a call that invalidated nothing (every requested id foreign or missing) reports `completed_unverified` — nothing was invalidated, so nothing could be verified, and it never claims `completed`. (The hard endpoints keep their earlier shape: nothing erased, no per-target verification, `completed`.)
 
-`vector_residual_checked: false` means the vector-store re-query was unavailable during verification (the DB delete still succeeded — Postgres is the source of truth). A `false` flag alone does not imply residual data.
+`vector_residual_checked: false` means the vector-store re-query was unavailable during verification (the DB delete still succeeded — the SQL row is the source of truth). A `false` flag alone does not imply residual data.
 
-**Reconciliation.** Open receipts (`completed_unverified`) are re-checked by the reconcile pass (`POST /admin/erasure/reconcile`), OLDEST first (`created_at ASC`, ties broken by id; at most 200 per pass — FIFO, so a sustained erase load cannot starve an old receipt out of the window). A pass that reads the index clean rewrites the SAME receipt to `completed` with the re-verified evidence. A pass that still finds residual vectors does NOT relabel the receipt: it records what it observed in `detail` (`vector_residual_checked: true`, `vector_residual: [...]`) and leaves `status` alone, so the receipt stays open and re-checkable by a later pass — never frozen into the terminal `completed_with_residual`. A pass whose readback failed observed nothing and writes nothing at all: the receipt is byte-identical afterwards. The pass is upgrade-only: `completed`, `completed_with_residual` and `completed_with_errors` receipts are not even scanned, and no open receipt is ever downgraded.
+**Reconciliation.** Open receipts (`completed_unverified`) are re-checked by the reconcile pass that rides the drain loop (`reconcile_erasure_receipts`, `app/retrieval/memory/drain_loop.py`), OLDEST first (`created_at ASC`, ties broken by id; at most 200 per pass — FIFO, so a sustained erase load cannot starve an old receipt out of the window). A pass that reads the index clean rewrites the SAME receipt to `completed` with the re-verified evidence. A pass that still finds residual vectors does NOT relabel the receipt: it records what it observed in `detail` (`vector_residual_checked: true`, `vector_residual: [...]`) and leaves `status` alone, so the receipt stays open and re-checkable by a later pass — never frozen into the terminal `completed_with_residual`. A pass whose readback failed observed nothing and writes nothing at all: the receipt is byte-identical afterwards. The pass is upgrade-only: `completed`, `completed_with_residual` and `completed_with_errors` receipts are not even scanned, and no open receipt is ever downgraded.
 
 ### GET /api/v1/erasure-receipts
 
-List the current user's receipts, newest first.
+List the owner's receipts, newest first.
 
 **Query Parameters:**
 
@@ -3026,8 +559,7 @@ List the current user's receipts, newest first.
 ```
 
 ```bash
-curl -s "https://api.orivory.io/api/v1/erasure-receipts?limit=50&offset=0" \
-  -H "Authorization: Bearer $ACCESS_TOKEN"
+curl -s "http://localhost:8000/api/v1/erasure-receipts?limit=50&offset=0"
 ```
 
 ### GET /api/v1/erasure-receipts/{id}
@@ -3035,13 +567,12 @@ curl -s "https://api.orivory.io/api/v1/erasure-receipts?limit=50&offset=0" \
 Fetch one receipt. Unknown or other users' receipts return `404` (no existence leak).
 
 ```bash
-curl -s https://api.orivory.io/api/v1/erasure-receipts/7c9e6679-7425-40de-944b-e07fc1f90ae7 \
-  -H "Authorization: Bearer $ACCESS_TOKEN"
+curl -s http://localhost:8000/api/v1/erasure-receipts/7c9e6679-7425-40de-944b-e07fc1f90ae7
 ```
 
 ### MCP: forget_memory
 
-Agents with the `memory:write` scope can call the `forget_memory` MCP tool (endpoint `/mcp`, see [§13](#13-agent-clients--mcp-hub)) with `{"memory_ids": ["<uuid>", ...]}`. It returns a compact summary — `receipt_id`, `status`, `invalidated`, `suppressed`, `skipped`, `invalid` — instead of the full receipt; fetch the receipt via `GET /api/v1/erasure-receipts/{id}` for the per-target detail (`detail.mode == "soft"`, `detail.targets[].affected_memory_ids` = the invalidated closure). Every authorized call appends an `mcp_forget` row to the access ledger pointing at the receipt. Ids outside the caller's namespace are resolved out before the service sees them and counted in `skipped` — the same answer a missing id gets, so there is never an existence leak.
+Agents with the `memory:write` scope can call the `forget_memory` MCP tool (endpoint `/mcp`, see [§7](#7-mcp-hub)) with `{"memory_ids": ["<uuid>", ...]}`. It returns a compact summary — `receipt_id`, `status`, `invalidated`, `suppressed`, `skipped`, `invalid` — instead of the full receipt; fetch the receipt via `GET /api/v1/erasure-receipts/{id}` for the per-target detail (`detail.mode == "soft"`, `detail.targets[].affected_memory_ids` = the invalidated closure). Every authorized call appends an `mcp_forget` row to the access ledger pointing at the receipt. Ids outside the caller's namespace are resolved out before the service sees them and counted in `skipped` — the same answer a missing id gets, so there is never an existence leak.
 
 **`forget_memory` is SOFT (P4b, spec §12/§5.4).** It invalidates the target AND its transitive closure (parent + `cm_derived_from`) and writes a `memory_suppressions` row for every affected `source_ref`, so the content stops being served and cannot be re-imported. What it does NOT do:
 
@@ -3055,15 +586,14 @@ Hard deletion (row + descendants + vectors, with the full verification receipt) 
 
 ---
 
-## 15. Import Paths
+## 9. Import paths
 
 Bring an existing AI assistant's memory into Orivory in one call. The endpoint accepts a raw export file, auto-detects (or takes an explicit format), normalizes it into memories, and returns a summary.
 
 ### POST /api/v1/imports
 
 ```bash
-curl -X POST https://api.orivory.io/api/v1/imports \
-  -H "Authorization: Bearer $ACCESS_TOKEN" \
+curl -X POST http://localhost:8000/api/v1/imports \
   -F "file=@conversations.json" \
   -F "source_format=chatgpt"
 ```
@@ -3071,7 +601,7 @@ curl -X POST https://api.orivory.io/api/v1/imports \
 | Form field | Required | Description |
 |---|---|---|
 | `file` | yes | The raw export file (JSON). Max **20 MiB** (larger → `413`). |
-| `source_format` | no | `auto` (same as omitted/blank — detection) · `chatgpt` · `claude` · `generic`. An explicit unknown value → `422`. |
+| `source_format` | no | `auto` (same as omitted/blank — detection) · `chatgpt` · `claude` · `gemini` · `copilot` · `openclaw` · `generic`. An explicit unknown value → `422`. |
 
 **Accepted formats** (detection heuristics follow the [PAM importer mappings](https://github.com/portable-ai-memory/portable-ai-memory/blob/master/importer-mappings.md)):
 
@@ -3081,6 +611,7 @@ curl -X POST https://api.orivory.io/api/v1/imports \
 | `claude` | Claude export: `chat_messages` with `sender` human/assistant and message-level `text` | Thinking/tool blocks dropped |
 | `generic` | JSON array of `{title?, content, created_at?, url?, ref?, tags?}` | The escape hatch for anything else |
 | PAM bundle | `{"schema": "portable-ai-memory", "memories": [...]}` | [Portable AI Memory](https://portable-ai-memory.org/spec/v1.0/) `memory-store.json` (auto-detects to `generic`) |
+| `gemini` / `copilot` / `openclaw` | provider conversation / session dumps | Dedicated adapters in `app/ingestion/import_formats.py` — same defensive contract as the others: malformed entries are skipped, never fatal |
 
 **Response `201`** — `ImportSummary`:
 
@@ -3101,7 +632,7 @@ created nor folded into `skipped_duplicates`. An item that is both a duplicate
 and suppressed stays attributed to the dedup check (it is read first) — the
 order is the one the counters are read in, not a claim about intent.
 
-Duplicates are detected per `(user, source_type, source_ref)` — re-uploading the same export skips what you already imported. Dedup runs per-request (select-then-insert): two concurrent uploads of the same file can both succeed, and generic items without a `ref` field are re-created on every re-upload (a unique index is the planned hardening). Conversation content is clipped at **10,000 characters** (truncation marker appended). Malformed entries inside an otherwise-valid file are **skipped, never fatal** — one bad conversation can't fail the whole import. Embedding is best-effort: `index_failures > 0` means those memories exist and are searchable by keyword but not yet vector-indexed (Postgres is the source of truth; reindex tasks recover them).
+Duplicates are detected per `(user, source_type, source_ref)` — re-uploading the same export skips what you already imported. Dedup runs per-request (select-then-insert): two concurrent uploads of the same file can both succeed, and generic items without a `ref` field are re-created on every re-upload (a unique index is the planned hardening). Conversation content is clipped at **10,000 characters** (truncation marker appended). Malformed entries inside an otherwise-valid file are **skipped, never fatal** — one bad conversation can't fail the whole import. Embedding is best-effort: `index_failures > 0` means those memories exist and are searchable by keyword but not yet vector-indexed (the SQL row is the source of truth; the drain loop recovers the vector).
 
 **Errors:** `422` — unparseable file, undetectable format, explicit unknown format, undecodable bytes · `413` — file over 20 MiB.
 
@@ -3116,684 +647,75 @@ Duplicates are detected per `(user, source_type, source_ref)` — re-uploading t
 
 ---
 
-## Appendix A: OpenAPI Schema (YAML)
+## 10. Appendix: worked examples
 
-```yaml
-openapi: 3.1.0
-info:
-  title: Orivory API
-  version: '2.0'
-  description: RAG-native answer engine for researchers
+Every request below runs against a default local install
+(`http://localhost:8000`), with no credentials: the REST surface serves the
+local owner.
 
-servers:
-  - url: https://api.orivory.io/api/v1
-    description: Production
-
-components:
-  securitySchemes:
-    bearerAuth:
-      type: http
-      scheme: bearer
-      bearerFormat: JWT
-
-  schemas:
-    Error:
-      type: object
-      properties:
-        error:
-          type: object
-          properties:
-            code:
-              type: string
-            message:
-              type: string
-            details:
-              type: object
-            request_id:
-              type: string
-
-    Pagination:
-      type: object
-      properties:
-        has_more:
-          type: boolean
-        next_cursor:
-          type: string
-        total_count:
-          type: integer
-
-    Conversation:
-      type: object
-      properties:
-        id:
-          type: string
-        title:
-          type: string
-        created_at:
-          type: string
-          format: date-time
-        updated_at:
-          type: string
-          format: date-time
-        message_count:
-          type: integer
-        document_count:
-          type: integer
-        tags:
-          type: array
-          items:
-            type: string
-
-    Memory:
-      type: object
-      properties:
-        id:
-          type: string
-        content:
-          type: string
-        type:
-          type: string
-          enum: [finding, hypothesis, note, reference]
-        tags:
-          type: array
-          items:
-            type: string
-        confidence:
-          type: number
-        created_at:
-          type: string
-          format: date-time
-
-    Entity:
-      type: object
-      properties:
-        id:
-          type: string
-        name:
-          type: string
-        type:
-          type: string
-        description:
-          type: string
-        properties:
-          type: object
-        relation_count:
-          type: integer
-
-paths:
-  /auth/register:
-    post:
-      operationId: registerUser
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [email, password, full_name, accept_terms]
-              properties:
-                email:
-                  type: string
-                  format: email
-                password:
-                  type: string
-                  minLength: 8
-                full_name:
-                  type: string
-                research_focus:
-                  type: string
-                accept_terms:
-                  type: boolean
-      responses:
-        '201':
-          description: User registered successfully
-        '400':
-          description: Validation error
-
-  /auth/login:
-    post:
-      operationId: loginUser
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [email, password]
-              properties:
-                email:
-                  type: string
-                password:
-                  type: string
-      responses:
-        '200':
-          description: Login successful
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  access_token:
-                    type: string
-                  refresh_token:
-                    type: string
-                  user:
-                    $ref: '#/components/schemas/User'
-        '401':
-          description: Invalid credentials
-
-  /chat/conversations:
-    get:
-      operationId: listConversations
-      security:
-        - bearerAuth: []
-      parameters:
-        - name: limit
-          in: query
-          schema:
-            type: integer
-            default: 20
-        - name: cursor
-          in: query
-          schema:
-            type: string
-      responses:
-        '200':
-          description: List of conversations
-    post:
-      operationId: createConversation
-      security:
-        - bearerAuth: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [title]
-              properties:
-                title:
-                  type: string
-                tags:
-                  type: array
-                  items:
-                    type: string
-                model:
-                  type: string
-      responses:
-        '201':
-          description: Conversation created
-
-  /chat/conversations/{id}/message:
-    post:
-      operationId: sendMessage
-      security:
-        - bearerAuth: []
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: string
-        - name: include_confidence
-          in: query
-          schema:
-            type: boolean
-          description: Include per-claim confidence scores
-        - name: include_reasoning
-          in: query
-          schema:
-            type: boolean
-          description: Include chain-of-thought reasoning
-        - name: temporal
-          in: query
-          schema:
-            type: boolean
-          description: Enable temporal reasoning
-        - name: multi_hop
-          in: query
-          schema:
-            type: boolean
-          description: Enable multi-hop reasoning
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [content]
-              properties:
-                content:
-                  type: string
-                attachments:
-                  type: array
-                  items:
-                    type: string
-      responses:
-        '200':
-          description: Streaming response via SSE
-          content:
-            text/event-stream:
-              schema:
-                type: string
-
-  /memories:
-    get:
-      operationId: listMemories
-      security:
-        - bearerAuth: []
-      parameters:
-        - name: q
-          in: query
-          schema:
-            type: string
-          description: Semantic search query
-        - name: type
-          in: query
-          schema:
-            type: string
-        - name: limit
-          in: query
-          schema:
-            type: integer
-    post:
-      operationId: createMemory
-      security:
-        - bearerAuth: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/Memory'
-      responses:
-        '201':
-          description: Memory created
-
-  /memories/recall:
-    post:
-      operationId: recallMemories
-      security:
-        - bearerAuth: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              properties:
-                query:
-                  type: string
-                limit:
-                  type: integer
-                tags:
-                  type: array
-                  items:
-                    type: string
-                temporal:
-                  type: boolean
-                  description: Enable temporal reasoning
-                multi_hop:
-                  type: boolean
-                  description: Enable multi-hop reasoning
-                max_hops:
-                  type: integer
-                  default: 3
-      responses:
-        '200':
-          description: Memory recall results
-
-  /feedback:
-    post:
-      operationId: submitFeedback
-      security:
-        - bearerAuth: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [query_id, answer_id, feedback_type, rating]
-              properties:
-                query_id:
-                  type: string
-                answer_id:
-                  type: string
-                feedback_type:
-                  type: string
-                  enum: [accuracy, relevance, format, safety]
-                rating:
-                  type: integer
-                  minimum: 1
-                  maximum: 5
-                details:
-                  type: object
-                corrections:
-                  type: array
-                  items:
-                    type: object
-      responses:
-        '201':
-          description: Feedback submitted
-
-  /feedback/accuracy:
-    get:
-      operationId: getAccuracyMetrics
-      security:
-        - bearerAuth: []
-      parameters:
-        - name: period
-          in: query
-          schema:
-            type: string
-            enum: [7d, 30d, 90d, all]
-            default: 30d
-      responses:
-        '200':
-          description: Accuracy metrics
-
-  /feedback/calibration:
-    post:
-      operationId: triggerCalibration
-      security:
-        - bearerAuth: []
-      requestBody:
-        content:
-          application/json:
-            schema:
-              type: object
-              properties:
-                scope:
-                  type: string
-                  enum: [full, targeted, incremental]
-                target_model:
-                  type: string
-                focus_areas:
-                  type: array
-                  items:
-                    type: string
-                force:
-                  type: boolean
-      responses:
-        '202':
-          description: Calibration triggered
-
-  /insights/unexpected:
-    get:
-      operationId: getUnexpectedInsights
-      security:
-        - bearerAuth: []
-      parameters:
-        - name: limit
-          in: query
-          schema:
-            type: integer
-            default: 10
-        - name: threshold
-          in: query
-          schema:
-            type: number
-            default: 0.6
-      responses:
-        '200':
-          description: Unexpected insights
-
-  /insights/connections:
-    get:
-      operationId: getConnections
-      security:
-        - bearerAuth: []
-      parameters:
-        - name: entity_a
-          in: query
-          schema:
-            type: string
-        - name: entity_b
-          in: query
-          schema:
-            type: string
-        - name: max_hops
-          in: query
-          schema:
-            type: integer
-            default: 3
-        - name: limit
-          in: query
-          schema:
-            type: integer
-            default: 10
-      responses:
-        '200':
-          description: Multi-hop connections
-```
-
----
-
-## Appendix B: SDK Examples
-
-### Python
-
-```python
-import orivory
-
-client = orivory.Client(
-    api_key="your_api_key",
-    base_url="https://api.orivory.io/api/v1"
-)
-
-# Authenticate
-auth = client.auth.login(
-    email="researcher@university.edu",
-    password="SecureP@ssw0rd!"
-)
-client.set_token(auth.access_token)
-
-# Create a conversation
-conversation = client.chat.conversations.create(
-    title="CRISPR off-target analysis",
-    tags=["crispr", "gene-editing"]
-)
-
-# Send a streaming message with enhanced parameters
-with client.chat.conversations(conversation.id).message_stream(
-    content="Compare eSpCas9 vs HiFi Cas9 specificity profiles",
-    include_confidence=True,
-    include_reasoning=True,
-    multi_hop=True
-) as stream:
-    for event in stream:
-        if event.type == "content_block_delta":
-            print(event.delta, end="", flush=True)
-        elif event.type == "confidence":
-            print(f"\n\n[Confidence: {event.overall:.0%}]")
-
-# Create a memory
-memory = client.memories.create(
-    content="eSpCas9 shows 8-fold improved specificity over wild-type",
-    type="finding",
-    tags=["crispr", "espCas9", "specificity"]
-)
-
-# Recall with temporal reasoning
-results = client.memories.recall(
-    query="How has understanding of Cas9 specificity evolved?",
-    temporal=True,
-    limit=10
-)
-for result in results.results:
-    print(f"{result.temporal_position}: {result.content}")
-
-# Submit feedback
-feedback = client.feedback.submit(
-    query_id="msg_123",
-    answer_id="msg_456",
-    feedback_type="accuracy",
-    rating=4,
-    details={"was_accurate": True, "had_omission": True}
-)
-
-# Get unexpected insights
-insights = client.insights.unexpected(threshold=0.7)
-for insight in insights.insights:
-    print(f"[{insight.category}] {insight.title}")
-```
-
----
-
-### JavaScript / TypeScript
-
-```typescript
-import { Orivory } from '@orivory/sdk';
-
-const client = new Orivory({
-  apiKey: process.env.Orivory_API_KEY,
-  baseUrl: 'https://api.orivory.io/api/v1'
-});
-
-// Authenticate
-const auth = await client.auth.login({
-  email: 'researcher@university.edu',
-  password: 'SecureP@ssw0rd!'
-});
-client.setToken(auth.accessToken);
-
-// Create conversation
-const conversation = await client.chat.conversations.create({
-  title: 'CRISPR off-target analysis',
-  tags: ['crispr', 'gene-editing'],
-  model: 'claude-3-5-sonnet'
-});
-
-// Stream message with enhanced parameters
-const stream = client.chat.conversations(conversation.id).messageStream({
-  content: 'Compare eSpCas9 vs HiFi Cas9 specificity profiles',
-  includeConfidence: true,
-  includeReasoning: true,
-  multiHop: true
-});
-
-for await (const event of stream) {
-  switch (event.type) {
-    case 'content_block_delta':
-      process.stdout.write(event.delta);
-      break;
-    case 'confidence':
-      console.log(`\n\n[Confidence: ${(event.overall * 100).toFixed(0)}%]`);
-      break;
-    case 'sources':
-      console.log('\n\nSources:', event.sources);
-      break;
-    case 'reasoning':
-      console.log('\n\nReasoning steps:', event.steps);
-      break;
-  }
-}
-
-// Create memory
-const memory = await client.memories.create({
-  content: 'eSpCas9 shows 8-fold improved specificity over wild-type',
-  type: 'finding',
-  tags: ['crispr', 'espCas9', 'specificity']
-});
-
-// Recall with temporal reasoning
-const recallResults = await client.memories.recall({
-  query: 'How has understanding of Cas9 specificity evolved?',
-  temporal: true,
-  limit: 10
-});
-
-// Recall with multi-hop reasoning
-const hopResults = await client.memories.recall({
-  query: 'Connection between eSpCas9 and base editing?',
-  multiHop: true,
-  maxHops: 3
-});
-
-// Submit feedback
-await client.feedback.submit({
-  queryId: 'msg_123',
-  answerId: 'msg_456',
-  feedbackType: 'accuracy',
-  rating: 4,
-  details: {
-    wasAccurate: true,
-    hadOmission: true,
-    omissionDescription: 'Missing 2024 update to HiFi data'
-  }
-});
-
-// Get unexpected insights
-const insights = await client.insights.unexpected({
-  threshold: 0.7,
-  limit: 20
-});
-
-// Get multi-hop connections
-const connections = await client.insights.connections({
-  entityA: 'eSpCas9',
-  entityB: 'RNA helicase',
-  maxHops: 3
-});
-```
-
----
-
-### cURL
+**Store a memory and recall it**
 
 ```bash
-# Authenticate
-TOKEN=$(curl -s -X POST https://api.orivory.io/api/v1/auth/login \
+curl -s -X POST http://localhost:8000/api/v1/memories \
   -H "Content-Type: application/json" \
-  -d '{"email":"researcher@university.edu","password":"SecureP@ssw0rd!"}' \
-  | jq -r '.access_token')
+  -d '{"title": "Stack", "content": "Orivory keeps SQLite as the canonical store and an embedded Qdrant for vectors.", "tags": ["stack"]}'
 
-# Create conversation
-CONV_ID=$(curl -s -X POST https://api.orivory.io/api/v1/chat/conversations \
-  -H "Authorization: Bearer $TOKEN" \
+curl -s -X POST http://localhost:8000/api/v1/memories/recall \
   -H "Content-Type: application/json" \
-  -d '{"title":"CRISPR analysis","tags":["crispr"]}' \
-  | jq -r '.id')
-
-# Send streaming message with enhanced params
-curl -X POST "https://api.orivory.io/api/v1/chat/conversations/$CONV_ID/message?include_confidence=true&include_reasoning=true&multi_hop=true" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -H "Accept: text/event-stream" \
-  -d '{"content":"Compare eSpCas9 vs HiFi Cas9 specificity","stream":true}'
-
-# Create memory
-curl -X POST https://api.orivory.io/api/v1/memories \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"content":"eSpCas9 shows 8-fold specificity improvement","type":"finding","tags":["crispr","espCas9"]}'
-
-# Recall with temporal reasoning
-curl -X POST https://api.orivory.io/api/v1/memories/recall \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"query":"How did our understanding evolve?","temporal":true}'
-
-# Submit feedback
-curl -X POST https://api.orivory.io/api/v1/feedback \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"query_id":"msg_123","answer_id":"msg_456","feedback_type":"accuracy","rating":4}'
-
-# Get accuracy metrics
-curl -X GET "https://api.orivory.io/api/v1/feedback/accuracy?period=30d" \
-  -H "Authorization: Bearer $TOKEN"
-
-# Get unexpected insights
-curl -X GET "https://api.orivory.io/api/v1/insights/unexpected?threshold=0.7" \
-  -H "Authorization: Bearer $TOKEN"
-
-# Get connections
-curl -X GET "https://api.orivory.io/api/v1/insights/connections?entity_a=eSpCas9&entity_b=RNA+helicase&max_hops=3" \
-  -H "Authorization: Bearer $TOKEN"
+  -d '{"query": "where are vectors stored?", "top_k": 5}'
 ```
 
----
+**Mint an agent token, then list the ledger**
 
-*Document version: 2.0 | Last updated: 2026-09-02*
+```bash
+TOKEN=$(curl -s -X POST http://localhost:8000/api/v1/agents \
+  -H "Content-Type: application/json" \
+  -d '{"name": "Claude Desktop", "scopes": ["memory:read", "memory:write"]}' \
+  | python -c "import json,sys; print(json.load(sys.stdin)['token'])")
+
+curl -s "http://localhost:8000/api/v1/agents/access-log?limit=20"
+```
+
+The token is shown in that response and never again — only its SHA-256 hash is
+stored. Revoke it with `DELETE /api/v1/agents/{client_id}`.
+
+**Check readiness and version**
+
+```bash
+curl -s http://localhost:8000/health
+curl -s http://localhost:8000/ready
+```
+
+**Register the MCP endpoint in an MCP client**
+
+```json
+{
+  "mcpServers": {
+    "orivory-memory": {
+      "type": "http",
+      "url": "http://localhost:8000/mcp",
+      "headers": {
+        "X-Orivory-Agent-Token": "oa_9f8e7d6c5b4a3210fedcba9876543210"
+      }
+    }
+  }
+}
+```
+
+**Import an export file**
+
+```bash
+curl -s -X POST http://localhost:8000/api/v1/imports \
+  -F "file=@conversations.json" \
+  -F "source_format=chatgpt"
+```
+
+**Erasure and its receipt**
+
+```bash
+curl -s -X POST http://localhost:8000/api/v1/erasure-receipts \
+  -H "Content-Type: application/json" \
+  -d '{"memory_ids": ["3fa85f64-5717-4562-b3fc-2c963f66afa6"]}'
+
+curl -s "http://localhost:8000/api/v1/erasure-receipts?limit=50"
+```

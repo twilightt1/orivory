@@ -82,3 +82,8 @@ SQLite ladder (`bootstrap_sqlite()`); there is no Alembic step any more.
 E2E in the built container: boot (SQLite ladder + local owner) → agent client
 registration → MCP `initialize` (200) → `add_memory` → `search_memory` —
 all green, `/ready` reports `sqlite/redis/storage/qdrant/mcp_hub` all ok.
+
+Re-verified with the renamed image (2026-09-22):
+`docker build -t orivory:wave-d2 .` → exit 0;
+`docker run --rm orivory:wave-d2 python -c "import app.main"` →
+`import app.main OK`; `docker compose config -q` → exit 0.

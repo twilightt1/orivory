@@ -4,6 +4,51 @@ All notable changes to Orivory are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/) and the
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased] — One image, honest docs (2026-09-22)
+
+This entry records the wave that took the product to its lite-only, authless
+form: the full-stack surface (chat, admin, analytics, discovery, entities,
+insights, referral, sources, workspaces, system settings, SSE) is gone from the
+tree; the runtime is the one container (SQLite + embedded Qdrant +
+`InMemoryRedis` + eager in-process tasks); account auth was replaced by the
+single local owner (`LOCAL_OWNER_EMAIL`), and the agent tokens (`memory:read` /
+`memory:write`, ledgered per call) are unchanged for memory consumers.
+
+### Changed
+- **The lite image IS the image.** `Dockerfile.lite` was renamed to
+  `Dockerfile` and the legacy full-stack Dockerfile (Postgres / Redis / MinIO /
+  Celery / Qdrant-server era) was deleted, so every builder — `docker build`,
+  `docker compose up`, `make quickstart`, `docker-publish.yml` — now produces
+  the same one-container artifact: API + `/mcp`, SQLite, in-process Qdrant,
+  filesystem uploads, eager in-process tasks. Verified by building the image and
+  importing `app.main` inside it.
+- **Docs describe the shipped product.** `docs/API.md` was rebuilt from the
+  app's own OpenAPI surface, and `docs/ARCHITECTURE.md`,
+  `docs/OPERATIONS_RUNBOOK.md`, `docs/LOCAL_RUN_GUIDE.md`,
+  `docs/DEPLOYMENT_GUIDE.md`, `docs/BACKUP_RESTORE.md`, `docs/LITE_MODE.md`,
+  `README.md`, `CONTRIBUTING.md` and `eval/README.md` no longer describe the
+  removed Postgres / Redis / MinIO / Celery / Alembic stack, account auth, the
+  chat API, the admin diagnostics endpoint or the LangGraph agents.
+- **`docs/how-it-works.html`** (the README-linked explainer) was rewritten to
+  the shipped facts; the unlinked duplicate
+  `docs/architecture/orivory-architecture.html` was deleted.
+- **CI** no longer runs the deleted `tests/eval/test_live_api_eval.py`, and the
+  offline lane is the only eval lane (`eval/run_eval.py --mode offline`).
+- **`docker-publish.yml` publishes the `lite` tag** — the name `install.sh`,
+  the `Makefile` and the docs have always pulled (`type=raw,value=lite`), which
+  the workflow previously never created.
+- **The P1b rollback escape hatch stays.** `docs/ROLLBACK_P1B.md`,
+  `scripts/rollback_to_chroma.py`, `requirements-rollback.txt` and the gate that
+  exercises them (`tests/retrieval/test_p1b_gate.py`) are NOT removed: the
+  hatch's own removal condition is the release AFTER the one that ships P1b,
+  and no release contains P1b yet (`pyproject.toml` is still 1.1.0).
+
+### Removed
+- **Code with no caller in the tree** (grep-proved; every file stays in git
+  history): `app/utils/ssrf.py` + `tests/rag/test_ssrf.py`,
+  `app/ingestion/base.py` + `app/ingestion/types.py` (+ their re-exports),
+  `eval/live_api_eval.py` + `tests/eval/test_live_api_eval.py`, `notebooks/`.
+
 ## [Unreleased] — Correctable Memory V1 (2026-09-12)
 
 ### Added

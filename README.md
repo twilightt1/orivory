@@ -4,8 +4,6 @@
 
 ![Python](https://img.shields.io/badge/Python-3.13+-blue?style=for-the-badge&logo=python&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688?style=for-the-badge&logo=fastapi&logoColor=white)
-![TypeScript](https://img.shields.io/badge/TypeScript-5.0-3178C6?style=for-the-badge&logo=typescript&logoColor=white)
-![Next.js](https://img.shields.io/badge/Next.js-14-000000?style=for-the-badge&logo=next.js&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)
 
 **Your memories, your infrastructure, any AI agent — with receipts.**
@@ -49,14 +47,12 @@ SQLite + embedded Qdrant under the hood — one container, no external services.
 |---|---|
 | **🧠 Memory store** | Evidence-first correctable memory: sửa 1 lần mọi agent nhớ đúng (supersede có scope/thời gian hiệu lực), stale view tự chặn, time-aware recall, vector + keyword search (lexical/hybrid fusion opt-in, mặc định OFF — xem [OPERATIONS_RUNBOOK](docs/OPERATIONS_RUNBOOK.md#p2--rerank-hybrid-recall-and-the-fts5-lexical-index)) |
 | **🕸️ Knowledge graph** | Automatic entity extraction, relation mapping, cluster detection |
-| **🔌 MCP hub** | 7 tools — `search/get/timeline/list_recent/add/correct/delete/forget`: any MCP-capable agent (Claude Desktop, Cursor, OpenClaw…) connects with a scoped per-agent token — see [skills/orivory](skills/orivory/SKILL.md) |
+| **🔌 MCP hub** | 8 tools — `search_memory` / `get_memory` / `timeline` / `list_recent` / `add_memory` / `correct_memory` / `delete_memory` / `forget_memory`: any MCP-capable agent (Claude Desktop, Cursor, OpenClaw…) connects with a scoped per-agent token — see [skills/orivory](skills/orivory/SKILL.md) |
 | **📜 Access ledger** | Append-only audit log: which agent read or wrote which memory, when |
-| | |
 | **🗑️ Erasure receipts** | Right-to-be-forgotten with verification: cascade deletion across rows, links and vectors, re-checked and receipted |
 | **📥 Import paths** | One-shot upload of ChatGPT / Claude / PAM / generic-JSON exports with dedup |
 | **📊 Benchmarks** | LongMemEval-S + MemoryAgentBench harness, 0.570 (n=100) with CIs — [results](eval/benchmarks/results/), [how to run](eval/README.md) |
-| **👥 Workspaces** | Shared knowledge bases with workspace-level access control |
-| **📊 Analytics** | Usage tracking, DAU metrics, cost monitoring |
+| **💰 Cost ledger** | Every LLM call's usage is recorded per request, so spend is observable without a second service |
 
 ## Quick start
 
@@ -159,7 +155,7 @@ orivory/
 │   ├── api/v1/             # REST (memories, agents, erasure, imports, …)
 │   ├── agents/             # LLM client + parsing seams (LangGraph agents removed)
 │   ├── mcp_hub/            # MCP server: identity, scoped tools, ledger
-│   ├── ingestion/          # connectors + import format adapters
+│   ├── ingestion/          # import format adapters + upload pipelines
 │   ├── models/             # SQLAlchemy models
 │   ├── retrieval/          # hybrid retrieval + memory vector store
 │   └── services/           # domain services
@@ -174,7 +170,7 @@ orivory/
 | Doc | Contents |
 |---|---|
 | [docs/API.md](docs/API.md) | Full API reference: identity, memories, MCP hub, erasure, imports |
-| [docs/how-it-works.html](docs/how-it-works.html) | The one-page explainer — how the hub works, honestly compared | 
+| [docs/how-it-works.html](docs/how-it-works.html) | The one-page explainer: what the hub is, the tools, erasure semantics, setup |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System architecture — hub spine, agents, retrieval, data model |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | Shipped milestones and open follow-ups |
 | [open-source-positioning.md](https://github.com/twilightt1/orivory-private/blob/main/docs/ideas/open-source-positioning.md) (private) | Positioning: one-line definition, competitor matrix, hub-first narrative |

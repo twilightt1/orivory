@@ -20,12 +20,8 @@ __pycache__
 .env.*
 !.env.example
 
-# Frontend (built separately via frontend/Dockerfile)
-frontend
-
 # Dev-only assets not needed at runtime
 docs
-notebooks
 tests
 eval
 *.md

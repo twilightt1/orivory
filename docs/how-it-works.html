@@ -304,10 +304,10 @@
       <span class="strong">Ours does.</span>
     </h1>
     <p class="hero-sub">
-      Orivory is a <strong>memory hub your AI agents share</strong> — self-hosted
-      on your own machine. ChatGPT remembers you in a box you can't open.
-      Orivory gives every agent a scoped key, writes down <strong>what it read,
-      when, and why</strong>, and prints a receipt when something is erased.
+      Orivory is a <strong>memory hub your AI agents share</strong> — one
+      self-hosted container on your own machine. It gives each agent a scoped
+      token, writes down <strong>which agent read or wrote what, and when</strong>,
+      and prints a receipt when something is erased.
     </p>
     <div class="hero-actions">
       <a class="btn primary" href="#how">See how it works</a>
@@ -318,52 +318,52 @@
     <div class="receipt" role="img" aria-label="A sample Orivory erasure receipt, printed line by line">
       <div class="receipt-head">
         <span>Orivory · Erasure receipt</span>
-        <span>ER-2026-09-05-0417</span>
+        <span>9b1d3f52-7c4a-4f8e-a3d6-2e5c8b1f0a47</span>
       </div>
       <div class="receipt-lines mono" id="receipt-lines" aria-hidden="true"></div>
       <div class="receipt-verify" id="receipt-verify" hidden>
-        VERIFIED — vectors re-checked: 0 residual · links re-counted: 0 · ledgers kept (audit)&nbsp;<span class="chip">PASS</span>
+        SOFT FORGET — rows invalidated in place, sources pinned against re-import, serving readback confirmed&nbsp;<span class="chip">COMPLETED</span>
       </div>
     </div>
   </div>
 </header>
 
-<!-- ══════════════════ ENTRY 001 · THE PROBLEM ══════════════════ -->
+<!-- ══════════════════ ENTRY 001 · THE SHAPE ══════════════════ -->
 <section id="problem">
   <div class="wrap">
     <div class="entry-head">
       <span class="entry-no">ENTRY 001</span>
-      <span class="entry-title">The problem</span>
+      <span class="entry-title">The shape</span>
       <span class="stamp rej">Rejected: walled garden</span>
     </div>
     <h2>Where does your AI's <em>memory</em> actually live?</h2>
     <p style="max-width:62ch; color: var(--dark-soft);">
-      Ask the competitors. Their answer is a data center you don't control, a
-      summary you can't read, and a delete button that doesn't prove anything.
-      That's not memory — that's tenancy.
+      Here: on hardware you own, in a directory you can copy. One container
+      holds the API, the MCP hub, the SQLite database, an embedded vector store
+      and your uploads — no Postgres, no Redis, no object store, no worker.
+      Nothing to sign into either: the install has exactly one identity, the
+      <b>local owner</b>, and agent tokens are the only credentials.
     </p>
     <div class="quotes">
       <blockquote class="quote">
-        "To fully delete something ChatGPT may know about you, you'll need to
-        delete every source."
-        <cite>— OpenAI Help Center, Memory FAQ</cite>
+        "A request with no Authorization header IS the local owner. Nothing to
+        log in to, nothing to expire, no 401 for a missing token."
+        <cite>— docs/API.md §1</cite>
       </blockquote>
       <blockquote class="quote">
-        Mem0's cloud memory is vector-based, not human-readable — no export
-        format exists.
-        <cite>— PAM memory-interchange survey, 2026</cite>
-      </blockquote>
-      <blockquote class="quote">
-        Claude's org-level kill switch permanently deletes <em>all</em> org
-        memory — and owners cannot view members' memories.
-        <cite>— Anthropic support docs, 2026</cite>
+        "An agent token acts as that client on the MCP endpoint and on
+        POST /api/v1/imports, which is where the token's scopes are enforced and
+        where every write is recorded in the access ledger under it."
+        <cite>— docs/API.md §1</cite>
       </blockquote>
     </div>
     <p style="margin-top:32px; max-width:62ch; color: var(--dark-soft);">
-      And the "self-hosted" alternatives stop at search. No ledger, no scoped
-      keys per agent, no proof of erasure. <strong style="color:var(--paper)">The
-      memory hub slot has been empty on purpose — governance is the boring
-      part everyone skips.</strong> We didn't.
+      Account auth, chat, admin, analytics, sources and workspaces were removed
+      with the full-stack product — the surface you can call is what
+      <code class="mono" style="font-size:13px">GET /openapi.json</code> lists.
+      <strong style="color:var(--paper)">No cloud tier gates the governance
+      features: the ledger, the scoped tokens and the receipts are the free
+      core, because they are the point.</strong>
     </p>
   </div>
 </section>
@@ -378,131 +378,117 @@
     </div>
     <h2>One brain. Every agent knocks <em>first.</em></h2>
     <p style="max-width:60ch; color: var(--paper-ink-soft);">
-      Your memories live once — in Postgres and a vector store on your machine.
-      Agents never "have" your memory. They request it through a scoped key,
-      and the hub writes down the visit.
+      Your memories live once — in SQLite and an embedded Qdrant folder inside
+      the container's <span class="mono" style="font-size:13px">/data</span>
+      volume. Agents never "have" your memory. They request it through a scoped
+      token, and the hub writes down the visit.
     </p>
 
-    <div class="diagram" role="img" aria-label="Diagram: agents on the left connect through the MCP endpoint with per-agent tokens; the Orivory core holds the memory store, knowledge graph and access ledger; the second-brain web UI connects from the right.">
+    <div class="diagram" role="img" aria-label="Diagram: agents on the left connect through the MCP endpoint with per-agent tokens; the Orivory core holds the memory store, the vector index and the access ledger; REST clients and imports connect from the right.">
       <div class="dg-side">
         <div class="dg-node">Claude Desktop <small>token · read+write</small></div>
         <div class="dg-node">Cursor <small>token · read</small></div>
         <div class="dg-node">OpenClaw <small>token · read+write</small></div>
       </div>
-      <div class="dg-arrow" aria-hidden="true">──▸ ──▸ ──▸<span>scoped keys</span></div>
+      <div class="dg-arrow" aria-hidden="true">──▸ ──▸ ──▸<span>scoped tokens</span></div>
       <div class="dg-core">
         <div class="t">Orivory hub</div>
         <div class="s">
-          <b>/mcp</b> · 6 tools · streamable HTTP<br>
+          <b>/mcp</b> · 8 tools · streamable HTTP<br>
           <b>ledger</b> · append-only, per-agent<br>
           <b>salience</b> · used ⇒ stronger<br>
-          <b>graph</b> · entities + relations<br>
+          <b>vectors</b> · embedded Qdrant<br>
           <b>receipts</b> · erasure w/ proof
         </div>
       </div>
-      <div class="dg-arrow" aria-hidden="true">◂──<span>web UI</span></div>
+      <div class="dg-arrow" aria-hidden="true">◂──<span>REST · no token</span></div>
       <div class="dg-side">
-        <div class="dg-node">Second-brain UI <small>your browser</small></div>
+        <div class="dg-node">REST API <small>memories · recall</small></div>
         <div class="dg-node">Imports <small>ChatGPT · Claude · Gemini</small></div>
       </div>
     </div>
 
     <div style="margin-top:34px; display:grid; gap:14px; max-width:72ch; color:rgba(18,24,31,0.78); font-size:15.5px;">
-      <p><strong style="color:var(--ink)">The six tools agents get:</strong>
-      <span class="mono" style="font-size:13px">search_memory · get_memory · list_recent · add_memory · delete_memory · forget_memory</span>
-      — that's the entire surface. Anything more invasive would need a wider key, and you'd see it.</p>
-      <p><strong style="color:var(--ink)">Salience, not landfill.</strong> Memories that get recalled grow stronger; ignored ones fade. The hub resurfaces what matters instead of hoarding everything forever.</p>
+      <p><strong style="color:var(--ink)">What agents get:</strong>
+      <span class="mono" style="font-size:13px">search_memory · timeline · get_memory · list_recent</span>
+      under <span class="mono" style="font-size:13px">memory:read</span>, and
+      <span class="mono" style="font-size:13px">add_memory · correct_memory · delete_memory · forget_memory</span>
+      under <span class="mono" style="font-size:13px">memory:write</span> — eight tools, and that is the entire
+      surface. A token with only <code class="mono" style="font-size:13px">memory:read</code> cannot write.</p>
+      <p><strong style="color:var(--ink)">Ledger actions:</strong>
+      <span class="mono" style="font-size:13px">mcp_search · mcp_get · mcp_list · mcp_add · mcp_correct · mcp_delete · mcp_forget</span>
+      (plus <span class="mono" style="font-size:13px">import</span> for an agent-token upload). The ledger is append-only and
+      survives erasure by design: it records that a memory was <em>accessed before</em> it was deleted, which is what
+      makes it an audit trail.</p>
+      <p><strong style="color:var(--ink)">Salience, not landfill.</strong> Memories that get recalled grow stronger;
+      ignored ones fade. <code class="mono" style="font-size:13px">GET /api/v1/memories/digest</code> resurfaces what
+      you saved recently, and what you saved on this day in a previous year.</p>
     </div>
   </div>
 </section>
 
-<!-- ══════════════════ ENTRY 003 · COMPARISON ══════════════════ -->
+<!-- ══════════════════ ENTRY 003 · ERASURE ══════════════════ -->
 <section id="compare">
   <div class="wrap">
     <div class="entry-head">
       <span class="entry-no">ENTRY 003</span>
-      <span class="entry-title">The comparison</span>
-      <span class="stamp pass">Verified 2026-09</span>
+      <span class="entry-title">Erasure, honestly</span>
+      <span class="stamp pass">Verified by readback</span>
     </div>
-    <h2>The honest <em>matrix.</em></h2>
-    <p style="max-width:58ch; color:var(--dark-soft);">
-      Checked against official docs and pricing pages in September 2026. If a
-      vendor ships one of these, this table is wrong and we'll fix it.
+    <h2>Two kinds of <em>forgetting.</em> Both leave a receipt.</h2>
+    <p style="max-width:62ch; color:var(--dark-soft);">
+      The word "delete" hides two different operations, so Orivory names them
+      separately — and neither one pretends to be more than it verifies.
     </p>
     <div style="overflow-x:auto">
     <table class="compare">
       <thead>
         <tr>
           <th scope="col">Capability</th>
-          <th scope="col" class="col-us">Orivory</th>
-          <th scope="col">ChatGPT memory</th>
-          <th scope="col">Mem0 cloud</th>
-          <th scope="col">Obsidian AI plugins</th>
+          <th scope="col" class="col-us">Hard erase</th>
+          <th scope="col">Soft forget</th>
         </tr>
       </thead>
       <tbody>
         <tr>
-          <td>Memory on your machine</td>
-          <td class="col-us"><span class="yes">Yes</span> — Postgres + vectors, plain</td>
-          <td class="no">No</td>
-          <td class="no">Cloud tiers only</td>
-          <td><span class="yes">Yes</span> — local files, no server</td>
+          <td>How to call it</td>
+          <td class="col-us"><span class="yes">DELETE /api/v1/memories/{id}</span> · <span class="yes">POST /api/v1/erasure-receipts</span> · MCP <span class="yes">delete_memory</span></td>
+          <td><span class="yes">MCP forget_memory</span></td>
         </tr>
         <tr>
-          <td>Per-agent scoped keys</td>
-          <td class="col-us"><span class="yes">Yes</span> — read / read+write, revocable</td>
-          <td class="no">One global opt-out</td>
-          <td class="part">API keys, one scope</td>
-          <td class="no">N/A</td>
+          <td>Rows</td>
+          <td class="col-us">Deleted, with the derived closure (children, links)</td>
+          <td>Invalidated in place — content and provenance stay readable as history</td>
         </tr>
         <tr>
-          <td>"Which AI read what" ledger</td>
-          <td class="col-us"><span class="yes">Yes</span> — append-only, per-agent, UI</td>
-          <td class="no">No</td>
-          <td class="no">No</td>
-          <td class="no">No</td>
+          <td>Vectors</td>
+          <td class="col-us">Purged, then re-queried for residual</td>
+          <td>The point stays; its payload state is refreshed to <span class="mono">invalidated</span> by the index drain</td>
         </tr>
         <tr>
-          <td>Erasure with proof</td>
-          <td class="col-us"><span class="yes">Yes</span> — receipt, vectors re-checked</td>
-          <td class="no">Delete each source by hand</td>
-          <td class="part">Delete API, no verification</td>
-          <td class="no">Delete the file, hope</td>
+          <td>Re-import</td>
+          <td class="col-us">—</td>
+          <td>Every affected source gets a suppression row, so the import path refuses it</td>
         </tr>
         <tr>
-          <td>Agent access via MCP</td>
-          <td class="col-us"><span class="yes">Yes</span> — 6 tools, streamable HTTP</td>
-          <td class="no">Walled garden</td>
-          <td class="yes">Yes</td>
-          <td class="no">In-app only</td>
+          <td>What the receipt proves</td>
+          <td class="col-us">Absence readback: the vectors and rows are gone (<span class="mono">completed</span>)</td>
+          <td>Serving readback: no target is visible to a serving surface any more</td>
         </tr>
         <tr>
-          <td>Import your history</td>
-          <td class="col-us"><span class="yes">Yes</span> — ChatGPT, Claude, Gemini, Copilot, PAM</td>
-          <td class="part">Conversations only</td>
-          <td class="part">SDK, bring code</td>
-          <td class="part">Plugins vary</td>
-        </tr>
-        <tr>
-          <td>Run without cloud</td>
-          <td class="col-us"><span class="yes">Yes</span> — 1 container (lite) or full stack</td>
-          <td class="no">—</td>
-          <td class="no">—</td>
-          <td><span class="yes">Yes</span></td>
-        </tr>
-        <tr>
-          <td>License</td>
-          <td class="col-us"><span class="yes">MIT</span></td>
-          <td class="no">Proprietary</td>
-          <td class="part">Apache-2 core, cloud closed</td>
-          <td>Varies by plugin</td>
+          <td>Access ledger</td>
+          <td class="col-us">Kept — append-only audit</td>
+          <td>Kept — append-only audit</td>
         </tr>
       </tbody>
     </table>
     </div>
-    <p style="margin-top:18px; font-size:13px; color:rgba(18,24,31,0.55);">
-      Mem0 and Graphiti are fine infrastructure — if you enjoy writing the app
-      around them. Orivory ships the whole hub, MIT, in one container.
+    <p style="margin-top:18px; font-size:13.5px; color:rgba(18,24,31,0.62); max-width:72ch;">
+      <b>The honest limit:</b> v0 verifies erasure by absence-checks. It does not probe whether a fact can be
+      re-inferred from correlated knowledge-graph data, and entity/relation nodes themselves survive a memory
+      erasure (their link counts are recorded in the receipt). Receipts whose readback could not confirm absence are
+      stored as <span class="mono">completed_unverified</span> and re-checked by the reconcile pass that rides the
+      index drain loop; a receipt is never upgraded by guesswork.
     </p>
   </div>
 </section>
@@ -519,17 +505,18 @@
 
     <div class="howto">
       <div class="codecard">
-        <div class="codecard-head"><span><span class="n">01</span> · Boot the hub</span><span>lite · 1 container</span></div>
-        <pre><span class="cm"># whole hub: SQLite, in-process vectors</span>
-docker run -d --name orivory -p 8000:8000 \
+        <div class="codecard-head"><span><span class="n">01</span> · Boot the hub</span><span>1 container</span></div>
+        <pre><span class="cm"># whole hub: SQLite, in-process vectors, /mcp</span>
+docker run -d --name orivory -p 127.0.0.1:8000:8000 \
   -v orivory-data:/data \
-  <span class="kw">-e</span> OPENAI_API_KEY=sk-… \
-  ghcr.io/twilightt1/orivory:lite</pre>
+  ghcr.io/twilightt1/orivory:lite
+
+<span class="cm"># or: docker compose up -d  (the same single service)</span></pre>
       </div>
       <div class="codecard">
-        <div class="codecard-head"><span><span class="n">02</span> · Mint an agent key</span><span>token shown once</span></div>
-        <pre>curl -X POST localhost:8000/api/v1/agents \
-  -H <span class="str">"Authorization: Bearer $YOU"</span> \
+        <div class="codecard-head"><span><span class="n">02</span> · Mint an agent token</span><span>shown once</span></div>
+        <pre>curl -X POST http://localhost:8000/api/v1/agents \
+  -H <span class="str">"Content-Type: application/json"</span> \
   -d <span class="str">'{"name": "Claude Desktop",
         "scopes": ["memory:read",
                    "memory:write"]}'</span>
@@ -538,131 +525,90 @@ docker run -d --name orivory -p 8000:8000 \
       <div class="codecard">
         <div class="codecard-head"><span><span class="n">03</span> · Hand it to your agent</span><span>Claude · Cursor · OpenClaw</span></div>
         <pre><span class="cm">// mcp config — any MCP client</span>
-{ <span class="str">"mcp"</span>: { <span class="str">"servers"</span>: { <span class="str">"orivory"</span>: {
+{ <span class="str">"mcpServers"</span>: { <span class="str">"orivory-memory"</span>: {
+    <span class="str">"type"</span>: <span class="str">"http"</span>,
     <span class="str">"url"</span>: <span class="str">"http://localhost:8000/mcp"</span>,
-    <span class="str">"transport"</span>: <span class="str">"streamable-http"</span>,
-    <span class="str">"headers"</span>: { <span class="str">"Authorization"</span>:
-      <span class="str">"Bearer ${ORIVORY_TOKEN}"</span> } } } } }</pre>
+    <span class="str">"headers"</span>: {
+      <span class="str">"X-Orivory-Agent-Token"</span>: <span class="str">"oa_9f3c…"</span> } } } }</pre>
       </div>
       <div class="codecard">
-        <div class="codecard-head"><span><span class="n">04</span> · Watch the ledger</span><span>/security in the UI</span></div>
-        <pre>That's it. Ask your agent anything.
-Then open <span class="kw">localhost:8000</span> → Security:
+        <div class="codecard-head"><span><span class="n">04</span> · Read the ledger</span><span>plain REST</span></div>
+        <pre><span class="cm"># every authorized agent call, newest first</span>
+curl -s <span class="str">"http://localhost:8000/api/v1/agents/access-log?limit=20"</span>
 
-  14:02  Claude Desktop  searched  "postgres"
-  14:02  Claude Desktop  added     memory #…
-  14:03  Cursor          searched  "deploy"</pre>
+<span class="cm">#   14:02  Claude Desktop  mcp_search  "indexing"</span>
+<span class="cm">#   14:02  Claude Desktop  mcp_add     memory #…</span>
+<span class="cm">#   14:03  Cursor          mcp_search  "deploy"</span></pre>
       </div>
     </div>
   </div>
 </section>
 
-<!-- ══════════════════ ENTRY 005 · A DAY WITH IT ══════════════════ -->
+<!-- ══════════════════ ENTRY 005 · HONEST LIMITS ══════════════════ -->
 <section id="day">
   <div class="wrap">
     <div class="entry-head">
       <span class="entry-no">ENTRY 005</span>
-      <span class="entry-title">A day with the hub</span>
-      <span class="stamp pass">Pass: capture → recall</span>
+      <span class="entry-title">What it trades away</span>
+      <span class="stamp rej">Rejected: scale theatre</span>
     </div>
-    <h2>The loop that keeps a second brain <em>alive.</em></h2>
+    <h2>One container is a <em>choice</em>, not a footnote.</h2>
     <p style="max-width:58ch; color:var(--dark-soft);">
-      Second brains die quietly: capture is easy, retrieval never comes. The
-      hub closes the loop with salience and scheduled resurfacing — the brain
-      talks back.
+      Everything below is a consequence of the single-container shape. If you
+      need any of it, Orivory is the wrong tool and these docs say so first.
     </p>
 
     <div class="flow">
       <div class="flow-step">
-        <div class="flow-when"><span class="t">07:00 · Monday</span>digest lands</div>
+        <div class="flow-when"><span class="t">single-instance</span>one owner</div>
         <div class="flow-body">
-          <h3>The brain writes to you first</h3>
-          <p>A weekly digest of what you saved, grouped by topic, one question
-          back: which thread do we go deeper on? You reply in your agent —
-          no dashboard required.</p>
+          <h3>No horizontal scale</h3>
+          <p>SQLite and process-local caches do not fan out, and the embedded
+          Qdrant store owns its folder exclusively — keep workers at 1, and put
+          one container on one machine.</p>
         </div>
       </div>
       <div class="flow-step">
-        <div class="flow-when"><span class="t">09:14 · your editor</span>capture ≈ 0 effort</div>
+        <div class="flow-when"><span class="t">no broker</span>eager tasks</div>
         <div class="flow-body">
-          <h3>"Remember we moved to pgvector"</h3>
-          <p>One sentence to the agent. <code>add_memory</code> fires with a
-          title built to be searchable later. Import your old ChatGPT export
-          once and everything from that life is here too.</p>
+          <h3>No task queue</h3>
+          <p>Work runs inline in the API process. A crash mid-task loses that
+          task — anything a write enqueued into the index outbox is replayed by
+          the drain loop on the next run, so SQL stays the truth.</p>
         </div>
       </div>
       <div class="flow-step">
-        <div class="flow-when"><span class="t">11:30 · Cursor</span>recall, scoped</div>
+        <div class="flow-when"><span class="t">first boot</span>model cache</div>
         <div class="flow-body">
-          <h3>A different agent asks — with a narrower key</h3>
-          <p>Cursor holds a <code>memory:read</code>-only token. It searches,
-          quotes the memory with its title, and can't touch anything. The
-          ledger now shows its visit next to Claude's.</p>
+          <h3>The first boot may download the embedding model</h3>
+          <p>Boot warms the local ONNX session before anything is served, so a
+          fresh volume fetches <span class="mono">snowflake-arctic-embed-xs</span>
+          (~90&nbsp;MB) first — with no timeout. Pre-seed the model cache when
+          that matters, or set <span class="mono">EMBED_WARMUP_ON_BOOT=false</span>
+          to pay a cold session on the first request instead.</p>
         </div>
       </div>
       <div class="flow-step">
-        <div class="flow-when"><span class="t">16:45 · audit</span>governance, on demand</div>
+        <div class="flow-when"><span class="t">caches</span>process-local</div>
         <div class="flow-body">
-          <h3>"Which AI saw what?" is a table, not a mystery</h3>
-          <p>Append-only ledger, filterable by agent. Something in there you
-          regret? <code>forget_memory</code> cascades across rows, links and
-          vectors — and hands back the receipt proving it.</p>
+          <h3>Memory that does not survive a restart</h3>
+          <p>Rate-limit windows and caches live in an in-memory Redis shim: a
+          restart drops them. Durable state is the SQLite file, the Qdrant
+          folder and <span class="mono">/data/uploads</span>.</p>
         </div>
       </div>
       <div class="flow-step">
-        <div class="flow-when"><span class="t">nightly</span>the brain prunes itself</div>
+        <div class="flow-when"><span class="t">surface</span>agents first</div>
         <div class="flow-body">
-          <h3>Salience decays. The useful stays on top.</h3>
-          <p>Memories you actually recall grow stronger; stale ones fade below
-          the fold. Your brain is a garden, not a landfill — no filing
-          marathon required.</p>
+          <h3>No web UI in the image</h3>
+          <p>The Next.js frontend is not shipped: the product is the API plus
+          the MCP hub, aimed at agents. <span class="mono">/mcp</span> is
+          localhost-bound as shipped (DNS-rebind protection is on); set
+          <span class="mono">MCP_HUB_ALLOWED_HOSTS</span> to expose it behind a
+          proxy.</p>
         </div>
       </div>
     </div>
-  </div>
-</section>
-
-<!-- ══════════════════ ENTRY 006 · RUN IT YOUR WAY ══════════════════ -->
-<section class="paper-bg" id="run">
-  <div class="wrap">
-    <div class="entry-head">
-      <span class="entry-no">ENTRY 006</span>
-      <span class="entry-title">Run it your way</span>
-      <span class="stamp pass">Pass: 1 container</span>
-    </div>
-    <h2>Lite for you. Full for <em>everyone.</em></h2>
-    <p style="max-width:58ch; color:var(--paper-ink-soft);">
-      Most self-hosted tools make "simple" and "serious" mutually exclusive.
-      Lite mode is the same code as the full stack — only the drivers swap.
-    </p>
-    <div class="howto">
-      <div class="codecard">
-        <div class="codecard-head"><span><span class="n">Lite</span> · your personal brain</span><span>1 container</span></div>
-        <pre><span class="cm"># SQLite + in-process vectors. Done.</span>
-docker run -d -p 8000:8000 \
-  -v orivory-data:/data \
-  ghcr.io/twilightt1/orivory:lite
-
-<span class="cm"># no Postgres, Redis, MinIO, workers</span>
-<span class="cm"># ~1 user, agents welcome via /mcp</span></pre>
-      </div>
-      <div class="codecard">
-        <div class="codecard-head"><span><span class="n">Full stack</span> · team + UI</span><span>compose</span></div>
-        <pre><span class="cm"># Postgres, Redis, Qdrant, MinIO,</span>
-<span class="cm"># workers, Next.js UI — migrations</span>
-<span class="cm"># run before the server starts</span>
-git clone github.com/twilightt1/orivory
-docker compose up -d
-
-<span class="cm"># → localhost:3000 (UI)</span></pre>
-      </div>
-    </div>
-    <p style="margin-top:26px; max-width:64ch; color:rgba(18,24,31,0.72); font-size:15px;">
-      Both modes speak the same MCP. Start lite tonight; when you want the web
-      UI and team workspaces, move the volume — the memory is portable by
-      design. Plus a GitHub Actions workflow builds the lite image to GHCR on
-      every merge, so updates are <code style="font-family:'IBM Plex Mono',monospace; font-size:13px">docker pull</code>.
-    </p>
   </div>
 </section>
 
@@ -670,7 +616,7 @@ docker compose up -d
 <section class="final" id="start">
   <div class="wrap">
     <div class="entry-head">
-      <span class="entry-no">ENTRY 007</span>
+      <span class="entry-no">ENTRY 006</span>
       <span class="entry-title">Open the ledger</span>
       <span class="stamp vs">MIT · your move</span>
     </div>
@@ -678,21 +624,21 @@ docker compose up -d
     <div class="final-grid">
       <div>
         <p class="lede">
-          Orivory is MIT-licensed and runs on hardware you own. No cloud tier
-          gates the governance features — the ledger, the scoped keys and the
-          receipts are the free core, because they're the point.
+          Orivory is MIT-licensed and runs on hardware you own. There is no
+          cloud tier that gates the governance features — the ledger, the
+          scoped tokens and the receipts are the product.
         </p>
         <div class="final-actions">
-          <a class="btn primary" href="https://github.com/twilightt1/orivory">Star & clone on GitHub</a>
+          <a class="btn primary" href="https://github.com/twilightt1/orivory">Star &amp; clone on GitHub</a>
           <a class="btn" href="#how-to">Try the 90-second setup</a>
         </div>
       </div>
       <div class="tiny">
-        <b>Stack</b> — FastAPI · LangGraph (15 agents) · Qdrant · Next.js<br>
+        <b>Stack</b> — FastAPI · SQLite · embedded Qdrant · MCP hub · ONNX embedder<br>
         <b>Runs on</b> — your laptop, your homelab, your VPS<br>
         <b>Agents</b> — anything that speaks MCP (Claude, Cursor, OpenClaw, …)<br>
-        <b>Imports</b> — ChatGPT · Claude · Gemini · Copilot · PAM bundles<br>
-        <b>Lite image</b> — ghcr.io/twilightt1/orivory:lite<br>
+        <b>Imports</b> — ChatGPT · Claude · Gemini · Copilot · OpenClaw · PAM bundles · generic JSON<br>
+        <b>Image</b> — ghcr.io/twilightt1/orivory:lite<br>
         <b>License</b> — MIT. Fork it, keep the receipts.
       </div>
     </div>
@@ -708,16 +654,15 @@ docker compose up -d
   (function () {
     var reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     var lines = [
-      { text: "REQUEST  forget_memory", cls: "" },
-      { text: "  agent   \"Claude Desktop\"  key read+write", cls: "" },
+      { text: "REQUEST  forget_memory  (soft)", cls: "" },
+      { text: "  agent   \"Claude Desktop\"  key memory:read+memory:write", cls: "" },
       { text: "  target  memory #4f2a \"API key for staging\"", cls: "" },
-      { text: "SCOPE    owner-confirmed", cls: "" },
-      { text: "CASCADE  1 memory · 0 children · 2 links · 1 vector", cls: "" },
-      { text: "DELETED  memory #4f2a → gone", cls: "ok" },
-      { text: "DELETED  links → entity \"staging\" (2) → gone", cls: "ok" },
-      { text: "DELETED  vectors → collection orivory (1) → gone", cls: "ok" },
-      { text: "LEDGER   access rows kept — audit trail intact", cls: "" },
-      { text: "STATUS   completed · 0 residual", cls: "ok" },
+      { text: "SCOPE    namespace personal · owner-confirmed", cls: "" },
+      { text: "SOFT     row invalidated in place — history stays readable", cls: "" },
+      { text: "SUPPRESS 1 source_ref blocked against re-import", cls: "" },
+      { text: "VECTOR   payload state refreshed by the index drain", cls: "" },
+      { text: "LEDGER   mcp_forget row kept — audit trail intact", cls: "" },
+      { text: "STATUS   completed · no target visible to a serving surface", cls: "ok" },
     ];
 
     var host = document.getElementById("receipt-lines");

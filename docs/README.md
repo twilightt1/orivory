@@ -12,13 +12,13 @@ Start here. Everything else is organized by purpose:
 | [DEPLOYMENT_GUIDE.md](DEPLOYMENT_GUIDE.md) | Production deployment |
 | [OPERATIONS_RUNBOOK.md](OPERATIONS_RUNBOOK.md) | Day-2 ops: logs, backups rotation, common failures |
 | [BACKUP_RESTORE.md](BACKUP_RESTORE.md) | Backup/restore procedures |
-| [ONBOARDING.md](ONBOARDING.md) | Product onboarding flow design + tours |
+| [ROLLBACK_P1B.md](ROLLBACK_P1B.md) | Escape hatch, one release only: rebuild the pre-P1b Chroma store from the live SQLite file |
 
 ## Reference
 
 | Doc | Contents |
 |---|---|
-| [API.md](API.md) | Full REST + MCP reference (§13 MCP hub, §14 erasure receipts, §15 import paths) |
+| [API.md](API.md) | Full REST + MCP reference (endpoints from the app's own schema, identity, agent tokens, MCP hub, erasure receipts, import paths) |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | How the system works — memory spine, MCP hub, erasure, imports, agents, eval |
 | [ROADMAP.md](ROADMAP.md) | Shipped milestones + open follow-ups |
 | [../CHANGELOG.md](../CHANGELOG.md) | Notable changes per release |
