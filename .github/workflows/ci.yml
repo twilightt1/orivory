@@ -117,7 +117,7 @@ jobs:
           DATABASE_URL: sqlite+aiosqlite:////tmp/p2_ci.db
         run: |
           python -m pytest --confcutdir=tests/retrieval tests/retrieval/test_p2_gate.py tests/retrieval/test_rerank_pool.py tests/retrieval/test_hybrid_recall.py -q
-          python -m pytest --confcutdir=tests/retrieval tests/retrieval/test_event_loop_responsiveness.py tests/retrieval/test_p2_ablation_contract.py -q
+          python -m pytest -s --confcutdir=tests/retrieval tests/retrieval/test_event_loop_responsiveness.py tests/retrieval/test_p2_ablation_contract.py -q
           python -m pytest --confcutdir=tests/retrieval tests/retrieval/test_semantic_rerank.py tests/retrieval/test_p0_final_safety.py tests/retrieval/test_retriever_filters.py tests/retrieval/test_e5_local.py tests/retrieval/test_embedding_fingerprint.py tests/retrieval/test_vector_degradation.py tests/retrieval/test_xs_parity.py tests/retrieval/test_graph_build_offload.py -q
           python -m pytest --confcutdir=tests/lite tests/lite/test_sqlite_schema_v4.py -q
           python -m pytest --confcutdir=tests/observability tests/observability -q
