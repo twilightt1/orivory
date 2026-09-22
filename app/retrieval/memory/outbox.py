@@ -51,7 +51,7 @@ from app.models.document_chunk import DocumentChunk
 from app.models.index_outbox import IndexGeneration, IndexOutbox
 from app.models.memory import Memory
 from app.retrieval.embedder import EmbeddingDimensionMismatch
-from app.retrieval.memory.vector_store import COLLECTION_NAME, delete_memory, upsert_memory
+from app.retrieval.memory.vector_store import COLLECTION_NAME, claim_cache, delete_memory, upsert_memory
 from app.retrieval.vector_retriever import delete_chunks, upsert_chunks
 
 log = logging.getLogger(__name__)
@@ -564,8 +564,12 @@ async def drain_pending(*, batch_size: int = 50, priority_tenant: str | None = N
             )
         ).scalars().all()
         report["claimed"] = len(rows)
-        for row in rows:
-            report[await _apply(db, row)] += 1
+        # One claim, one collection-contract check: the per-row call shape below
+        # is untouched (signed gates hook it), and it stops the fifty rows of a
+        # batch from each re-asking the store the same question.
+        async with claim_cache():
+            for row in rows:
+                report[await _apply(db, row)] += 1
     return report
 
 

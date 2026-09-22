@@ -329,6 +329,40 @@ async def test_a_delete_while_the_upsert_is_in_flight_never_leaves_the_point(liv
     assert _point_count(generation) == 3  # back to the cutover set
 
 
+# ── 2b. a claim checks the collection ONCE (the signed RYW budget) ──────────
+
+
+async def test_a_claim_checks_the_collection_once(live, monkeypatch):
+    """The claim's rows ask the store the SAME question once, not fifty times.
+
+    "Is the active collection still the one this embedding contract describes?"
+    is two store round trips (``count`` + collection info) and it was asked per
+    row — 0.11 s of a fifty-intent claim, measured with the real store. The
+    guard still runs inside the first row's own write, so a contract mismatch
+    is still that row's own error (backoff / blocked), never a batch-level one.
+    """
+    monkeypatch.setattr(memories_api, "index_new_memory", _store_down)
+    created = [
+        await _create_memory(live.alice.id, f"claim row {index}") for index in range(5)
+    ]
+
+    checks: list[int] = []
+    real_check = vector_store._checked_collection
+
+    async def counting_check(embedding_dim):
+        checks.append(embedding_dim)
+        return await real_check(embedding_dim)
+
+    monkeypatch.setattr(vector_store, "_checked_collection", counting_check)
+
+    report = await outbox.drain_pending()
+
+    assert report == {"claimed": 5, "applied": 5, "skipped": 0, "blocked": 0, "failed": 0}
+    assert len(checks) == 1, f"the claim ran the contract guard {len(checks)} times"
+    generation = generation_name("memory")
+    assert all(str(memory.id) in _payloads(generation) for memory in created)
+
+
 # ── 3. ambiguous timeout / late write ───────────────────────────────────────
 
 

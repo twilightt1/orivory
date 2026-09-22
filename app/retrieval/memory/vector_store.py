@@ -20,6 +20,8 @@ consumers hydrate content from SQL rather than trusting the vector copy
 """
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import logging
 from typing import Any
 
@@ -210,6 +212,61 @@ async def _checked_collection(embedding_dim: int) -> tuple[Any, str, int]:
     return client, generation, count
 
 
+class _ClaimCache:
+    """What one drain claim computes once and shares across its writes.
+
+    Today that is the collection-contract guard: every row in a claim checks
+    the SAME collection, and the check is two store round trips per row
+    (``count`` + collection info) — 0.11 s of a fifty-intent claim.
+    """
+
+    __slots__ = ("checked",)
+
+    def __init__(self) -> None:
+        self.checked: tuple[Any, str, int] | None = None
+
+
+# The claim's shared work (see :func:`claim_cache`). A ContextVar for the same
+# reason the drain's tenant priority is one: the writer's call shape is pinned
+# by signed gates, so a claim rides the context instead of an argument.
+_claim: contextvars.ContextVar[_ClaimCache | None] = contextvars.ContextVar(
+    "vector_store_claim_cache", default=None
+)
+
+
+@contextlib.asynccontextmanager
+async def claim_cache():
+    """One claim's shared vector-store work (the drain holds this around its rows).
+
+    Nothing here changes what a row writes or when it fails: the guard still
+    runs inside the first row's own write, so a contract mismatch is still that
+    row's error, handled by that row's own backoff/blocked path. It just stops
+    the OTHER forty-nine rows in the claim from asking the same question.
+
+    Batched EMBEDDING was measured and rejected: one ONNX call for the claim's
+    fifty documents (0.80 s -> 0.63 s of the claim) starves the event loop's
+    own thread for the length of that call, and the P2 heartbeat gate failed
+    6/6 runs at 57-79 ms against its 30 ms budget (guarded, per-row embedding:
+    develop's band, 22-25 ms). The lag contract wins; see issue #62.
+    """
+    cache = _ClaimCache()
+    token = _claim.set(cache)
+    try:
+        yield cache
+    finally:
+        _claim.reset(token)
+
+
+async def _checked_collection_for_claim(embedding_dim: int) -> tuple[Any, str, int]:
+    """The contract guard, once per claim when there is one (see claim_cache)."""
+    cache = _claim.get()
+    if cache is None:
+        return await _checked_collection(embedding_dim)
+    if cache.checked is None:
+        cache.checked = await _checked_collection(embedding_dim)
+    return cache.checked
+
+
 # ── public API ──────────────────────────────────────────────────────────────
 
 
@@ -224,7 +281,7 @@ async def upsert_memory(memory: Memory) -> None:
     """
     document = _memory_to_document(memory)
     embedding = (await embed_texts([document]))[0]
-    client, generation, _ = await _checked_collection(len(embedding))
+    client, generation, _ = await _checked_collection_for_claim(len(embedding))
     await client.upsert(
         collection_name=generation, points=[_point(memory, embedding, document)]
     )
