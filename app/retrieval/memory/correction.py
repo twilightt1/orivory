@@ -152,11 +152,6 @@ def needs_rewrite(query: str) -> bool:
     return any(w in _PRONOUNS for w in _WORD.findall(query or ""))
 
 
-def find_derived_dependent_ids(memories, erased_ids: set[str]) -> list[str]:
-    return [str(m.id) for m in memories
-            if _depends_on(m, erased_ids) and state_of(m) != "dirty"]
-
-
 def _valid_from_dt(value) -> datetime | None:
     """``cm_valid_from`` as an aware datetime, or None when it is unusable.
 
