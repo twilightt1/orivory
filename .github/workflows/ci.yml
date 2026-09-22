@@ -100,28 +100,6 @@ jobs:
           python -m pytest --confcutdir=tests/retrieval tests/retrieval/test_drain_loop.py tests/retrieval/test_freshness_barrier.py tests/retrieval/test_drain_races.py tests/retrieval/test_p3_gate.py -q
           python -m pytest --confcutdir=tests/rag tests/rag/test_pipeline_purge_fence.py -q
 
-      - name: Run P2 retrieval/hybrid suites (temp SQLite, no services)
-        env:
-          # Same discipline as the P1a/P1b/P3 steps above: every module here
-          # opens its own private SQLite file + private embedded-Qdrant folder
-          # (the P1b gate's store, reused as a plugin), so no compose service is
-          # involved. Explicit paths on purpose — a new suite never runs unless
-          # it is listed. The P2 gate itself is tests/retrieval/test_p2_gate.py
-          # (§9 acceptance row); the last line is the batch of retrieval /
-          # observability suites that had no CI step of their own before P2,
-          # and the event-loop heartbeat + ablation-contract modules carry
-          # their own cold-cache guards (arctic onnx cache missing → skip).
-          # tests/lite/test_sqlite_schema_v4.py — the v4 ladder/FTS5 module —
-          # is wired here because v4 IS the P2 schema step; the P3 step covers
-          # the v3 ladder, not this one.
-          DATABASE_URL: sqlite+aiosqlite:////tmp/p2_ci.db
-        run: |
-          python -m pytest --confcutdir=tests/retrieval tests/retrieval/test_p2_gate.py tests/retrieval/test_rerank_pool.py tests/retrieval/test_hybrid_recall.py -q
-          python -m pytest --confcutdir=tests/retrieval tests/retrieval/test_event_loop_responsiveness.py tests/retrieval/test_p2_ablation_contract.py -q
-          python -m pytest --confcutdir=tests/retrieval tests/retrieval/test_semantic_rerank.py tests/retrieval/test_p0_final_safety.py tests/retrieval/test_retriever_filters.py tests/retrieval/test_e5_local.py tests/retrieval/test_embedding_fingerprint.py tests/retrieval/test_vector_degradation.py tests/retrieval/test_xs_parity.py tests/retrieval/test_graph_build_offload.py -q
-          python -m pytest --confcutdir=tests/lite tests/lite/test_sqlite_schema_v4.py -q
-          python -m pytest --confcutdir=tests/observability tests/observability -q
-
       - name: Run P4a namespace/ACL gate suites (temp SQLite, no services)
         env:
           # Same discipline as the P1a/P1b/P2/P3 steps above: every module here
@@ -230,6 +208,33 @@ jobs:
 
       - name: Validate production Docker Compose config
         run: docker compose -f docker-compose.yml -f docker-compose.prod.yml config --quiet
+      - name: Run P2 retrieval/hybrid suites (temp SQLite, no services)
+        # Ordered LAST in this job on purpose: these are the only tests here
+        # that measure wall clock, and this step is the one that fails on a
+        # busy runner. A failure here must not skip the deterministic steps
+        # above it — that masking is how a stale ladder pin rode through
+        # several merged PRs looking green.
+        env:
+          # Same discipline as the P1a/P1b/P3 steps above: every module here
+          # opens its own private SQLite file + private embedded-Qdrant folder
+          # (the P1b gate's store, reused as a plugin), so no compose service is
+          # involved. Explicit paths on purpose — a new suite never runs unless
+          # it is listed. The P2 gate itself is tests/retrieval/test_p2_gate.py
+          # (§9 acceptance row); the last line is the batch of retrieval /
+          # observability suites that had no CI step of their own before P2,
+          # and the event-loop heartbeat + ablation-contract modules carry
+          # their own cold-cache guards (arctic onnx cache missing → skip).
+          # tests/lite/test_sqlite_schema_v4.py — the v4 ladder/FTS5 module —
+          # is wired here because v4 IS the P2 schema step; the P3 step covers
+          # the v3 ladder, not this one.
+          DATABASE_URL: sqlite+aiosqlite:////tmp/p2_ci.db
+        run: |
+          python -m pytest --confcutdir=tests/retrieval tests/retrieval/test_p2_gate.py tests/retrieval/test_rerank_pool.py tests/retrieval/test_hybrid_recall.py -q
+          python -m pytest --confcutdir=tests/retrieval tests/retrieval/test_event_loop_responsiveness.py tests/retrieval/test_p2_ablation_contract.py -q
+          python -m pytest --confcutdir=tests/retrieval tests/retrieval/test_semantic_rerank.py tests/retrieval/test_p0_final_safety.py tests/retrieval/test_retriever_filters.py tests/retrieval/test_e5_local.py tests/retrieval/test_embedding_fingerprint.py tests/retrieval/test_vector_degradation.py tests/retrieval/test_xs_parity.py tests/retrieval/test_graph_build_offload.py -q
+          python -m pytest --confcutdir=tests/lite tests/lite/test_sqlite_schema_v4.py -q
+          python -m pytest --confcutdir=tests/observability tests/observability -q
+
 
   lint-full:
     name: Full-repo ruff
@@ -249,6 +254,14 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements-dev.txt
+
+      - name: Check uv.lock matches pyproject.toml
+        run: |
+          # A lock that drifted from the manifest is a second dependency set
+          # that nothing verifies (it was three packages behind before the
+          # dead-dependency prune). uv comes from PyPI, so no new action.
+          python -m pip install --quiet uv
+          uv lock --check
 
       - name: Run full-repo ruff
         run: python -m ruff check app tests eval scripts
@@ -308,6 +321,7 @@ jobs:
             cat pip-audit.json
             echo ""
             echo "Please review and update affected packages."
+            exit 1
           else
             echo "✅ No critical severity vulnerabilities found"
           fi
