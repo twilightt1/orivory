@@ -39,7 +39,11 @@ sys.path.insert(0, str(ROOT))
 ENV_FILE = ROOT / ".env"
 if not ENV_FILE.exists():  # worktree fallback
     ENV_FILE = ROOT.parent.parent / ".env"
-for line in ENV_FILE.open():
+# No .env anywhere — an archive checkout, a bare container, a worktree whose
+# parent has none: run on the ambient environment instead of dying in a
+# FileNotFoundError the caller cannot act on.
+lines = ENV_FILE.read_text().splitlines() if ENV_FILE.exists() else []
+for line in lines:
     line = line.strip()
     if line and not line.startswith("#") and "=" in line:
         key, _, value = line.partition("=")
