@@ -25,8 +25,8 @@ class UserQuota(Base):
     daily_limit:        Mapped[int]       = mapped_column(Integer(), server_default="100")
     monthly_limit:      Mapped[int]       = mapped_column(Integer(), server_default="2000")
     last_daily_reset:   Mapped[date]      = mapped_column(Date(), default=date.today)
-    # First day of the current month, computed in Python — `date_trunc` is
-    # Postgres-only and lite mode runs on SQLite.
+    # First day of the current month, computed in Python — SQLite has no
+    # `date_trunc`.
     last_monthly_reset: Mapped[date]      = mapped_column(
         Date(), default=lambda: date.today().replace(day=1)
     )

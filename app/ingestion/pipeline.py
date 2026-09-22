@@ -49,8 +49,8 @@ def process_document_sync(document_id: str) -> None:
     """Run the ingestion pipeline for one document, synchronously.
 
     Never raises: on failure the document row is marked ``failed`` (same
-    terminal state the old eager Celery task left behind) and the error is
-    logged. Single attempt — there is no worker to back off to.
+    terminal state any other pipeline failure writes) and the error is logged.
+    Single attempt — there is no worker to back off to.
     """
     from app.database import sync_session
 
@@ -74,7 +74,7 @@ def process_document_sync(document_id: str) -> None:
 def _ingest(db, document_id: str) -> None:
     from sqlalchemy import delete, select
 
-    from app import storage as minio
+    from app import storage
     from app.models.document import Document
     from app.models.document_chunk import DocumentChunk
     from app.retrieval.bm25_retriever import bm25_retriever
@@ -97,7 +97,7 @@ def _ingest(db, document_id: str) -> None:
     db.commit()
 
     try:
-        file_bytes = minio.get_object_sync(doc.file_path)
+        file_bytes = storage.get_object_sync(doc.file_path)
     except Exception as exc:
         raise _stage_error("storage_read", exc) from exc
     # The projection's content hash comes from THESE bytes (R38): read once,
@@ -323,8 +323,8 @@ def _project_document_to_memories(db, document_id: str, parents,
                                           content_hash=content_hash)
     db.commit()
 
-    # Purge vectors from a prior projection whose Postgres rows were just
-    # deleted (re-ingest with different/fewer chunks → different ids).
+    # Purge vectors from a prior projection whose rows were just deleted
+    # (re-ingest with different/fewer chunks → different ids).
     if result.stale_vector_ids:
         delete_memories_sync(result.stale_vector_ids)
 

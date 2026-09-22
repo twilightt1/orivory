@@ -235,7 +235,7 @@ async def upsert_memory(memory: Memory) -> None:
 
 
 def upsert_memory_sync(memory: Memory) -> None:
-    """Synchronous variant — used by Celery / CLI contexts."""
+    """Synchronous variant — used by the in-process worker and CLI contexts."""
     document = _memory_to_document(memory)
     embedding = embed_texts_sync([document])[0]
     client, generation, _ = _checked_collection_sync(len(embedding))
@@ -366,7 +366,7 @@ async def delete_memories(memory_ids: list[str]) -> bool:
 
 
 def delete_memories_sync(memory_ids: list[str]) -> None:
-    """Synchronous batch delete — used by Celery ingestion (best-effort).
+    """Synchronous batch delete — used by the synchronous ingestion path (best-effort).
 
     Reads the batch back after the delete (the async face's shape) and logs a
     survivor BY ID: the caller has no durable intent to retry with, so a missed

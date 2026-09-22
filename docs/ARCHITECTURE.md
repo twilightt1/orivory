@@ -236,8 +236,7 @@ Callers: recall's query rewrite + entity extraction
 back to the original query with an empty entity list), the graph write-back
 (`app/graph/extraction.py`), the consolidation rule
 (`app/retrieval/memory/consolidation.py`, `tag-summary.v1`) and HyDE
-(`app/retrieval/hyde_agent.py`). `routing.py` holds the old graph's routing
-helpers and has no caller left in the tree.
+(`app/retrieval/hyde_agent.py`).
 
 ## 6. Evaluation (`eval/`)
 

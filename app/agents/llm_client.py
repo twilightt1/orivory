@@ -1,13 +1,11 @@
-"""Shared LLM client factory for all agents.
+"""Shared LLM client factory for the retrieval and graph seams.
 
-One place for: client construction (api key, base URL, timeout, retries),
-a request-scope cost hook that feeds `cost_helpers.record_cost`, and a
-uniform `complete()` wrapper that records usage automatically.
+One place for: client construction (api key, base URL, timeout, retries) and a
+uniform `complete()` wrapper.
 
-Every agent used to hand-roll its own module-level `AsyncOpenAI` singleton
-(12 copies) with no timeout and no cost recording — a hung OpenRouter call
-stalled an SSE stream for the SDK default 600s, and a single turn firing
-up to ~40 LLM calls had zero spend observability.
+The agents used to hand-roll their own module-level `AsyncOpenAI` singleton
+(12 copies) with no timeout — a hung OpenRouter call stalled a stream for the
+SDK default 600s.
 """
 from __future__ import annotations
 
@@ -15,7 +13,6 @@ import asyncio
 import logging
 import os
 import threading
-from collections.abc import AsyncIterator
 from typing import Any
 
 from openai import AsyncOpenAI
@@ -109,8 +106,8 @@ def get_llm_client() -> AsyncOpenAI:
 
     The cached httpx pool is bound to the event loop that created it, so the
     client is rebuilt whenever the running loop changes. Without this, sync
-    contexts that drive one coroutine per ``asyncio.run()`` (Celery graph
-    tasks) reuse a pool bound to an already-closed loop from the second task
+    contexts that drive one coroutine per ``asyncio.run()`` (the worker-thread
+    graph tasks) reuse a pool bound to an already-closed loop from the second task
     on — every call raises and extraction silently degrades to fallback.
     """
     global _client, _client_loop
@@ -216,51 +213,9 @@ def _is_unsupported_feature_error(exc: Exception) -> bool:
     return any(m in text for m in markers) and "400" in text
 
 
-def _usage_to_tokens(usage: Any) -> tuple[int, int]:
-    """Best-effort extraction of (tokens_in, tokens_out) from a usage object."""
-    if usage is None:
-        return 0, 0
-    tokens_in = int(getattr(usage, "prompt_tokens", 0) or 0)
-    tokens_out = int(getattr(usage, "completion_tokens", 0) or 0)
-    if not tokens_in and not tokens_out:
-        total = int(getattr(usage, "total_tokens", 0) or 0)
-        tokens_in = total
-    return tokens_in, tokens_out
-
-
-def record_usage(
-    state: dict[str, Any] | None,
-    agent: str,
-    model: str,
-    usage: Any,
-) -> None:
-    """Record token usage/cost for a completion into AgentState + the ledger.
-
-    Fire-and-forget by design: cost tracking must never break a request.
-    """
-    if state is None:
-        return
-    tokens_in, tokens_out = _usage_to_tokens(usage)
-    if not tokens_in and not tokens_out:
-        return
-    try:
-        from app.agents.cost_helpers import record_cost
-
-        record_cost(
-            agent=agent,
-            state=state,
-            model=model,
-            tokens_in=tokens_in,
-            tokens_out=tokens_out,
-        )
-    except Exception:  # pragma: no cover — observability must not break requests
-        log.debug("Cost recording failed", exc_info=True)
-
-
 async def complete(
     *,
     agent: str,
-    state: dict[str, Any] | None = None,
     model: str | None = None,
     messages: list[dict[str, str]],
     temperature: float = 0.0,
@@ -269,7 +224,7 @@ async def complete(
     extra_headers: dict[str, str] | None = None,
     timeout: float | None = None,
 ) -> Any:
-    """Run a chat completion with usage/cost recording built in.
+    """Run a chat completion through the shared client and retry seam.
 
     Returns the raw completion object (callers read `.choices[0].message`).
     """
@@ -305,51 +260,4 @@ async def complete(
                     response = await client.chat.completions.create(**kwargs)
             else:
                 raise
-    record_usage(state, agent, model or settings.LLM_MODEL, getattr(response, "usage", None))
     return response
-
-
-async def complete_stream(
-    *,
-    agent: str,
-    state: dict[str, Any] | None = None,
-    model: str | None = None,
-    messages: list[dict[str, str]],
-    temperature: float = 0.0,
-    max_tokens: int | None = None,
-    extra_headers: dict[str, str] | None = None,
-    timeout: float | None = None,
-) -> AsyncIterator[Any]:
-    """Stream a chat completion, recording usage at the end of the stream.
-
-    Usage chunks are only emitted when the request asks for them; the final
-    chunk (if any) carries `usage`.
-    """
-    client = get_llm_client()
-    async with _get_llm_semaphore():
-        stream = await client.chat.completions.create(
-            model=model or settings.LLM_MODEL,
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens or settings.LLM_MAX_TOKENS,
-            extra_headers=extra_headers,
-            timeout=timeout or DEFAULT_LLM_TIMEOUT_SECONDS,
-            stream=True,
-        )
-    last_usage: Any = None
-    try:
-        async for chunk in stream:
-            if getattr(chunk, "usage", None):
-                last_usage = chunk.usage
-            yield chunk
-    finally:
-        if last_usage is not None:
-            record_usage(state, agent, model or settings.LLM_MODEL, last_usage)
-        close = getattr(stream, "close", None)
-        if close is not None:
-            result = close()
-            if asyncio.iscoroutine(result):
-                try:
-                    await result
-                except Exception:  # pragma: no cover
-                    pass

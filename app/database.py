@@ -217,13 +217,14 @@ def activate_generations(conn, *, activate: bool = True) -> dict[str, tuple[str,
     current embedding contract": the SQLite ladder (v2 -> v3) and
     ``migrate_qdrant.py cutover`` both call it, so the pointer cannot drift from
     the contract and the two paths can never disagree. Dialect-neutral Core SQL
-    (ruling R10: the CLI must also serve Postgres, where no ladder runs).
+    (ruling R10: the offline CLI calls it on a plain connection, outside the
+    app's engine).
 
     ``activate=False`` is the EXPAND half of an upgrade: the rows are written
     (or refreshed) and stay INACTIVE, so the install keeps serving its OLD
     pointer. That is loud — the read path's contract guard raises — only where
     the old pointer names a contract the new code no longer matches (the P1a
-    transitional row: masked mean). With NO active row (Postgres: P1a never
+    transitional row: masked mean). With NO active row (a P1a-era install never
     seeded this table) ``active_generation`` falls back to the transitional
     generation name with no fingerprint, an EMPTY generation is deliberately
     allowed, and reads answer ``[]`` until ``cutover`` flips the pointer.
@@ -319,8 +320,8 @@ def _upgrade_v3_to_v4(sync_conn) -> None:
 
     Runs ONCE, on the version transition, and on a fresh install too (which has
     nothing to back up). FTS DDL cannot come from model metadata — there is no
-    ORM model for a virtual table and no Alembic step for it: SQLite-only DDL
-    belongs in the ladder. The step creates the index and BACKFILLS it from
+    ORM model for a virtual table: SQLite-only DDL belongs in the ladder. The
+    step creates the index and BACKFILLS it from
     ``memories`` in the same transaction as the stamp, so the index is complete
     the moment a v4 install can serve; a crash mid-step leaves v3 stamped and
     the step re-runs (its DDL is IF NOT EXISTS, its backfill is coverage-driven).
@@ -470,10 +471,9 @@ def upgrade_sqlite_schema(conn) -> None:
     (``scripts/migrate_qdrant.py``) both call it, so the CLI can never upgrade a
     database differently from the app it will serve.
 
-    Full-stack (Postgres) deployments use Alembic migrations instead — and get
-    no FTS: the lexical leg is SQLite-only and reports itself unavailable there
-    (ruling R3(p2), no Alembic step). SQLite deployments are created fresh from
-    the model metadata; an existing install goes through ``user_version``: an
+    The lexical leg is SQLite-only and reports itself unavailable anywhere else
+    (ruling R3(p2)). A fresh install is created from the model metadata; an
+    existing install goes through ``user_version``: an
     unversioned v1-shape schema is adopted and upgraded v1 -> v2 (backup before
     DDL, foreign-key + integrity checks after), then v2 -> v3 (the P1b
     generation-rows data step, which runs ONCE — the CLI's ``cutover`` owns

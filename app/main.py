@@ -26,11 +26,11 @@ _RELOAD_TRUE_VALUES = frozenset({"1", "true", "t", "yes", "y", "on"})
 # The boot replays ONE bounded batch of intents before serving: the background
 # loop's first tick can be a whole interval away, and a booting app should not
 # make a user wait for it. Everything after that batch is
-# app/retrieval/memory/drain_loop.py's — on both dialects (P3).
+# app/retrieval/memory/drain_loop.py's.
 
 
 async def _drain_index_outbox_at_boot() -> None:
-    """Replay one batch of pending intents at boot — SQLite and Postgres alike.
+    """Replay one batch of pending intents at boot.
 
     Bounded and failure-tolerant: a vector outage (or any drain-level error)
     must never keep the app from booting, so it is logged and the intents stay

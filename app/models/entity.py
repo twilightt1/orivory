@@ -43,8 +43,8 @@ if TYPE_CHECKING:
     from app.models.user import User
 
 
-# Allowed entity_type values. Kept as constants so the agent can pick
-# from a known vocabulary and Postgres can use a CHECK constraint.
+# Allowed entity_type values. Kept as constants so the agent picks from a
+# known vocabulary instead of inventing one.
 ENTITY_TYPES = (
     "person",
     "project",
