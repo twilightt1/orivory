@@ -161,7 +161,7 @@ async def test_v5_install_upgrades_to_v6_with_the_p4b_backup_and_null_columns(v5
         rows = await _suppression_rows(conn)
         integrity = (await conn.execute(text("PRAGMA integrity_check"))).scalar_one()
 
-    assert version == database.SQLITE_SCHEMA_VERSION == 7
+    assert version == database.SQLITE_SCHEMA_VERSION == 8
     assert ("namespace", "VARCHAR(32)", 0, None, 0) in info, (
         "nullable, no default: the ladder never invents a value (R38)")
     assert ("content_hash", "VARCHAR(64)", 0, None, 0) in info
@@ -226,7 +226,7 @@ async def test_rebooting_a_v6_install_is_a_no_op(v5_db):
         version, _tables = await _schema(conn)
         moved = (await conn.execute(text(
             "SELECT namespace FROM memory_suppressions WHERE id = :id"), {"id": SUPPRESSION_ID})).scalar_one()
-    assert version == 7
+    assert version == 8
     assert moved == "moved", "a later boot never re-asserts a value"
     assert not list(tmp_path.glob(BACKUP)), "no transition, no backup"
 
@@ -250,7 +250,7 @@ async def test_a_crashed_v6_step_resumes_and_never_duplicates(v5_db):
         version, _tables = await _schema(conn)
         info = await _table_info(conn, "memory_suppressions")
         rows = await _suppression_rows(conn)
-    assert version == 7
+    assert version == 8
     assert {row[0] for row in info} >= set(NEW_COLUMNS)
     assert rows == [(SUPPRESSION_ID, TENANT_A, SOURCE_REF, "forgotten", None, None)]
 
@@ -263,7 +263,7 @@ async def test_a_crashed_v6_step_resumes_and_never_duplicates(v5_db):
     async with eng.connect() as conn:
         version, _tables = await _schema(conn)
         info = await _table_info(conn, "memory_suppressions")
-    assert version == 7
+    assert version == 8
     assert {row[0] for row in info} >= set(NEW_COLUMNS), "the step resumed and finished"
 
 
@@ -284,7 +284,7 @@ async def test_fresh_install_runs_the_v6_step_without_a_backup(tmp_path, monkeyp
             stored = (await conn.execute(text(
                 "SELECT namespace, content_hash FROM memory_suppressions WHERE id = :id"),
                 {"id": SUPPRESSION_ID})).one()
-        assert version == 7
+        assert version == 8
         assert ("namespace", "VARCHAR(32)", 0, None, 0) in info
         assert ("content_hash", "VARCHAR(64)", 0, None, 0) in info
         assert tuple(stored) == (None, None), "an insert that omits them gets NULL"
@@ -319,7 +319,7 @@ async def test_rollback_restamps_v5_and_roll_forward_re_runs_the_step(v5_db):
     async with eng.connect() as conn:
         version, _tables = await _schema(conn)
         rows = await _suppression_rows(conn)
-    assert version == 7
+    assert version == 8
     assert rows == [(SUPPRESSION_ID, TENANT_A, SOURCE_REF, "forgotten", None, None)]
     assert backup.read_bytes() == before, "an existing backup is never overwritten"
 
@@ -331,7 +331,7 @@ async def test_rollback_restamps_v5_and_roll_forward_re_runs_the_step(v5_db):
     async with eng.connect() as conn:
         version, _tables = await _schema(conn)
         rows = await _suppression_rows(conn)
-    assert version == 7
+    assert version == 8
     assert rows == [(SUPPRESSION_ID, TENANT_A, SOURCE_REF, "forgotten", None, None)]
     assert backup.read_bytes() == before
 

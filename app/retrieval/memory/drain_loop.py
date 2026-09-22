@@ -19,6 +19,8 @@ idle-only — see :func:`_retain_after_drain`).
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import contextvars
 
 import structlog
 
@@ -30,6 +32,31 @@ from app.services.erasure_service import reconcile_erasure_receipts
 from app.services.retention_service import run_retention
 
 log = structlog.get_logger()
+
+# The tenant whose rows the NEXT claim on this task's context must put first.
+# The freshness barrier's caller is waiting on its own intents and a foreign
+# backlog must not fill the batches it triggers; the loop never sets it, so its
+# global seq order is unchanged. A ContextVar (not a global) because it belongs
+# to one awaiting task, not to the process.
+_priority_tenant: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "outbox_drain_priority_tenant", default=None
+)
+
+
+@contextlib.contextmanager
+def tenant_priority(tenant: str):
+    """Claim ``tenant``'s rows FIRST while this context is active (finding 563).
+
+    The barrier's door: it keeps calling ``drain_once(batch_size=...)`` — the
+    single-flight door's signature is pinned by a signed gate — so the tenant
+    rides the context instead of an argument.
+    """
+    token = _priority_tenant.set(tenant)
+    try:
+        yield
+    finally:
+        _priority_tenant.reset(token)
+
 
 # The fallback every failed drain round counts (ruling R24). The intents are
 # untouched — still pending, retried with backoff — but a rising rate means the
@@ -79,9 +106,16 @@ async def drain_once(*, batch_size: int) -> dict:
 
     The single entry point for draining: the loop below, and the P3 freshness
     barrier, both come through here so a claim never races another claim.
+
+    The batch size is the only argument (a signed gate pins that call shape):
+    a caller that is WAITING on a specific tenant's rows announces it through
+    :func:`tenant_priority` instead.
     """
     async with _single_flight():
-        return await drain_pending(batch_size=batch_size)
+        tenant = _priority_tenant.get()
+        if tenant is None:
+            return await drain_pending(batch_size=batch_size)
+        return await drain_pending(batch_size=batch_size, priority_tenant=tenant)
 
 
 async def _reconcile_after_drain() -> None:
@@ -173,15 +207,21 @@ async def run_drain_loop(*, interval: float, batch_size: int, stop: asyncio.Even
             report = await drain_once(batch_size=batch_size)
             log.info("outbox drain", **report)
             applied = report.get("applied", 0)
+            claimed = report.get("claimed", 0)
         except Exception as e:  # the loop must outlive any failure
             count_fallback(DRAIN_FAILED_FALLBACK)
             log.warning("outbox drain failed", error=str(e))
-            applied = 0
+            applied = claimed = 0
         if applied:
             # A landed batch is where a receipt's owed deletes get satisfied.
             await _reconcile_after_drain()
-            # ... and where the producer picks the new evidence up (R39).
-            await _consolidate_after_drain()
+            # ... and where the producer picks the new evidence up (R39) — once
+            # the round EMPTIED the queue (a partial batch, which is every
+            # ordinary write). A backlog claiming full batches used to pay a
+            # whole producer pass per 50 rows (the DISTINCT user scan plus a
+            # full per-user memory load), so its cost scaled with BATCHES.
+            if claimed < batch_size:
+                await _consolidate_after_drain()
             continue  # there may be more work right now: don't wait the interval
         # An idle tick is free time for the producer too (R39).
         await _consolidate_after_drain()

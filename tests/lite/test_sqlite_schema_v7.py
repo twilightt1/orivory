@@ -109,7 +109,7 @@ async def test_v6_install_upgrades_to_v7_with_the_retention_backup_and_off_defau
         stored = await _user_row(conn, USER_ID)
         integrity = (await conn.execute(text("PRAGMA integrity_check"))).scalar_one()
 
-    assert version == database.SQLITE_SCHEMA_VERSION == 7
+    assert version == database.SQLITE_SCHEMA_VERSION == 8
     assert ("retention_enabled", "BOOLEAN", 1, "'0'", 0) in info, (
         "NOT NULL with the OFF default: the ADD COLUMN default IS the backfill (spec §8.1)")
     assert ("retention_days", "INTEGER", 0, None, 0) in info, (
@@ -171,7 +171,7 @@ async def test_rebooting_a_v7_install_is_a_no_op(v6_db):
     async with eng.connect() as conn:
         version, _tables = await _schema(conn)
         stored = await _user_row(conn, USER_ID)
-    assert version == 7
+    assert version == 8
     assert stored == (1, 30), "a later boot never re-asserts a setting the user turned on"
     assert not list(tmp_path.glob(BACKUP)), "no transition, no backup"
 
@@ -195,7 +195,7 @@ async def test_a_crashed_v7_step_resumes_and_never_duplicates(v6_db):
         version, _tables = await _schema(conn)
         info = await _table_info(conn)
         stored = await _user_row(conn, USER_ID)
-    assert version == 7
+    assert version == 8
     assert {row[0] for row in info} >= set(NEW_COLUMNS)
     assert stored == (0, None)
 
@@ -208,7 +208,7 @@ async def test_a_crashed_v7_step_resumes_and_never_duplicates(v6_db):
     async with eng.connect() as conn:
         version, _tables = await _schema(conn)
         info = await _table_info(conn)
-    assert version == 7
+    assert version == 8
     assert {row[0] for row in info} >= set(NEW_COLUMNS), "the step resumed and finished"
 
 
@@ -226,7 +226,7 @@ async def test_fresh_install_runs_the_v7_step_without_a_backup(tmp_path, monkeyp
             version, _tables = await _schema(conn)
             info = await _table_info(conn)
             stored = await _user_row(conn, USER_ID)
-        assert version == 7
+        assert version == 8
         assert ("retention_enabled", "BOOLEAN", 1, "'0'", 0) in info
         assert ("retention_days", "INTEGER", 0, None, 0) in info
         assert stored == (0, None), "an insert that omits them gets the OFF default"
@@ -261,7 +261,7 @@ async def test_rollback_restamps_v6_and_roll_forward_re_runs_the_step(v6_db):
     async with eng.connect() as conn:
         version, _tables = await _schema(conn)
         stored = await _user_row(conn, USER_ID)
-    assert version == 7
+    assert version == 8
     assert stored == (0, None), "a rolled-back user is OFF, not invented ON"
     assert backup.read_bytes() == before, "an existing backup is never overwritten"
 
@@ -273,7 +273,7 @@ async def test_rollback_restamps_v6_and_roll_forward_re_runs_the_step(v6_db):
     async with eng.connect() as conn:
         version, _tables = await _schema(conn)
         stored = await _user_row(conn, USER_ID)
-    assert version == 7
+    assert version == 8
     assert stored == (0, None)
     assert backup.read_bytes() == before
 

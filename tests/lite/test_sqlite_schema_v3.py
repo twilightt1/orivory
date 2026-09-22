@@ -116,7 +116,7 @@ async def test_v2_upgrade_writes_the_new_rows_inactive_and_keeps_the_old_pointer
         version, _ = await _schema(conn)
         rows = await _generations(conn)
 
-    assert version == database.SQLITE_SCHEMA_VERSION == 7
+    assert version == database.SQLITE_SCHEMA_VERSION == 8
     active = {(kind, generation) for kind, generation, _, is_active in rows if is_active}
     assert active == {("memory", COLLECTION_NAME)}, "the old pointer keeps serving"
     written = {(kind, generation) for kind, generation, _, is_active in rows if not is_active}
@@ -148,7 +148,7 @@ async def test_fresh_install_gets_the_rows_without_a_backup(tmp_path, monkeypatc
         async with eng.connect() as conn:
             version, tables = await _schema(conn)
             rows = await _generations(conn)
-        assert version == 7 and V2_TABLES <= tables
+        assert version == 8 and V2_TABLES <= tables
         assert {(row[0], row[1]) for row in rows} == {
             ("memory", generation_name("memory")), ("chunk", generation_name("chunk"))}
         assert all(row[3] == 1 for row in rows), "nothing to serve yet: the rows are active"
@@ -175,7 +175,7 @@ async def test_v1_install_upgrades_straight_through_with_one_p1b_backup(tmp_path
             version, tables = await _schema(conn)
             memories = (await conn.execute(text("SELECT content, revision FROM memories"))).all()
             rows = await _generations(conn)
-        assert version == 7 and V2_TABLES <= tables
+        assert version == 8 and V2_TABLES <= tables
         assert [tuple(row) for row in memories] == [("v1 memory text", 1)]
         assert {row[0] for row in rows} == {"memory", "chunk"}
         assert not any(row[3] for row in rows), "an upgrade never moves the pointer"
@@ -269,4 +269,4 @@ async def test_an_existing_p1b_backup_is_reused_never_overwritten(v2_db):
     assert existing.read_bytes() == before
     async with eng.connect() as conn:
         version, _ = await _schema(conn)
-    assert version == 7
+    assert version == 8

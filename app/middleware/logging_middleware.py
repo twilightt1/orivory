@@ -18,9 +18,11 @@ class LoggingMiddleware(BaseHTTPMiddleware):
             response = await call_next(request)
         except Exception as exc:
             # Handlers that raise must still appear in the access log —
-            # unhandled 5xx are exactly the requests operators need most.
+            # unhandled 5xx are exactly the requests operators need most — and
+            # the traceback available HERE must ride it: at ERROR with
+            # exc_info, so the stack frames are not discarded.
             duration = round((time.perf_counter() - start) * 1000, 2)
-            log.info(
+            log.error(
                 "request",
                 method=request.method,
                 path=request.url.path,
@@ -28,6 +30,7 @@ class LoggingMiddleware(BaseHTTPMiddleware):
                 duration_ms=duration,
                 request_id=request_id,
                 error=f"{type(exc).__name__}: {exc}",
+                exc_info=True,
             )
             raise
 

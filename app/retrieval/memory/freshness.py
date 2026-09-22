@@ -33,6 +33,7 @@ import asyncio
 import logging
 import time
 import uuid
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func, select
 
@@ -76,6 +77,29 @@ async def _memory_intent_counts(tenant: str) -> dict[str, int]:
         return {str(status): int(count or 0) for status, count in rows.all()}
 
 
+async def _memory_intent_not_before(tenant: str) -> datetime | None:
+    """Earliest moment this tenant's PENDING memory intents can be claimed.
+
+    Only meaningful when a drain round claimed NOTHING: every pending row is
+    then waiting out its backoff (``next_attempt_at`` in the future — a NULL
+    would have been claimable), so this answers "when can it even be tried
+    again?". ``None`` when nothing is pending.
+    """
+    async with AsyncSessionLocal() as db:
+        value = await db.scalar(
+            select(func.min(IndexOutbox.next_attempt_at)).where(
+                IndexOutbox.tenant_id == tenant,
+                IndexOutbox.kind == KIND_MEMORY,
+                IndexOutbox.status == "pending",
+            )
+        )
+    if value is not None and value.tzinfo is None:
+        # SQLite stores DATETIME without an offset: the value IS UTC (the
+        # column is timezone=True and every writer stamps UTC).
+        value = value.replace(tzinfo=UTC)
+    return value
+
+
 async def await_freshness(*, user_id: str, timeout: float, poll: float = 0.05) -> float:
     """Wait — bounded — for this user's pending index intents to land.
 
@@ -99,33 +123,66 @@ async def await_freshness(*, user_id: str, timeout: float, poll: float = 0.05) -
     tenant = uuid.UUID(str(user_id)).hex  # the outbox's tenant column
     deadline = t0 + timeout
     counts: dict[str, int] = {}
-    while True:
-        try:
-            counts = await _memory_intent_counts(tenant)
-            if not counts.get("pending", 0):
+    pending: int | None = None
+    claimed: int | None = None
+    # Annex the drain to THIS tenant while the barrier waits: the batches it
+    # triggers claim the caller's own rows first, so a foreign backlog (a bulk
+    # import's chunk intents) cannot fill them (finding 563). The single-flight
+    # door's call shape stays `drain_once(batch_size=...)`.
+    with drain_loop.tenant_priority(tenant):
+        while True:
+            try:
+                counts = await _memory_intent_counts(tenant)
+                pending = counts.get("pending", 0)
+            except Exception as e:
+                # Nothing proven landed: keep waiting (R14), don't read the index.
+                log.warning("Freshness barrier could not read the outbox: %s", e)
+                pending = None
+            if pending == 0:
                 return time.perf_counter() - t0
-        except Exception as e:
-            # Nothing proven landed: keep waiting (R14), don't read the index.
-            log.warning("Freshness barrier could not read the outbox: %s", e)
-        remaining = deadline - time.perf_counter()
-        if remaining <= 0:
-            break
-        try:
-            # The drain answers to the SAME deadline: a hung store must not
-            # hang a recall (local Qdrant mode has no client timeout).
-            await asyncio.wait_for(
-                drain_loop.drain_once(batch_size=settings.OUTBOX_DRAIN_BATCH_SIZE),
-                timeout=remaining,
-            )
-        except TimeoutError:
-            if time.perf_counter() >= deadline:
-                break  # the drain outlived the budget: the wait is over
-            # A drain-internal TimeoutError is a transient failure, not this
-            # barrier's deadline: retry it below.
-            log.warning("Freshness barrier drain timed out early")
-        except Exception as e:
-            log.warning("Freshness barrier drain failed: %s", e)
-        await asyncio.sleep(min(poll, max(deadline - time.perf_counter(), 0.0)))
+            remaining = deadline - time.perf_counter()
+            if remaining <= 0:
+                break
+            if pending and claimed == 0:
+                # The last round claimed NOTHING anywhere — yet this tenant
+                # still owes writes, so every pending intent is waiting out its
+                # backoff. Nothing can land before ``not_before``: waiting on it
+                # buys nothing, so answer the typed readiness NOW and name when
+                # a retry can (finding 95). Still a 503: a non-fresh write is
+                # never served as a no-match (R14/R10).
+                not_before = await _memory_intent_not_before(tenant)
+                if not_before is not None and not_before > (
+                    datetime.now(UTC) + timedelta(seconds=remaining)
+                ):
+                    log.warning(
+                        "Freshness barrier will not wait for backoff: tenant %s has "
+                        "pending=%s but nothing claimable before %s (%.2fs of a %ss "
+                        "budget left)",
+                        tenant, pending, not_before.isoformat(), remaining, timeout,
+                    )
+                    raise IndexFreshnessTimeout(
+                        f"index intents for tenant {tenant} are backoff-delayed until "
+                        f"{not_before.isoformat()}: nothing can land within the "
+                        f"{timeout}s budget (retry after {not_before.isoformat()})",
+                        retry_after=not_before,
+                    )
+            try:
+                # The drain answers to the SAME deadline: a hung store must not
+                # hang a recall (local Qdrant mode has no client timeout).
+                report = await asyncio.wait_for(
+                    drain_loop.drain_once(batch_size=settings.OUTBOX_DRAIN_BATCH_SIZE),
+                    timeout=remaining,
+                )
+                claimed = int(report.get("claimed", 0))
+            except TimeoutError:
+                if time.perf_counter() >= deadline:
+                    break  # the drain outlived the budget: the wait is over
+                # A drain-internal TimeoutError is a transient failure, not this
+                # barrier's deadline: retry it below.
+                log.warning("Freshness barrier drain timed out early")
+            except Exception as e:
+                log.warning("Freshness barrier drain failed: %s", e)
+            await asyncio.sleep(min(poll, max(deadline - time.perf_counter(), 0.0)))
     # Carried item C2: 'still in flight' (pending) and 'never landing' (blocked)
     # answer to different operator actions, so the timeout says which classes
     # this tenant has. An unreadable outbox logs both as None — nothing was

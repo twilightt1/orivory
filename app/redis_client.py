@@ -140,6 +140,18 @@ class InMemoryRedis:
             del zset[member]
         return len(stale)
 
+    async def zremrangebyrank(self, key: str, start: int, end: int) -> int:
+        """ZREMRANGEBYRANK in ascending score order (the limiter's retention cap)."""
+        zset = self._zsets.get(key, {})
+        ordered = sorted(zset, key=zset.__getitem__)
+        size = len(ordered)
+        lo = start if start >= 0 else max(size + start, 0)
+        hi = end if end >= 0 else size + end
+        doomed = ordered[lo : hi + 1] if lo <= hi else []
+        for member in doomed:
+            del zset[member]
+        return len(doomed)
+
     async def scan(
         self, cursor: int = 0, match: str | None = None, count: int | None = None
     ) -> tuple[int, list[str]]:
@@ -189,6 +201,9 @@ class _InMemoryPipeline:
 
     def zcard(self, key: str) -> _InMemoryPipeline:
         return self._queue("zcard", key)
+
+    def zremrangebyrank(self, key: str, start: int, end: int) -> _InMemoryPipeline:
+        return self._queue("zremrangebyrank", key, start, end)
 
     def expire(self, key: str, seconds: int) -> _InMemoryPipeline:
         return self._queue("expire", key, seconds)
