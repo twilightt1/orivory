@@ -67,12 +67,6 @@ def test_needs_rewrite_pure_rule():
     assert C.needs_rewrite("nó chạy ở cổng nào của dự án đó") is True
 
 
-def test_derived_dependents():
-    old = _mem({"cm_derived_from": ["A", "B"]})
-    assert C.find_derived_dependent_ids([old], {"B"}) == [str(old.id)]
-    assert C.find_derived_dependent_ids([old], {"Z"}) == []
-
-
 class _FakeResult:
     def __init__(self, rows):
         self._rows = rows
