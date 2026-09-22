@@ -441,8 +441,14 @@ def parse_generic(data: Any) -> list[ImportItem]:
     ``schema == "portable-ai-memory"``) or a JSON array of
     ``{title?, content, created_at?, url?, ref?, tags?}`` items — the shape
     any provider (or an OpenRecall sqlite dump, see docs) can be reduced to.
+    A dict that carries ``memories`` WITHOUT the schema marker is a PAM store
+    too (real exports ship ``memories`` + ``export_version``): parsing it as
+    one is what keeps such a payload from being handed to a provider adapter
+    that reads a different key and reports a successful ZERO-item import.
     """
-    if isinstance(data, dict) and data.get("schema") == "portable-ai-memory":
+    if isinstance(data, dict) and (
+        data.get("schema") == "portable-ai-memory" or "memories" in data
+    ):
         return _parse_pam(data)
     if not isinstance(data, list):
         raise ImportFormatError(
@@ -503,13 +509,33 @@ def detect_format(data: Any) -> str:
         if "session_id" in data and isinstance(data.get("entries"), list):
             return "openclaw"
         if "memories" in data and "export_version" in data:
-            return "gemini"
+            # A PAM memory store without the schema marker. It is NOT a gemini
+            # export: parse_gemini reads ``conversations`` and answered a
+            # successful import of ZERO memories.
+            return "generic"
         if "memory_entries" in data:
             return "openclaw"
         if "conversations" in data and "copilot" in str(data.keys()).lower():
             return "copilot"
-        if "memory_entries" in data:
-            return "openclaw"
+        conversations = data.get("conversations")
+        sample = conversations[0] if isinstance(conversations, list) and conversations else None
+        messages = sample.get("messages") if isinstance(sample, dict) else None
+        if isinstance(messages, list) and any(
+            isinstance(turn, dict) and str(turn.get("text") or "").strip() for turn in messages
+        ):
+            # Gemini Takeout: ``Gemini Conversations.json`` is
+            # ``{"conversations": [{title, created_date, messages}]}`` — a shape
+            # parse_gemini supports but nothing detected (it raised "could not
+            # detect the export format"). Keys off the first conversation like
+            # the array branch above; a Copilot export (``thread``) stays
+            # undetected, so it fails loudly instead of importing 0 items.
+            #
+            # A turn must CARRY text: ``messages: [{role, text}]`` is the
+            # documented shape and parse_gemini reads only ``text``. A payload
+            # whose turns carry other fields (``author``/``content.parts`` —
+            # the ChatGPT shape) parses to ZERO items, so detecting it would
+            # trade the loud "could not detect" for a successful empty import.
+            return "gemini"
     return "unknown"
 
 

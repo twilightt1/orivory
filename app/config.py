@@ -307,12 +307,15 @@ class Settings(BaseSettings):
 
     @property
     def is_production(self) -> bool:
-        return self.ENVIRONMENT.casefold() == "production"
+        return self.ENVIRONMENT.strip().casefold() == "production"
 
     @model_validator(mode="after")
     def validate_environment_settings(self):
-        self.ENVIRONMENT = self.ENVIRONMENT.casefold()
-        self.EVALUATOR_FAILURE_MODE = self.EVALUATOR_FAILURE_MODE.casefold()
+        # Normalize ONCE, here: `ENVIRONMENT='production '` (an operator typo)
+        # must not silently skip the whole production block — CORS, provider
+        # keys, the config-encryption key and the MinIO credentials.
+        self.ENVIRONMENT = self.ENVIRONMENT.strip().casefold()
+        self.EVALUATOR_FAILURE_MODE = self.EVALUATOR_FAILURE_MODE.strip().casefold()
         self._validate_ai_runtime_settings()
         if self.is_production:
             self._validate_production_settings()

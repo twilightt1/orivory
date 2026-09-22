@@ -315,7 +315,9 @@ async def test_interrupted_upgrade_resumes_and_keeps_the_existing_backup(v1_db):
     """
     eng, tmp_path = v1_db
     legacy = tmp_path / "v1.sqlite.pre-v2.bak"
-    legacy.write_bytes(b"pre-v2 backup from the interrupted run")
+    with sqlite3.connect(legacy) as conn:  # a REAL snapshot: the reuse path validates it
+        conn.execute("CREATE TABLE interrupted_run_marker (id INTEGER)")
+        conn.commit()
     async with eng.begin() as conn:
         await conn.run_sync(database._upgrade_v1_to_v2)  # the DDL of the partial run
         version, _ = await _schema(conn)
@@ -342,6 +344,60 @@ async def test_empty_existing_backup_still_refuses(v1_db):
     (tmp_path / "v1.sqlite.pre-v2.bak").write_bytes(b"")
     with pytest.raises(RuntimeError, match="empty or unreadable"):
         await database.bootstrap_sqlite()
+
+
+async def test_non_sqlite_existing_backup_refuses(v1_db):
+    """A non-empty file that is NOT a SQLite database is not a backup.
+
+    The reuse path exists for a crash between the snapshot and the version
+    stamp; accepting arbitrary bytes there means the destructive DDL runs with
+    no recoverable copy behind it. Fail loudly instead of reusing it.
+    """
+    eng, tmp_path = v1_db
+    bad = tmp_path / "v1.sqlite.pre-v2.bak"
+    bad.write_bytes(b"not a sqlite snapshot, just some interrupted-run bytes")
+
+    with pytest.raises(RuntimeError, match="not a valid SQLite database"):
+        await database.bootstrap_sqlite()
+
+    async with eng.connect() as conn:
+        version, _ = await _schema(conn)
+    assert version == 1, "the refusal must happen before any DDL or stamp"
+    assert bad.read_bytes() == b"not a sqlite snapshot, just some interrupted-run bytes"
+    assert not list(Path(tmp_path).glob("*.pre-p1b.bak"))
+
+
+async def test_a_valid_sqlite_backup_is_still_reused(v1_db):
+    """The resumable path is preserved: a real snapshot is reused, not rewritten."""
+    eng, tmp_path = v1_db
+    legacy = tmp_path / "v1.sqlite.pre-v2.bak"
+    with sqlite3.connect(legacy) as conn:
+        conn.execute("CREATE TABLE interrupted_run_marker (id INTEGER)")
+        conn.commit()
+    before = legacy.read_bytes()
+
+    await database.bootstrap_sqlite()
+
+    async with eng.connect() as conn:
+        version, _ = await _schema(conn)
+    milestone = tmp_path / "v1.sqlite.pre-p1b.bak"
+    assert version == 7
+    assert list(Path(tmp_path).glob("*.pre-p1b.bak")) == [milestone]
+    assert milestone.read_bytes() == before, "an existing valid backup is never overwritten"
+
+
+def test_a_hash_in_the_path_does_not_break_the_readonly_probe(tmp_path):
+    """Review nit: ``file:{path}?mode=ro`` — the path was interpolated RAW.
+
+    A ``#`` in the path starts the URI's fragment, so both the path and the
+    ``mode=ro`` query were lost: the probe opened a DIFFERENT (just-created,
+    empty) file and answered "valid" for a corrupt backup.
+    """
+    bad = tmp_path / "v1.sqlite#interrupted.pre-v2.bak"
+    bad.write_bytes(b"not a sqlite snapshot")
+
+    assert database._is_valid_sqlite_backup(str(bad)) is False
+    assert not (tmp_path / "v1.sqlite").exists(), "the path must not be truncated at '#'"
 
 
 # ── T5: the boot hook drains the outbox on a real v2 install ─────────────────

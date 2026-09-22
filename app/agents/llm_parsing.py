@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
 
 JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.IGNORECASE | re.DOTALL)
+#: The fence the prompts actually ask for. Tried FIRST: a transcript or a shell
+#: sample that happens to be fenced must not shadow the payload that follows it.
+JSON_LABELLED_FENCE_RE = re.compile(r"```json\s*(.*?)```", re.IGNORECASE | re.DOTALL)
 MAX_PREVIEW_CHARS = 240
 
 
@@ -42,6 +46,37 @@ def _extract_json_candidate(text: str) -> str:
     return stripped
 
 
+def _decoded_objects(text: str) -> Iterator[dict]:
+    """Every balanced ``{...}`` object in *text*, left to right."""
+    decoder = json.JSONDecoder()
+    index = 0
+    while (start := text.find("{", index)) != -1:
+        try:
+            value, end = decoder.raw_decode(text, start)
+        except json.JSONDecodeError:
+            index = start + 1
+            continue
+        if isinstance(value, dict):
+            yield value
+        index = max(end, start + 1)
+
+
+def _first_json_object(text: str) -> dict | None:
+    """The first JSON object that actually decodes to a NON-EMPTY dict.
+
+    A labelled ```json fence wins outright; otherwise the response is scanned
+    left to right. An empty object is only a last resort: a fenced ``{ }`` in
+    an example must not be mistaken for the payload the prompt asked for.
+    """
+    empty: dict | None = None
+    for source in (*JSON_LABELLED_FENCE_RE.findall(text), text):
+        for value in _decoded_objects(source):
+            if value:
+                return value
+            empty = value
+    return empty
+
+
 def parse_llm_json_object(raw: object) -> LLMJsonParseResult:
     preview = raw_preview(raw)
     if raw is None:
@@ -51,16 +86,19 @@ def parse_llm_json_object(raw: object) -> LLMJsonParseResult:
     if not text:
         return LLMJsonParseResult(data=None, error="empty_response", raw_preview=preview)
 
+    parsed_object = _first_json_object(text)
+    if parsed_object is not None:
+        return LLMJsonParseResult(data=parsed_object, error=None, raw_preview=preview)
+
+    # Nothing decodable: report the FIRST candidate's decode error, so the
+    # message stays as specific as it was before (invalid_json: <reason>).
     candidate = _extract_json_candidate(text)
     try:
-        parsed = json.loads(candidate)
+        json.loads(candidate)
     except json.JSONDecodeError as exc:
         return LLMJsonParseResult(data=None, error=f"invalid_json: {exc.msg}", raw_preview=preview)
 
-    if not isinstance(parsed, dict):
-        return LLMJsonParseResult(data=None, error="json_not_object", raw_preview=preview)
-
-    return LLMJsonParseResult(data=parsed, error=None, raw_preview=preview)
+    return LLMJsonParseResult(data=None, error="json_not_object", raw_preview=preview)
 
 
 def coerce_bool(value: object, default: bool) -> bool:

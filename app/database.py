@@ -7,6 +7,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from functools import lru_cache
+from urllib.parse import quote
 
 from sqlalchemy import event, insert, select, text, update
 from sqlalchemy import inspect as sa_inspect
@@ -124,18 +125,44 @@ def _upgradable_v1_schema(sync_conn) -> bool:
     return True
 
 
+def _is_valid_sqlite_backup(path: str) -> bool:
+    """True when *path* opens as a SQLite database whose quick_check says ok."""
+    try:
+        # The path is percent-escaped: interpolated raw, a '?' or '#' in it is
+        # read as the URI's query/fragment marker, so 'mode=ro' vanishes and
+        # the probe opens a DIFFERENT (just-created, empty) file and answers
+        # "valid" for a corrupt backup.
+        conn = sqlite3.connect(f"file:{quote(path)}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return False
+    try:
+        return conn.execute("PRAGMA quick_check").fetchone() == ("ok",)
+    except sqlite3.DatabaseError:
+        return False
+    finally:
+        conn.close()
+
+
 def _backup_before_ddl(db_path: str, suffix: str = "pre-v2") -> str:
     """Consistent pre-DDL backup (VACUUM INTO includes committed WAL frames).
 
     Resumable: a crash between the backup and the version stamp leaves a
     complete backup behind, so a later attempt reuses it instead of refusing
     (the ladder is idempotent and safe to re-run). Only an empty or unreadable
-    backup file is an error — never silently reuse a truncated one.
+    backup file is an error — never silently reuse a truncated one — and the
+    file must still BE a SQLite database (quick_check ok): reusing arbitrary
+    non-empty bytes would run the destructive DDL with no recoverable copy.
     """
     dest = f"{db_path}.{suffix}.bak"
     if os.path.exists(dest):
         if os.path.getsize(dest) == 0 or not os.access(dest, os.R_OK):
             raise RuntimeError(f"existing migration backup {dest} is empty or unreadable")
+        if not _is_valid_sqlite_backup(dest):
+            raise RuntimeError(
+                f"existing migration backup {dest} is not a valid SQLite database "
+                "(PRAGMA quick_check failed): remove it and re-run the upgrade so a "
+                "fresh snapshot can be taken"
+            )
         log.warning("reusing pre-migration backup %s from an interrupted upgrade", dest)
         return dest
     size = os.path.getsize(db_path)

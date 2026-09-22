@@ -212,6 +212,23 @@ async def test_run_import_rejects_undetectable_format():
                          requested_by="rest_api")
 
 
+async def test_run_import_rejects_the_gemini_lookalike():
+    """id 348 follow-up: this shape detected as gemini and returned parsed=0.
+
+    Its ``messages`` carry ChatGPT's fields (``author``/``content.parts``), not
+    the documented ``{role, text}``: the adapter parsed every conversation to
+    nothing, so the import "succeeded" with ZERO memories where the base code
+    raised. Loud again.
+    """
+    payload = {"conversations": [{"title": "Idea", "messages": [
+        {"author": "user", "content": {"parts": ["brainstorm"]}},
+    ]}]}
+
+    with pytest.raises(ImportFormatError, match=r"could not detect"):
+        await run_import(_FakeDB(), uuid.uuid4(), _payload_bytes(payload), None,
+                         requested_by="rest_api")
+
+
 async def test_run_import_empty_parse_creates_nothing(indexed):
     """Empty parse result → created=0, no commit, no error (brief's empty rule)."""
     db = _FakeDB()

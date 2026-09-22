@@ -177,6 +177,28 @@ async def test_multiworker_local_refuses_boot(local, monkeypatch):
             pass
 
 
+async def test_uvicorn_reload_false_spellings_are_not_a_second_process(local, monkeypatch):
+    """``UVICORN_RELOAD`` is uvicorn's env fallback for the click flag.
+
+    click parses 'false'/'0'/'no'/'off'/'f'/'n'/'' as False (and '1'/'true'/
+    't'/'yes'/'y'/'on' as True), so the false spellings are ONE process: the
+    local-Qdrant boot must not be refused for them.
+    """
+    monkeypatch.delenv("WEB_CONCURRENCY", raising=False)
+    monkeypatch.delenv("UVICORN_WORKERS", raising=False)
+    monkeypatch.setattr(sys, "argv", ["app.main:app"])
+
+    for spelling in ("false", "0", "no", "off", "FALSE", " False ", "f", "n", ""):
+        monkeypatch.setenv("UVICORN_RELOAD", spelling)
+        main._refuse_multi_owner_local_qdrant()  # one process: fine
+
+    for spelling in ("true", "1", "yes", "t", "y", "on", " TRUE "):
+        monkeypatch.setenv("UVICORN_RELOAD", spelling)
+        with pytest.raises(RuntimeError, match="QDRANT_MODE=local"):
+            main._refuse_multi_owner_local_qdrant()
+
+
+
 def test_server_mode_allows_workers(monkeypatch):
     monkeypatch.setattr(settings, "QDRANT_MODE", "server")
     monkeypatch.setenv("WEB_CONCURRENCY", "4")
