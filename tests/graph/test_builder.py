@@ -10,7 +10,7 @@ from __future__ import annotations
 import sqlite3
 import uuid
 
-from sqlalchemy import func, select
+from sqlalchemy import event, func, select
 
 from app.graph.builder import build_memory_graph_sync
 from app.models.entity import Entity, MemoryEntity
@@ -225,3 +225,54 @@ def test_a_wrong_typed_relations_payload_leaves_the_memory_rebuildable(graph_sto
     assert not metadata.get("graph_extracted_at"), (
         "a failed extraction must not be stamped as processed: nothing would rebuild it"
     )
+
+
+def test_the_processed_marker_is_merged_after_the_graph_work_is_committed(graph_store, monkeypatch):
+    """R28: the marker merge must not ride the transaction that wrote the graph.
+
+    That transaction opened (and so fixed its snapshot) before the provider
+    round trips, so merging ``graph_extracted_at`` from the metadata the build
+    had READ wrote the pre-marker value over the top of whatever landed while
+    the extraction ran: the memory read back as ``current`` after a supersede.
+    Measured on the real write path: 19 wrong states in 500 correction rounds,
+    audit order rival-marker-then-merge. The merge is now ONE statement
+    (``json_set``/``json_remove``) over the row as it is AT THE STATEMENT, in a
+    transaction opened after the graph rows are already visible to everyone.
+    """
+    successor_id = uuid.uuid4()
+    rival_writes: list[str] = []
+
+    @event.listens_for(graph_store.engine, "before_cursor_execute")
+    def _land_a_rival_marker(conn, cursor, statement, parameters, context, executemany):
+        if rival_writes or "UPDATE memories" not in statement:
+            return
+        rival = sqlite3.connect(graph_store.path, timeout=0.5)
+        try:
+            rival.execute(
+                "UPDATE memories SET metadata = json_set(COALESCE(metadata, '{}'),"
+                " '$.cm_superseded_by', ?) WHERE id = ?",
+                (str(successor_id), graph_store.memory_id_hex),
+            )
+            rival.commit()
+            rival_writes.append("landed")
+        except sqlite3.OperationalError as exc:
+            rival_writes.append(f"blocked: {exc}")
+        finally:
+            rival.close()
+
+    stub_llm(monkeypatch, [PAIR_PAYLOAD, RELATION_PAYLOAD])
+
+    with graph_store.maker() as session:
+        result = build_memory_graph_sync(session, str(graph_store.memory_id))
+
+    assert result.entities_created == 2
+    assert rival_writes == ["landed"], (
+        "the build's own write transaction blocked a concurrent writer: the marker "
+        f"merge must not ride the graph transaction ({rival_writes})"
+    )
+    metadata = _memory_metadata(graph_store, graph_store.memory_id)
+    assert metadata.get("cm_superseded_by") == str(successor_id), (
+        "the processed marker overwrote the marker another writer landed while the build ran"
+    )
+    assert metadata.get("graph_extracted_at"), "the build must still stamp itself processed"
+

@@ -11,7 +11,7 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
@@ -91,10 +91,17 @@ async def build_memory_graph(
 
     relation_stats = await _persist_relations_async(db, memory, relation_result.relations, entity_by_key)
 
-    # R27(p2): merge the processed marker into a FRESH read — same reason as
-    # the sync face below (a concurrent supersede must not be clobbered).
-    await db.refresh(memory, ["extra_metadata"])
-    _mark_processed(memory, entity_result, relation_result)
+    # R28: commit the graph work, then merge the processed marker with ONE
+    # statement the DATABASE evaluates — see ``_processed_marker_update`` for
+    # why the merge must not carry a metadata value read in Python.
+    await db.commit()
+    await db.execute(
+        _processed_marker_update(memory.id, entity_result, relation_result)
+        .execution_options(synchronize_session=False)
+    )
+    # The write happened in SQL: drop the in-session copy so a caller that reads
+    # ``memory.extra_metadata`` back sees the row, not the pre-merge snapshot.
+    db.expire(memory, ["extra_metadata"])
     await db.commit()
 
     return GraphBuildResult(
@@ -177,14 +184,13 @@ def build_memory_graph_sync(
 
     relation_stats = _persist_relations_sync(db, memory, relation_result.relations, entity_by_key)
 
-    # R27(p2): the write path no longer serializes this build against later
-    # writes to the SAME row, so the processed marker is merged into a FRESH
-    # read of the metadata: the snapshot loaded at extraction time would
-    # clobber a ``cm_*`` marker (a supersede) that landed while the extraction
-    # ran. Residual window = this SELECT->COMMIT span; a per-row lock is the
-    # upgrade if that ever matters.
-    db.refresh(memory, ["extra_metadata"])
-    _mark_processed(memory, entity_result, relation_result)
+    # R28: same contract as the async face above.
+    db.commit()
+    db.execute(
+        _processed_marker_update(memory.id, entity_result, relation_result)
+        .execution_options(synchronize_session=False)
+    )
+    db.expire(memory, ["extra_metadata"])
     db.commit()
 
     return GraphBuildResult(
@@ -492,35 +498,49 @@ def _merge_relation_metadata(existing: dict | None, extracted: ExtractedRelation
     return metadata
 
 
-def _mark_processed(memory: Memory, entity_result, relation_result) -> None:
-    # Metadata-only write, and it runs AFTER the memory's index intent has
-    # been drained: bumping ``revision``/enqueuing here would loop
-    # drain -> upsert -> graph -> enqueue forever. Leave both untouched.
-    metadata = dict(memory.extra_metadata or {})
-    # Decided HERE, not at the two call sites: a contract-breaking payload from
-    # EITHER leg is not a finished extraction (ids 363 and its relations
-    # sibling), and a third caller must not be able to stamp one as processed.
-    complete = not (entity_result.schema_error or relation_result.schema_error)
-    if complete:
-        metadata[GRAPH_EXTRACTED_AT_KEY] = datetime.now(UTC).isoformat()
+def _processed_marker_update(memory_id, entity_result, relation_result):
+    """The processed marker as ONE statement the DATABASE evaluates.
+
+    The marker used to be merged in Python, from the metadata this build had
+    READ, and that read is a snapshot: a ``cm_*`` marker (a supersede) written
+    by another writer between the read and the flush was silently overwritten —
+    the memory then read back as ``current`` after a supersede. Measured on the
+    real write path (MCP add/correct round trips): 19 wrong states in 500
+    rounds, and the write audit shows the losing order — rival marker first,
+    this merge second, carrying the pre-marker value. ``json_set``/``json_remove``
+    read the row AT THE STATEMENT, so there is no such window: the merge either
+    sees the marker or the later writer (which writes its own metadata) drops
+    the graph keys, which only costs a rebuild.
+
+    Metadata-only write, and it runs AFTER the memory's index intent has been
+    drained: bumping ``revision``/enqueuing here would loop drain -> upsert ->
+    graph -> enqueue forever. Leave both untouched.
+    """
+    value = func.coalesce(Memory.extra_metadata, "{}")
+    if entity_result.schema_error or relation_result.schema_error:
+        # Decided HERE, not at the two call sites: a contract-breaking payload
+        # from EITHER leg is not a finished extraction (ids 363 and its
+        # relations sibling), and a third caller must not be able to stamp one
+        # as processed. No sticky marker, so the next build retries instead of
+        # leaving the memory graph-less forever (``_already_processed`` skips
+        # every later build unless forced). A provider outage does not land
+        # here — the deterministic fallback IS the product on a key-less
+        # install.
+        value = func.json_remove(value, f"$.{GRAPH_EXTRACTED_AT_KEY}")
     else:
-        # A contract-breaking payload is not a finished extraction: no sticky
-        # marker, so the next build retries instead of leaving the memory
-        # graph-less forever (``_already_processed`` skips every later build
-        # unless forced). A provider outage does not land here — the
-        # deterministic fallback IS the product on a key-less install.
-        metadata.pop(GRAPH_EXTRACTED_AT_KEY, None)
-    metadata["graph_entity_count"] = len(entity_result.entities)
-    metadata["graph_relation_count"] = len(relation_result.relations)
-    metadata["graph_extraction_fallback_used"] = bool(
-        entity_result.fallback_used or relation_result.fallback_used
+        value = func.json_set(value, f"$.{GRAPH_EXTRACTED_AT_KEY}", datetime.now(UTC).isoformat())
+    value = func.json_set(value, "$.graph_entity_count", len(entity_result.entities))
+    value = func.json_set(value, "$.graph_relation_count", len(relation_result.relations))
+    fallback = entity_result.fallback_used or relation_result.fallback_used
+    value = func.json_set(
+        value, "$.graph_extraction_fallback_used", func.json("true" if fallback else "false")
     )
-    if entity_result.error:
-        metadata["graph_entity_error"] = entity_result.error[:500]
-    else:
-        metadata.pop("graph_entity_error", None)
-    if relation_result.error:
-        metadata["graph_relation_error"] = relation_result.error[:500]
-    else:
-        metadata.pop("graph_relation_error", None)
-    memory.extra_metadata = metadata
+    for key, error in (
+        ("graph_entity_error", entity_result.error),
+        ("graph_relation_error", relation_result.error),
+    ):
+        if error:
+            value = func.json_set(value, f"$.{key}", error[:500])
+        else:
+            value = func.json_remove(value, f"$.{key}")
+    return update(Memory).where(Memory.id == memory_id).values(extra_metadata=value)
