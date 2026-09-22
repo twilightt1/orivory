@@ -259,14 +259,18 @@ helpers and has no caller left in the tree.
   Uploads go to the filesystem (`STORAGE_BACKEND=fs`) and vectors into the
   embedded Qdrant folder — all of it under `/data` in the container.
 - **The ladder.** `bootstrap_sqlite()` runs in the app lifespan, before any
-  traffic: a versioned ladder (v1 .. v7) upgrades an older file step by step and
+  traffic: a versioned ladder (v1 .. v8) upgrades an older file step by step and
   takes a `<db>.pre-pN.bak` milestone snapshot as it goes (never overwritten). A
   file NEWER than the code is refused rather than repaired
   (`unsupported SQLite schema version N; expected M`). What the steps added: v2
   the durable `index_outbox` / `index_generations` / `memory_suppressions`
   tables; v4 the FTS5 lexical index + its triggers; v5 `memories.namespace` +
   its index (P4a); v6 `memory_suppressions.namespace` and `content_hash`; v7
-  `users.retention_enabled` / `retention_days`.
+  `users.retention_enabled` / `retention_days`; v8
+  `ix_index_outbox_kind_tenant_status` — the freshness barrier counts one
+  tenant's pending `kind='memory'` intents on every poll, and the outbox is
+  never pruned, so without the index each count was a full scan
+  (`kind, tenant_id, status`).
 - **One process owns the vectors.** `QDRANT_MODE=local` (the default) refuses to
   boot when the launcher asked for more than one process — an embedded storage
   folder is exclusive.

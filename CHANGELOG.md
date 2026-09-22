@@ -49,6 +49,31 @@ single local owner (`LOCAL_OWNER_EMAIL`), and the agent tokens (`memory:read` /
   `app/ingestion/base.py` + `app/ingestion/types.py` (+ their re-exports),
   `eval/live_api_eval.py` + `tests/eval/test_live_api_eval.py`, `notebooks/`.
 
+### Fixed
+- **Lite-path correctness** (#66): config values are matched
+  case- and whitespace-insensitively; `UVICORN_RELOAD` is read as the boolean it
+  is; a corrupted SQLite backup is refused instead of restored (`quick_check` on
+  a read-only, properly quoted URI); a fenced/annotated LLM answer still yields
+  its JSON payload; a contract-breaking `entities` or `relations` payload is a
+  visible schema error instead of a silently empty graph that is never rebuilt;
+  entity identity resolves deterministically (oldest row wins) and a same-name
+  insert converges on the existing row; a failed document write no longer leaves
+  the session in `PendingRollbackError`; import detection covers the generic/PAM
+  and gemini exports (a gemini file no longer imports as an empty success).
+- **Recall freshness and embeddings** (#67): the freshness timeout is typed end
+  to end (REST answers `503 {"error": "index_freshness_timeout"}`), the drain no
+  longer starves another tenant's intents, the rate limiter feeds one contract,
+  and the local embedding singletons are race-free. The schema ladder gains v8
+  (`ix_index_outbox_kind_tenant_status`), the index the barrier's per-poll count
+  needs.
+- **A supersede stays a supersede** (#66, `bf73741`): the graph build merged its
+  processed marker from metadata it had read before the extraction, so a
+  `cm_superseded_by` written while the build ran was overwritten by the
+  pre-marker value and the memory read back as `current`. The merge is now one
+  statement the database evaluates over the row as it is, in a transaction
+  opened after the graph work commits — measured 0 wrong states in 600 rounds of
+  a stress probe over the real write path (was 19 in 500).
+
 ## [Unreleased] — Correctable Memory V1 (2026-09-12)
 
 ### Added
