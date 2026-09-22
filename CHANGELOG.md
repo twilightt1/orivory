@@ -78,6 +78,18 @@ single local owner (`LOCAL_OWNER_EMAIL`), and the agent tokens (`memory:read` /
   statement the database evaluates over the row as it is, in a transaction
   opened after the graph work commits — measured 0 wrong states in 600 rounds of
   a stress probe over the real write path (was 19 in 500).
+- **The outbox drain asks the store one question per claim, not one per row**
+  (#62): every intent re-ran the collection-contract guard — two store round
+  trips (``count`` + collection info) that answer the same thing for all fifty
+  rows of a claim, 0.11 s of it measured on the real store. The guard now runs
+  once per claim, inside the first row's own write, so a contract mismatch is
+  still that row's error and never a batch-level one. Warm local run of the
+  signed recall-alone RYW gate: 1.163 s → 1.015 s for 50 × 864-char notes; the
+  signed 2.0 s budget is untouched. Batching the claim's EMBEDDINGS was
+  measured and rejected: one ONNX call for all fifty documents starves the
+  event loop's thread for the length of that call and the signed 30 ms
+  heartbeat gate failed 6/6 runs at 57-79 ms (per-row embedding keeps its
+  develop band, 22-25 ms). The lag contract wins.
 
 ## [Unreleased] — Correctable Memory V1 (2026-09-12)
 
