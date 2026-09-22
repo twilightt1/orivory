@@ -4,7 +4,7 @@
 
 | Muốn gì | Chạy gì |
 |---|---|
-| Offline eval, deterministic, CI-safe | `python eval/run_eval.py --mode offline` |
+| Offline eval, deterministic, CI-safe | `python eval/run_eval.py --mode offline` (the only lane) |
 | Benchmark LongMemEval-S / MemoryAgentBench | `python eval/run_benchmark.py --benchmark longmemeval_s --dataset <json> --output-dir <dir> --phase plan` → `ingest` → `query` → `score` |
 | Resume run dài bị ngắt (rate limit) | `python eval/resume_system_run.py` (system) · `eval/complete_mapreduce_run.py` (map-reduce, FROZEN — run completed, do not extend) |
 
@@ -17,21 +17,20 @@ mở rộng 4 entrypoint trên.
 This directory contains evaluation tooling for the Orivory RAG demo.
 
 - **Offline mode** is deterministic and CI-safe. It uses `sample_docs/` directly
-  and does not require the API server, database, Qdrant, Redis, MinIO, or LLM
+  and does not require the API server, a database, the vector store, or LLM
   keys.
-- **Live API mode** is opt-in. It exercises the running backend API, document
-  upload/ingestion, SSE chat streaming, returned sources, and agent trace data.
+- **Live API mode** is gone — it drove the chat surface (`/api/v1/chat/*`),
+  which was removed with the full-stack product. `eval/live_api_eval.py` and
+  its tests were deleted with it; the offline lane is the whole harness.
 
 ## Components
 
 | File | Purpose |
 |---|---|
-| `Orivory_eval_dataset.json` | Golden dataset of questions, expected sources, keywords, and fallback expectations. |
+| `orivory_eval_dataset.json` | Golden dataset of questions, expected sources, keywords, and fallback expectations. |
 | `metrics.py` | Deterministic metric helpers for source hit, keyword coverage, citations, fallback accuracy, and summaries. |
 | `reporting.py` | Markdown and JSON report generation helpers. |
-| `run_eval.py` | CLI entrypoint for offline and live API evaluation modes. |
-| `live_api_eval.py` | Live API evaluator, SSE parser, response collector, and live scoring helpers. |
-| `Orivory_offline_eval.py` | Lightweight keyword sanity check used by `run_eval.py --mode offline`. |
+| `run_eval.py` | CLI entrypoint for the offline evaluation lane. |
 | `ablation_mean_vs_cls.py` | NOT an eval entrypoint: the P1b mean-vs-CLS ablation (both pooling contracts on one corpus, one embedded Qdrant) whose committed `ablation_mean_vs_cls.json` is the cutover's evidence artifact. Evidence only — never a gate; SKIPs without the arctic ONNX cache. |
 
 ## Benchmarks
@@ -43,7 +42,7 @@ hygiene rules, and per-phase usage: `eval/benchmarks/README.md`.
 
 ## Dataset Schema
 
-Each item in `Orivory_eval_dataset.json` uses this shape:
+Each item in `orivory_eval_dataset.json` uses this shape:
 
 ```json
 {
@@ -97,79 +96,26 @@ python eval/run_eval.py \
 
 If a threshold is not met, the command exits non-zero.
 
-## Live API Evaluation
-
-> **Not runnable.** This mode drives the chat API (`/api/v1/chat/*`), which was
-> deleted with the full-stack surface — it fails at the first request whatever
-> credentials you pass. Kept here only until it is removed/rewritten with the
-> docs wave; use `--mode offline` (the default lane).
-
-Live mode requires the full application path to be running:
-
-1. Postgres, Redis, Qdrant, and MinIO
-2. database migrations
-3. FastAPI server
-4. Celery ingestion worker
-5. a verified/onboarded user or a valid access token
-6. provider keys required by ingestion/chat, such as OpenAI, OpenRouter, and Jina
-
-Example using an agent token (there is no account login any more — mint one
-with `POST /api/v1/agents`; the value is shown once):
-
-```bash
-python eval/run_eval.py --mode live-api \
-  --api-base-url http://localhost:8000 \
-  --access-token "$ORIVORY_AGENT_TOKEN" \
-  --sample-docs sample_docs \
-  --output-dir eval/results
-```
-
-Example using an existing bearer token:
-
-```bash
-python eval/run_eval.py --mode live-api \
-  --api-base-url http://localhost:8000 \
-  --access-token "$ACCESS_TOKEN" \
-  --sample-docs sample_docs \
-  --output-dir eval/results
-```
-
-The live API runner writes:
-
-- `eval/results/live_api_report.md`
-- `eval/results/live_api_report.json`
-
-Live mode uploads markdown documents from `sample_docs/`, waits until ingestion
-marks them `ready`, sends each dataset query to the SSE chat endpoint, aggregates
-streamed tokens, sources, trace, and done metadata, then generates the report.
-
-## Testing Metric and Live-helper Logic
+## Testing Metric Logic
 
 ```bash
 python -m pytest --confcutdir=tests/eval \
   tests/eval/test_eval_metrics.py \
-  tests/eval/test_live_api_eval.py \
   -q
 ```
 
-These tests do not call a running API; they validate parser, collector, scoring,
-and metric behavior.
+These tests do not call a running API; they validate scoring and metric
+behavior.
 
 ## Continuous Evaluation Strategy
 
 ### 1. Offline Evaluation in CI
 
-The default CI runs deterministic metric tests, live-helper unit tests, and an
-offline smoke evaluation. This gives fast regression coverage without
-infrastructure or secrets.
+The default CI runs deterministic metric tests and an offline smoke evaluation
+(`python eval/run_eval.py --mode offline --output-dir eval/results --top-k 5`).
+This gives fast regression coverage without infrastructure or secrets.
 
-### 2. Live/API Evaluation Manually or in a Separate Workflow
-
-Keep live API evaluation separate from default CI because it depends on service
-startup, Celery, API keys, and LLM latency. It is suitable for pre-demo checks,
-staging smoke tests, or a manually triggered workflow.
-
-### 3. Dataset Expansion
+### 2. Dataset Expansion
 
 When a real query fails or produces weak citations, add it to the dataset with:
 

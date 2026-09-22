@@ -23,7 +23,7 @@ scale, with a stand-in reranker and index-global BM25 statistics, never a
 production claim (read the artifact's `limitations`).
 
 **Where.**
-- Lexical leg (memory): [`app/retrieval/memory/lexical_index.py`](../app/retrieval/memory/lexical_index.py) — SQLite FTS5 (`memory_fts`, created by the schema ladder's v4 step; triggers maintain it in the writing transaction). SQLite-only by ruling R3: a Postgres deployment has NO lexical leg, and a vector outage there keeps the typed 503.
+- Lexical leg (memory): [`app/retrieval/memory/lexical_index.py`](../app/retrieval/memory/lexical_index.py) — SQLite FTS5 (`memory_fts`, created by the schema ladder's v4 step; triggers maintain it in the writing transaction). Where no lexical leg exists, a vector outage keeps the typed 503.
 - Dense leg: [`app/retrieval/memory/vector_store.py`](../app/retrieval/memory/vector_store.py)
 - Fusion: [`app/retrieval/hybrid_retriever.py`](../app/retrieval/hybrid_retriever.py) — `fuse_by_uuid` (UUID-keyed, zero-based ranks); the legacy `reciprocal_rank_fusion` dedupes by parent/content and is **not** used for memory.
 - The document/BM25 path ([`app/retrieval/bm25_retriever.py`](../app/retrieval/bm25_retriever.py), Redis parent cache) is a separate legacy leg, not the memory recall's.
@@ -161,19 +161,14 @@ measures the STAGE with a local stand-in scorer, never Jina's quality.
 ## 6. LLM-as-judge hallucination detection — removed with the LangGraph agents
 
 The `hallucination_agent` and the graph node that re-entered the answer node on
-a flagged answer are gone with the LangGraph chat workflow: `app/agents/` now
-holds only `app/agents/llm_client.py`, `app/agents/llm_parsing.py`,
-`app/agents/routing.py` and `app/agents/state.py`, and
-[`app/api/v1/chat.py`](../app/api/v1/chat.py) marks it removed
-(`rag_graph = None`; the endpoints that need the graph answer with an error).
+a flagged answer are gone with the LangGraph chat workflow (`app/api/v1/chat.py`
+went with the full-stack surface; the deleted modules are in git history):
+`app/agents/` now holds only `app/agents/llm_client.py`,
+`app/agents/llm_parsing.py`, `app/agents/routing.py` and `app/agents/state.py`.
 What survives:
 
 - the OFFLINE judge — [`eval/llm_judge.py`](../eval/llm_judge.py) scores
-  answers (faithfulness, relevancy, context precision) in eval runs;
-- [`app/services/quality_service.py`](../app/services/quality_service.py)
-  aggregates a recorded assistant `agent_trace`'s `hallucination`/`grounded`
-  verdict into the admin quality-trend metrics — but no shipped serving path
-  writes those keys today.
+  answers (faithfulness, relevancy, context precision) in eval runs.
 
 ---
 
@@ -186,12 +181,9 @@ decision helpers it used survive in
 `route_after_grade_docs`, `route_after_grade_gen`, the retry /
 `record_*_retry_limit` edge names), and `AgentState`
 ([`app/agents/state.py`](../app/agents/state.py)) still carries the fields —
-but nothing in the shipped app imports them.
-
-**Metric.** "Correction rate" (`self_correction_rate` in
-[`app/services/quality_service.py`](../app/services/quality_service.py)) is
-computed from recorded assistant `agent_trace` blobs, not from a live
-correction loop.
+but nothing calls them: `routing.py` has no importer in the tree, and
+`AgentState` appears only as a `TYPE_CHECKING` annotation
+([`app/retrieval/hyde_agent.py`](../app/retrieval/hyde_agent.py)).
 
 ---
 

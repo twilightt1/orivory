@@ -59,8 +59,8 @@ in SQLite — so restore both or re-run `cutover`.
 ## Caches
 
 `InMemoryRedis` is process-local: restarting the container drops caches,
-refresh tokens and rate-limit windows. Nothing to back up; lost refresh tokens
-only mean users log in again.
+rate-limit windows and the query cache. Nothing to back up — they are rebuilt
+on the next request.
 
 ## Safe Restore Order
 
@@ -68,9 +68,10 @@ only mean users log in again.
 2. Restore the `/data` archive (database + uploads + Qdrant together).
 3. Start the app — the schema ladder upgrades an older database on boot.
 4. Check `/ready`.
-5. Run an offline or live API eval smoke.
+5. Run the offline eval smoke: `python eval/run_eval.py --mode offline
+   --output-dir eval/results --top-k 5`.
 
-## P1b cutover backups (SQLite)
+## The migration CLI's own backups
 
 The Qdrant cutover has its own offline tooling — see
 [ROLLBACK_P1B.md](ROLLBACK_P1B.md):

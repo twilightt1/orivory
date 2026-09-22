@@ -3,12 +3,12 @@
 # ── Lite mode (one container, zero external services) ────────────────────────
 
 lite-build:
-	docker build -f Dockerfile.lite -t ghcr.io/twilightt1/orivory:lite .
+	docker build -t ghcr.io/twilightt1/orivory:lite .
 
 # The whole memory hub in one container: API + MCP server, SQLite, in-process
 # Qdrant, in-memory caches, filesystem uploads. No Postgres/Redis/MinIO/Qdrant server.
 lite-run:
-	docker run -d --name orivory-lite -p 8000:8000 -v orivory-data:/data \
+	docker run -d --name orivory-lite -p 127.0.0.1:8000:8000 -v orivory-data:/data \
 		-e OPENAI_API_KEY=$${OPENAI_API_KEY:-} ghcr.io/twilightt1/orivory:lite
 
 # One command from clone to running hub (builds first if no image yet).

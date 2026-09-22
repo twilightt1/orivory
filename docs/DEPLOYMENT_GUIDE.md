@@ -61,10 +61,14 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml config --quiet
 ## Build Image
 
 ```bash
-docker build -t Orivory-api:latest .
+docker build -t ghcr.io/twilightt1/orivory:lite .
 ```
 
-The [Dockerfile](../Dockerfile) runs the app as a non-root user and defaults to a production `uvicorn` command. Development Compose can still override this with `--reload`.
+The [Dockerfile](../Dockerfile) is the only Dockerfile: it carries the lite
+defaults (`DATABASE_URL` on `/data/orivory.db`, `QDRANT_MODE=local`,
+`STORAGE_BACKEND=fs`), runs the app as the non-root `app` user, declares
+`VOLUME /data`, and ships a `HEALTHCHECK` against `/health`. Development
+Compose can override the command with `--reload`.
 
 ## Start Production-like Stack
 
@@ -102,17 +106,10 @@ curl -fsS http://localhost:8000/ready
 
 `/ready` returns HTTP 503 when any dependency is degraded.
 
-For authenticated operational checks, use the admin diagnostics endpoint:
-
-```bash
-curl -fsS -H "Authorization: Bearer $ADMIN_ACCESS_TOKEN" \
-  http://localhost:8000/api/v1/admin/diagnostics
-```
-
-Diagnostics includes dependency readiness, ingestion status and the
-`index_outbox` summary (pending / done / blocked intents — see
-[OPERATIONS_RUNBOOK.md](OPERATIONS_RUNBOOK.md#background-indexing-p3)), but it
-must remain admin-only.
+There is no admin API: the install has one identity, and the REST surface it
+serves is the whole surface. Operational state comes from `/ready`, the
+container logs and the SQLite file itself — see
+[OPERATIONS_RUNBOOK.md](OPERATIONS_RUNBOOK.md).
 
 ## Reverse Proxy Notes
 
@@ -133,10 +130,14 @@ server {
     proxy_set_header X-Forwarded-Proto https;
   }
 
-  location /api/v1/chat/ {
+  # The MCP endpoint streams: disable buffering, and preserve Host
+  # (the hub answers a non-localhost Host with 421 unless
+  # MCP_HUB_ALLOWED_HOSTS names yours).
+  location /mcp {
     proxy_pass http://127.0.0.1:8000;
     proxy_buffering off;
     proxy_cache off;
+    proxy_set_header Host $host;
   }
 }
 ```
@@ -156,20 +157,11 @@ Run:
 ```bash
 curl -fsS http://localhost:8000/health
 curl -fsS http://localhost:8000/ready
-curl -fsS -H "Authorization: Bearer $ADMIN_ACCESS_TOKEN" \
-  http://localhost:8000/api/v1/admin/diagnostics
 python eval/run_eval.py --mode offline --output-dir eval/results --top-k 5
 ```
 
-If a test user and provider keys are available, run live API eval:
-
-```bash
-python eval/run_eval.py --mode live-api \
-  --api-base-url http://localhost:8000 \
-  --access-token "$ACCESS_TOKEN" \
-  --sample-docs sample_docs \
-  --output-dir eval/results
-```
+The offline eval lane is the only one (`--mode offline`); it needs no server,
+no keys and no database.
 
 ## Stop Stack
 

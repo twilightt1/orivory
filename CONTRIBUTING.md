@@ -36,10 +36,10 @@ git checkout -b feature/your-feature-name
 # ... write code ...
 
 # 5. Run tests
-pytest tests/ -v
+python -m pytest tests -q --ignore=tests/integration
 
 # 6. Run linting
-ruff check app/ tests/
+python -m ruff check app tests eval scripts
 
 # 7. Commit with clear messages
 git commit -m "feat: add new feature"
@@ -54,9 +54,8 @@ git push origin feature/your-feature-name
 
 ### Prerequisites
 
-- Python 3.12+
+- Python 3.13 (see `.python-version`)
 - Docker & Docker Compose
-- PostgreSQL 15+, Redis 7+
 
 ### Quick Start
 
@@ -64,9 +63,6 @@ git push origin feature/your-feature-name
 # Clone repository
 git clone https://github.com/twilightt1/orivory.git
 cd orivory
-
-# Start infrastructure
-docker compose up -d
 
 # Create virtual environment
 python -m venv .venv
@@ -76,24 +72,26 @@ source .venv/bin/activate  # Linux/Mac
 # Install dependencies
 pip install -r requirements.txt -r requirements-dev.txt
 
-# Run migrations
-alembic upgrade head
-
-# Start development server
+# Start development server — no services to start first: the SQLite schema
+# ladder and the embedded Qdrant folder are created on boot; durable state
+# lands in the path DATABASE_URL / QDRANT_LOCAL_PATH point at.
 uvicorn app.main:app --reload
 ```
+
+`docker compose up -d` is the same product containerised (one service, `app`);
+`make quickstart` builds and runs it.
 
 ### Running Tests
 
 ```bash
-# Run all tests
-pytest tests/ -v
+# The CI-safe suite (skips the live-stack integration modules)
+python -m pytest tests -q --ignore=tests/integration
 
 # Run specific test file
-pytest tests/api/test_auth.py -v
+python -m pytest tests/api/test_memories_router.py -q
 
-# Run with coverage
-pytest tests/ --cov=app --cov-report=html
+# The live-stack modules need the API on :8000 and an explicit opt-in
+RUN_LIVE_INTEGRATION=1 python -m pytest tests/integration -q
 ```
 
 ### Code Style
@@ -102,10 +100,10 @@ We use **Ruff** for linting:
 
 ```bash
 # Check code style
-ruff check app/ tests/
+python -m ruff check app tests eval scripts
 
 # Auto-fix issues
-ruff check --fix app/ tests/
+python -m ruff check app tests eval scripts --fix
 ```
 
 ---
@@ -126,8 +124,8 @@ We follow [Conventional Commits](https://www.conventionalcommits.org/):
 
 **Examples:**
 ```bash
-git commit -m "feat: add referral system"
-git commit -m "fix: resolve auth token refresh issue"
+git commit -m "feat: add timeline tool to the MCP hub"
+git commit -m "fix: keep the erase receipt open when the readback fails"
 git commit -m "docs: update API documentation"
 ```
 
@@ -138,21 +136,18 @@ git commit -m "docs: update API documentation"
 ```
 orivory/
 ├── app/                    # Main application
-│   ├── api/v1/            # API endpoints
-│   │   ├── auth.py        # Authentication
-│   │   ├── chat.py        # Chat & recall
-│   │   ├── memories.py    # Memory management
-│   │   ├── insights.py    # AI insights
-│   │   ├── discovery.py   # Knowledge discovery
-│   │   ├── referral.py    # Referral system
-│   │   └── analytics.py   # Analytics
-│   ├── models/            # Database models
-│   ├── services/          # Business logic
-│   ├── agents/            # LangGraph agents
-│   └── retrieval/         # RAG retrieval
-├── frontend/              # Next.js frontend
+│   ├── api/v1/            # API endpoints: router.py + users, memories,
+│   │                      #   agents, erasure, imports
+│   ├── mcp_hub/           # MCP server, tools, agent-token identity
+│   ├── models/            # SQLAlchemy models (SQLite-shaped)
+│   ├── services/          # Business logic (erasure, imports, digest, …)
+│   ├── retrieval/         # RAG retrieval, memory spine, drain loop
+│   ├── ingestion/         # Upload/import pipelines
+│   ├── observability/     # Cost/salience tracking
+│   └── middleware/        # Logging, rate limiting
 ├── tests/                # Test suite
 ├── scripts/              # Utility scripts
+├── eval/                 # Offline evaluation + benchmarks
 └── docs/                 # Documentation
 ```
 
@@ -164,12 +159,11 @@ promote these to GitHub issues with the `good first issue` label.
 | # | Task | Files | Done when |
 |---|---|---|---|
 | 1 | Startup embedding-dim check (fail-fast at boot, today the guard only fires on next write/query) | `app/retrieval/embedder.py`, `app/main.py` lifespan | Mismatched `EMBED_*` config vs the active vector-store generation refuses boot with a clear message; test with fake collection |
-| 2 | HTTP-level behavioral security tests (ROADMAP #2 remainder: cross-user 404, ledger scoping over real HTTP) | `tests/api/`, `tests/conftest.py` | Matrix of user-A vs user-B resource access over ASGI transport, all 403/404 as appropriate |
-| 3 | Migrate raw `fetch(` calls to the shared `apiClient` | `frontend/src/app/settings/page.tsx`, `forgot-password`, `login`, `share/[id]`, `ProactiveInsightToast/Widget`, `ReferralDashboard`, `AuthProvider` | No direct `fetch(` outside `lib/api-client.ts`; `tsc --noEmit` clean |
-| 4 | Convert one legacy eval one-shot into an entrypoint CLI | `eval/run_real_sample.py` (or siblings listed in `eval/README.md`) | Same outputs via argparse flags; README table updated; no new scripts |
-| 5 | Document cost-ledger multi-worker limitation | `app/observability/` cost tracker + `docs/OPERATIONS_RUNBOOK.md` | Limitation + workaround (single worker / external DB) written where an operator will find it |
+| 2 | HTTP-level scoping tests: a token without `memory:write` must be refused by `POST /api/v1/imports` over real HTTP, and the ledger row must carry the refusal | `tests/api/`, `tests/conftest.py` | ASGI-transport matrix over the mounted routers (local owner vs each scope), all 401/403/404 as appropriate |
+| 3 | Convert one legacy eval one-shot into an entrypoint CLI | `eval/run_real_sample.py` (or siblings listed in `eval/README.md`) | Same outputs via argparse flags; README table updated; no new scripts |
+| 4 | Document the single-process cost ledger | `app/observability/` cost tracker + `docs/OPERATIONS_RUNBOOK.md` | Limitation + workaround (keep workers at 1 / read the SQLite ledger directly) written where an operator will find it |
 
-Rules for all five: TDD (RED test first), `ruff` clean, no new infra.
+Rules for all of them: TDD (RED test first), `ruff` clean, no new infra.
 
 ---
 

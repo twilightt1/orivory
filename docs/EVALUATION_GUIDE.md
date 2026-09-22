@@ -6,20 +6,13 @@ results.
 ## TL;DR
 
 ```bash
-# 1. Offline eval (no LLM, deterministic)
-.venv/Scripts/python -m eval.run_eval --mode offline --output-dir eval/results
+# 1. Offline eval (no LLM, deterministic) — the only lane
+.venv/bin/python eval/run_eval.py --mode offline --output-dir eval/results --top-k 5
 
-# 2. Offline eval + RAGAS metrics
-.venv/Scripts/python -m eval.run_eval --mode offline --enable-ragas
+# 2. Offline eval + RAGAS-style metrics (a no-op in this repo — see below)
+.venv/bin/python eval/run_eval.py --mode offline --enable-ragas
 
-# 3. Live API eval (requires running server + API key)
-.venv/Scripts/python -m eval.run_eval --mode live --api-url http://localhost:8000
-
-# 4. Sweep an experiment
-.venv/Scripts/python scripts/eval_experiments.py --experiment topk_sweep \
-    --variants topk_3,topk_5,topk_8
-
-# 5. Memory benchmarks (LongMemEval-S / MemoryAgentBench)
+# 3. Memory benchmarks (LongMemEval-S / MemoryAgentBench)
 .venv/bin/python eval/run_benchmark.py \
     --benchmark longmemeval_s \
     --dataset eval/benchmarks/data/longmemeval_s_cleaned.json \
@@ -70,7 +63,7 @@ from P1b is `eval/ablation_mean_vs_cls.py` + `eval/ablation_mean_vs_cls.json`.
 
 ## The eval dataset
 
-`eval/Orivory_eval_dataset.json` — 18 cases across 6 categories:
+`eval/orivory_eval_dataset.json` — 18 cases across 7 categories:
 
 | Category | Cases | What it tests |
 |----------|-------|---------------|
@@ -88,8 +81,7 @@ Each case has:
 - `query` — the user question
 - `expected_sources` — document names that should appear in retrieval
 - `expected_keywords` — terms that should appear in the answer
-- `should_cite` — whether the answer must contain citations
-- `is_in_scope` — whether the case expects a RAG answer
+- `should_fallback` — whether the case expects the "not in my memories" path
 
 ## Reading the report
 
@@ -112,17 +104,16 @@ Each case has:
   "query": "How do I rotate my API key without downtime?",
   "expected_sources": ["api_authentication_guide.md"],
   "expected_keywords": ["rotation", "overlap", "revoke"],
-  "should_cite": true,
-  "is_in_scope": true
+  "should_fallback": false
 }
 ```
 
-Add to `eval/Orivory_eval_dataset.json`, then re-run.
+Add to `eval/orivory_eval_dataset.json`, then re-run.
 
 ## Custom thresholds
 
 ```bash
-.venv/Scripts/python -m eval.run_eval --mode offline \
+.venv/bin/python eval/run_eval.py --mode offline \
     --fail-under-source-hit 0.9 \
     --fail-under-keyword-coverage 0.8
 ```
@@ -134,7 +125,7 @@ The eval will exit non-zero if any threshold is missed — useful in CI.
 ```yaml
 - name: Run RAG eval
   run: |
-    .venv/Scripts/python -m eval.run_eval --mode offline \
+    .venv/bin/python eval/run_eval.py --mode offline \
       --output-dir eval/results --fail-under-source-hit 0.9
 ```
 
@@ -184,14 +175,13 @@ design.
 
 ```bash
 # After running the eval
-.venv/Scripts/python -c "from app.observability.cost import CostTracker; \
+.venv/bin/python -c "from app.observability.cost import CostTracker; \
     t = CostTracker(); print(t.breakdown_by_agent())"
 ```
 
-Or query the admin endpoint:
-```
-GET /admin/ai-costs?hours=24
-```
+The ledger is the SQLite file `eval/costs.db` (run the command from the repo
+root): the app's `llm_client` records every call there, so the same query works
+after a session against the running API.
 
 ## Benchmarking different models
 

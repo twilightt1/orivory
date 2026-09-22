@@ -4,21 +4,17 @@ Full Evaluation Pipeline
 
 Combines:
 1. Offline evaluation (deterministic retrieval metrics)
-2. Live API evaluation (actual LLM responses)
-3. LLM-as-Judge evaluation (answer quality assessment)
+2. LLM-as-Judge evaluation (answer quality assessment)
 
 Usage:
     # Offline only (fast, no API needed)
     python eval/run_full_eval.py --mode offline --dataset eval/orivory_extreme_eval_dataset.json
 
-    # Live API (requires running server)
-    python eval/run_full_eval.py --mode live-api --dataset eval/orivory_extreme_eval_dataset.json
-
     # LLM-as-Judge (requires OpenAI API key)
     python eval/run_full_eval.py --mode judge --dataset eval/orivory_extreme_eval_dataset.json \
         --answers-file eval/extreme_results/latest_report.json
 
-    # Full pipeline (all three)
+    # Full pipeline (offline + judge)
     python eval/run_full_eval.py --mode full --dataset eval/orivory_extreme_eval_dataset.json
 """
 from __future__ import annotations
@@ -154,26 +150,9 @@ async def run_judge_eval(
     return {"summary": summary, "results": [vars(r) for r in results]}
 
 
-def run_live_api_eval(config: dict[str, Any]) -> dict[str, Any]:
-    """Run live API evaluation."""
-    from eval.live_api_eval import LiveApiEvalConfig, run_live_api_evaluation
-
-    live_config = LiveApiEvalConfig(
-        api_base_url=config["api_base_url"],
-        dataset_path=Path(config["dataset_path"]),
-        sample_docs_dir=Path(config["sample_docs_dir"]),
-        output_dir=Path(config["output_dir"]),
-        email=config.get("email"),
-        password=config.get("password"),
-        access_token=config.get("access_token"),
-    )
-    return run_live_api_evaluation(live_config)
-
-
 def generate_full_report(
     offline_summary: dict[str, Any],
     judge_summary: dict[str, Any] | None,
-    live_summary: dict[str, Any] | None,
     output_dir: Path,
 ) -> dict[str, Any]:
     """Generate combined evaluation report."""
@@ -182,7 +161,6 @@ def generate_full_report(
         "evaluation_modes": [],
         "retrieval_quality": offline_summary,
         "answer_quality": judge_summary,
-        "live_api_quality": live_summary,
         "combined_score": 0.0,
         "recommendations": [],
     }
@@ -218,16 +196,6 @@ def generate_full_report(
 
         # Add reasoning quality specifically
         report["reasoning_quality"] = judge_summary.get("reasoning_quality_score", 0.0)
-
-    # Live API metrics
-    if live_summary:
-        report["evaluation_modes"].append("live_api")
-        # Combine live metrics
-        live_score = (
-            live_summary.get("source_hit_rate", 0.5) * 0.15 +
-            live_summary.get("keyword_coverage", 0.5) * 0.15
-        )
-        scores.append(live_score)
 
     report["combined_score"] = sum(scores)
 
@@ -289,13 +257,6 @@ def print_full_summary(report: dict[str, Any]) -> None:
             for diff, scores in jq["by_difficulty"].items():
                 print(f"    {diff.capitalize()}: {scores['avg_score']:.1%}")
 
-    if report.get("live_api_quality"):
-        print("\n## Live API Quality")
-        lq = report["live_api_quality"]
-        print(f"  Source Hit Rate:     {lq.get('source_hit_rate', 0):.1%}")
-        print(f"  Keyword Coverage:    {lq.get('keyword_coverage', 0):.1%}")
-        print(f"  Citation Rate:      {lq.get('citation_rate', 0):.1%}")
-
     print("\n## Combined Score")
     combined = report.get("combined_score", 0)
     if combined >= 0.7:
@@ -324,14 +285,14 @@ Examples:
   # Offline + LLM judge
   python eval/run_full_eval.py --mode judge --dataset eval/orivory_extreme_eval_dataset.json
 
-  # Full pipeline (offline + judge + live-api)
+  # Full pipeline (offline + judge)
   python eval/run_full_eval.py --mode full --dataset eval/orivory_extreme_eval_dataset.json
         """,
     )
 
     parser.add_argument(
         "--mode",
-        choices=["offline", "judge", "live-api", "full"],
+        choices=["offline", "judge", "full"],
         default="full",
         help="Evaluation mode",
     )
@@ -356,12 +317,6 @@ Examples:
     parser.add_argument("--judge-model", default="gpt-4o-mini")
     parser.add_argument("--openai-api-key", default=None)
 
-    # Live API options
-    parser.add_argument("--api-base-url", default="http://localhost:8000")
-    parser.add_argument("--email", default=None)
-    parser.add_argument("--password", default=None)
-    parser.add_argument("--access-token", default=None)
-
     # For judge mode - where to get answers
     parser.add_argument(
         "--answers-file",
@@ -383,7 +338,6 @@ Examples:
     # Track results
     offline_summary = None
     judge_summary = None
-    live_summary = None
 
     # 1. Offline evaluation (always runs)
     if args.mode in ("offline", "judge", "full"):
@@ -423,24 +377,6 @@ Examples:
         judge_summary = judge_results.get("summary")
         print()
 
-    # 3. Live API evaluation
-    if args.mode == "live-api":
-        print("=" * 50)
-        print("PHASE: Live API Evaluation")
-        print("=" * 50)
-
-        live_results = run_live_api_eval({
-            "api_base_url": args.api_base_url,
-            "dataset_path": str(args.dataset),
-            "sample_docs_dir": str(args.sample_docs),
-            "output_dir": str(output_dir),
-            "email": args.email,
-            "password": args.password,
-            "access_token": args.access_token,
-        })
-        live_summary = live_results.get("summary")
-        print()
-
     # Generate combined report
     if args.mode == "full":
         print("=" * 50)
@@ -450,7 +386,6 @@ Examples:
         combined = generate_full_report(
             offline_summary=offline_summary or {},
             judge_summary=judge_summary,
-            live_summary=live_summary,
             output_dir=output_dir,
         )
 
