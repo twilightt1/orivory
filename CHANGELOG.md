@@ -48,6 +48,11 @@ single local owner (`LOCAL_OWNER_EMAIL`), and the agent tokens (`memory:read` /
   history): `app/utils/ssrf.py` + `tests/rag/test_ssrf.py`,
   `app/ingestion/base.py` + `app/ingestion/types.py` (+ their re-exports),
   `eval/live_api_eval.py` + `tests/eval/test_live_api_eval.py`, `notebooks/`.
+- **Runtime dependencies of the removed surfaces** — `alembic`, `asyncpg`,
+  `psycopg2-binary` (Postgres era), `authlib`, `bcrypt`,
+  `python-jose[cryptography]` (account auth), `sendgrid` (mail),
+  `beautifulsoup4` + `feedparser` (connectors) out of `pyproject.toml`,
+  `requirements.txt` and `uv.lock` — 20 packages, 9 direct + 11 transitive.
 
 ### Fixed
 - **Lite-path correctness** (#66): config values are matched
