@@ -16,7 +16,7 @@ Pipeline (one call to :py:meth:`MemoryRetriever.recall`):
        FTS5 lexical leg over the same query, rank-fused with the dense pool by
        RRF over canonical memory UUIDs (ruling R11b(p2)). The lexical leg
        returns ids and scores only.
-    5. Hydrate the top candidates with full ``Memory`` rows from Postgres,
+    5. Hydrate the top candidates with full ``Memory`` rows from the store,
        including ``entity_links`` (so we can apply entity boost).
     6. Apply entity_boost + time_decay to each candidate.
     7. Sort by combined score, return top_k.
@@ -26,7 +26,7 @@ Every step degrades gracefully, EXCEPT three typed signals that must never be
 served as an empty result: an embedding contract mismatch, an unreachable
 vector store, and a freshness barrier that timed out (a write still in flight
 is not a no-match). The vector outage keeps that rule where this deployment
-has no lexical index too (Postgres); where one exists (SQLite FTS5), the
+has no lexical index; where one exists (SQLite FTS5), the
 recall answers from the lexical leg instead and counts the fallback (ruling
 R19). Those remaining typed signals propagate to the API as a 503 readiness
 error (see ``app.main`` handlers). Everything else (LLM down, DB read errors)
@@ -265,8 +265,8 @@ class MemoryRetriever:
         except VectorUnavailableError:
             # R19(p2): a vector outage is not a no-match. Where this
             # deployment owns a lexical index (SQLite FTS5), the recall
-            # answers from it and counts the fallback; where it does not
-            # (Postgres), the typed readiness error stands.
+            # answers from it and counts the fallback; where it does not,
+            # the typed readiness error stands.
             t_lexical = time.perf_counter()
             try:
                 lexical_rows = await self._lexical_leg(

@@ -313,7 +313,7 @@ class Settings(BaseSettings):
     def validate_environment_settings(self):
         # Normalize ONCE, here: `ENVIRONMENT='production '` (an operator typo)
         # must not silently skip the whole production block — CORS, provider
-        # keys, the config-encryption key and the MinIO credentials.
+        # keys and the config-encryption key.
         self.ENVIRONMENT = self.ENVIRONMENT.strip().casefold()
         self.EVALUATOR_FAILURE_MODE = self.EVALUATOR_FAILURE_MODE.strip().casefold()
         self._validate_ai_runtime_settings()

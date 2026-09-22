@@ -28,7 +28,7 @@ the caller's transaction (spec §5.1), so a crash before the vector write is
 replayable. ``memory_suppressions`` pins a forgotten identity: re-ingest skips
 it instead of resurrecting the memory (spec §5.4/§12.3).
 
-Runs in the **synchronous** Celery ingestion context (the async faces below
+Runs in the **synchronous** in-process ingestion context (the async faces below
 exist for the API delete / forget paths).
 """
 from __future__ import annotations
@@ -77,7 +77,7 @@ class DocMemoryResult:
 
     @property
     def stale_vector_ids(self) -> list[str]:
-        """Prior-projection ids that no longer have a Postgres row."""
+        """Prior-projection ids that no longer have a memory row."""
         current = set(self.all_ids)
         return [i for i in self.removed_memory_ids if i not in current]
 
@@ -312,7 +312,7 @@ async def delete_document_memories_async(db: AsyncSession, document_id: str, *, 
     """Async variant of :func:`delete_document_memories_sync`.
 
     Used by the API delete paths (document delete, conversation delete). Deletes
-    the rows in Postgres, enqueues one durable delete intent per row in the SAME
+    the rows, enqueues one durable delete intent per row in the SAME
     transaction, and returns the ids so the caller can also purge the vector
     store after committing. Caller commits.
     """

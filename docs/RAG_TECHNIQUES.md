@@ -164,7 +164,7 @@ The `hallucination_agent` and the graph node that re-entered the answer node on
 a flagged answer are gone with the LangGraph chat workflow (`app/api/v1/chat.py`
 went with the full-stack surface; the deleted modules are in git history):
 `app/agents/` now holds only `app/agents/llm_client.py`,
-`app/agents/llm_parsing.py`, `app/agents/routing.py` and `app/agents/state.py`.
+`app/agents/llm_parsing.py` and `app/agents/state.py`.
 What survives:
 
 - the OFFLINE judge — [`eval/llm_judge.py`](../eval/llm_judge.py) scores
@@ -172,17 +172,16 @@ What survives:
 
 ---
 
-## 7. Self-correction loops — removed; the routing helpers remain
+## 7. Self-correction loops — removed with the LangGraph agents
 
 The graph that wired `grade_docs` → re-retrieve and `grade_gen` → re-generate
 (each bounded at 3 retries) was removed with the LangGraph agents. The pure
-decision helpers it used survive in
-[`app/agents/routing.py`](../app/agents/routing.py) (`MAX_RETRIES = 3`,
-`route_after_grade_docs`, `route_after_grade_gen`, the retry /
-`record_*_retry_limit` edge names), and `AgentState`
-([`app/agents/state.py`](../app/agents/state.py)) still carries the fields —
-but nothing calls them: `routing.py` has no importer in the tree, and
-`AgentState` appears only as a `TYPE_CHECKING` annotation
+decision helpers it used (`MAX_RETRIES = 3`, `route_after_grade_docs`,
+`route_after_grade_gen`, the retry / `record_*_retry_limit` edge names) lived in
+`app/agents/routing.py`, which nothing imported and which went with the
+lite-only consolidation (git history keeps it). `AgentState`
+([`app/agents/state.py`](../app/agents/state.py)) still carries the fields and
+appears only as a `TYPE_CHECKING` annotation
 ([`app/retrieval/hyde_agent.py`](../app/retrieval/hyde_agent.py)).
 
 ---
