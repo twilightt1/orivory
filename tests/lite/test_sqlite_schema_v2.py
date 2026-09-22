@@ -381,7 +381,7 @@ async def test_a_valid_sqlite_backup_is_still_reused(v1_db):
     async with eng.connect() as conn:
         version, _ = await _schema(conn)
     milestone = tmp_path / "v1.sqlite.pre-p1b.bak"
-    assert version == 7
+    assert version == database.SQLITE_SCHEMA_VERSION, "the ladder runs to the top"
     assert list(Path(tmp_path).glob("*.pre-p1b.bak")) == [milestone]
     assert milestone.read_bytes() == before, "an existing valid backup is never overwritten"
 
