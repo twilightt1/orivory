@@ -77,7 +77,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
 
 from app import database
-from app.config import settings
+from app.config import Settings, settings
 from app.main import app
 from app.mcp_hub import tools as hub_tools
 from app.mcp_hub.identity import ACTION_SEARCH, AgentPrincipal
@@ -143,6 +143,17 @@ def _example_value(value) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
     return str(value)
+
+
+def _shipped_default(knob: str):
+    """The value the code SHIPS — not the ambient one a local ``.env`` can set.
+
+    These assertions state the release contract ("the flag ships OFF", "the cap
+    is 20"). Reading the live ``settings`` made a developer's ``.env`` turn them
+    red while CI (no ``.env``) stayed green — a false red that reads exactly
+    like a real regression.
+    """
+    return Settings.model_fields[knob].default
 
 
 # The group marker: rows whose content carries it embed to ONE shared vector, so
@@ -1088,8 +1099,8 @@ def test_the_ablation_artifact_carries_the_enable_and_hydration_verdicts():
 
     # The shipped state, not the measured one: the flag is OFF and the cap is
     # the R13 default. Nothing in this artifact may have moved either.
-    assert settings.RETRIEVAL_HYBRID_ENABLED is False
-    assert settings.JINA_RERANKER_TOP_N == 20
+    assert _shipped_default("RETRIEVAL_HYBRID_ENABLED") is False
+    assert _shipped_default("JINA_RERANKER_TOP_N") == 20
 
 
 # ══ the pins the plan attached to this task (code, examples, CI) ═══════════
@@ -1121,12 +1132,14 @@ def test_the_example_env_files_carry_the_p2_retrieval_defaults(path):
     """CI copies ``.env.test.example`` to ``.env``: a stale example is a stale run.
 
     The R13 cap (20, not the pre-R13 5) and every P2 knob the plan added must be
-    in BOTH examples, UNCOMMENTED and equal to the live settings default — an
+    in BOTH examples, UNCOMMENTED and equal to the shipped default — an
     example-seeded deployment silently running the pre-R13 cap loses the
-    whole-window rerank, and a commented-out line is a missing one.
+    whole-window rerank, and a commented-out line is a missing one. Read from
+    the model, not from the live settings: a developer's ``.env`` is not shipped
+    and must not decide what the examples have to carry.
     """
     parsed = dotenv_values(path)
-    shipped = {knob: _example_value(getattr(settings, knob)) for knob in ENV_EXAMPLE_KNOBS}
+    shipped = {knob: _example_value(_shipped_default(knob)) for knob in ENV_EXAMPLE_KNOBS}
     from_file = {knob: parsed.get(knob) for knob in ENV_EXAMPLE_KNOBS}
     assert from_file == shipped, (
         f"{path.name} does not carry the shipped retrieval defaults"
