@@ -61,6 +61,18 @@ A request with no Authorization header IS that owner; an agent token
   (~610-685 ms) on the first request instead.
 - **Provider keys are optional** — with no embedding key the bundled local ONNX
   model is the default; OpenAI / OpenRouter / Jina keys are opt-ins.
+- **A measured ceiling, not an infinite archive.** One laptop-class box (macOS,
+  M-series, one process, warm cache) on synthetic notes:
+
+  | corpus | warm recall p95 | RSS |
+  |---|---|---|
+  | 10K points | ~121 ms | ~950 MB |
+  | 100K points | ~1.2 s warm, ~2.9 s under concurrent load | ~3.9 GB |
+
+  10K is comfortable — inside the shipped p95 target. 100K is **over** it: the
+  embedded store's per-query cost and the process footprint both break the
+  budget, and the honest fix is server-mode Qdrant, not a tuning flag in this
+  stack. 1M/10M were never run to green here at all.
 
 ## Implementation map
 

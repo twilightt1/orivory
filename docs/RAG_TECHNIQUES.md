@@ -230,6 +230,13 @@ keys its per-process indexes off a Redis generation counter
   the multilingual, opt-in model; the default `arctic` is English-first, and
   the dim guard refuses to mix the two on one store
   ([`app/config.py`](../app/config.py)).
+- **e5 is opt-in for a measured reason.** On LongMemEval-S n=100 with a fresh
+  store, the two local backends' own runs came out at **0.490** (default
+  `arctic`, fp32) and **0.430** (quantized e5, int8) — separate runs, with
+  their confidence intervals in the CHANGELOG. Both are ~384-dim, with
+  incompatible vectors, so switching either way reindexes. Vietnamese-heavy
+  corpora are the case for `LOCAL_EMBED_MODEL=e5`; the English bench is not.
+  fp32 e5 was never tried: ~470 MB is over the lite budget.
 
 **Not in this repo:** NFC normalization, `underthesea` syllable segmentation
 and Vietnamese/English stopword lists — no such dependency and no such code
