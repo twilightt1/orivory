@@ -78,8 +78,8 @@ from app.models.index_outbox import IndexOutbox
 from app.models.memory import Memory
 from app.retrieval import e5_local, vector_backend
 from app.retrieval import reranker as reranker_module
+from app.retrieval.embedder import EmbeddingDimensionMismatch, warmup_embedder
 from app.retrieval.embedder import embed_query as real_embed_query
-from app.retrieval.embedder import warmup_embedder
 from app.retrieval.embedding_fingerprint import generation_name
 from app.retrieval.memory import drain_loop, freshness, outbox, vector_store
 from app.retrieval.memory import retriever as retriever_module
@@ -361,6 +361,50 @@ async def test_a_claim_checks_the_collection_once(live, monkeypatch):
     assert len(checks) == 1, f"the claim ran the contract guard {len(checks)} times"
     generation = generation_name("memory")
     assert all(str(memory.id) in _payloads(generation) for memory in created)
+
+
+async def test_only_a_settled_guard_answer_is_shared(live, monkeypatch):
+    """Only an answer the claim's own writes cannot move is shared.
+
+    A non-empty generation that passed the contract holds a manifest row, so its
+    answer is settled and rows 2..50 may reuse it. An EMPTY generation is what an
+    unclaimed one looks like, and the claim's own first write is what populates
+    it — sharing that pass would let the rest of the claim write into a populated
+    generation with no manifest, which is the state the contract quarantines.
+    Every row must ask for itself while it is empty, and the quarantine error
+    belongs to the row that meets it.
+    """
+    answers: list = []
+    calls: list[int] = []
+
+    async def fake_check(embedding_dim: int):
+        calls.append(embedding_dim)
+        answer = answers.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    monkeypatch.setattr(vector_store, "_checked_collection", fake_check)
+    quarantine = EmbeddingDimensionMismatch(
+        "populated generation has no manifest row — quarantine/rebuild"
+    )
+
+    # Unclaimed generation: the first row sees it empty (allowed), and by the
+    # next row the claim's own write has populated it — that row raises.
+    answers = [("client", "gen-unclaimed", 0), quarantine]
+    async with vector_store.claim_cache():
+        assert await vector_store._checked_collection_for_claim(384) == ("client", "gen-unclaimed", 0)
+        with pytest.raises(EmbeddingDimensionMismatch):
+            await vector_store._checked_collection_for_claim(384)
+    assert len(calls) == 2, f"the claim shared an unsettled answer (guard ran {len(calls)} time(s), expected 2)"
+
+    # Manifest-backed generation: settled, so one ask covers the whole claim.
+    calls.clear()
+    answers = [("client", "gen-settled", 7)]
+    async with vector_store.claim_cache():
+        for _ in range(3):
+            assert await vector_store._checked_collection_for_claim(384) == ("client", "gen-settled", 7)
+    assert len(calls) == 1, f"a settled answer was re-checked {len(calls)} times"
 
 
 # ── 3. ambiguous timeout / late write ───────────────────────────────────────

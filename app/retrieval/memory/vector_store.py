@@ -239,9 +239,11 @@ async def claim_cache():
     """One claim's shared vector-store work (the drain holds this around its rows).
 
     Nothing here changes what a row writes or when it fails: the guard still
-    runs inside the first row's own write, so a contract mismatch is still that
-    row's error, handled by that row's own backoff/blocked path. It just stops
-    the OTHER forty-nine rows in the claim from asking the same question.
+    runs inside a row's own write, so a contract mismatch is still that row's
+    error, handled by that row's own backoff/blocked path — including one that
+    appears mid-claim (only settled answers are shared; see
+    :func:`_checked_collection_for_claim`). It just stops the OTHER forty-nine
+    rows in the claim from asking the same question.
 
     Batched EMBEDDING was measured and rejected: one ONNX call for the claim's
     fifty documents (0.80 s -> 0.63 s of the claim) starves the event loop's
@@ -258,12 +260,24 @@ async def claim_cache():
 
 
 async def _checked_collection_for_claim(embedding_dim: int) -> tuple[Any, str, int]:
-    """The contract guard, once per claim when there is one (see claim_cache)."""
+    """The contract guard, once per claim — for answers the claim cannot move.
+
+    Only a SETTLED answer is shared: a non-empty generation that passed the
+    contract holds a manifest row, and this claim's own writes cannot change
+    that. An EMPTY generation is exactly what an unclaimed one looks like, and
+    the claim's first write is what populates it — so rows re-check while it is
+    empty, and the first row that meets a populated generation with NO manifest
+    raises the quarantine error for itself instead of writing into it on a
+    cached pass taken before its own siblings' writes landed.
+    """
     cache = _claim.get()
     if cache is None:
         return await _checked_collection(embedding_dim)
     if cache.checked is None:
-        cache.checked = await _checked_collection(embedding_dim)
+        checked = await _checked_collection(embedding_dim)
+        if checked[2] > 0:  # populated (so manifest-backed): the answer is settled
+            cache.checked = checked
+        return checked
     return cache.checked
 
 
