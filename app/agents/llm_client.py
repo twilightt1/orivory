@@ -256,8 +256,12 @@ async def complete(
                 kwargs["max_tokens"] = max(
                     int(kwargs["max_tokens"] or 0), settings.LLM_MAX_TOKENS
                 )
-                async with _get_llm_semaphore():
-                    response = await client.chat.completions.create(**kwargs)
+                # NO second acquisition here: this branch already runs inside
+                # the permit taken above. Re-entering the shared semaphore is a
+                # deadlock at LLM_MAX_CONCURRENCY=1 (the task that would
+                # release it is the one waiting) and leaks a slot per retry at
+                # any higher limit (review finding, pinned by test).
+                response = await client.chat.completions.create(**kwargs)
             else:
                 raise
     return response

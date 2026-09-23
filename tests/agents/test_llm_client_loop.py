@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from types import SimpleNamespace
 
 import pytest
 
@@ -134,3 +135,42 @@ def test_cancelling_a_gate_wait_does_not_bleed_the_permit():
             gate._semaphore.release()
 
     asyncio.run(_scenario())
+
+
+async def test_the_unsupported_feature_retry_does_not_re_enter_the_gate(monkeypatch):
+    """The retry runs INSIDE the permit the call already holds.
+
+    Review finding (verified): the fallback branch acquired the shared
+    semaphore a second time while the first acquisition was still held, so at
+    LLM_MAX_CONCURRENCY=1 the first model that rejects `response_format` parks
+    the only task that could ever release the permit — a permanent hang, and
+    one permit leaked per occurrence for any higher limit.
+    """
+    monkeypatch.setattr(llm_client.settings, "LLM_MAX_CONCURRENCY", 1)
+    monkeypatch.setattr(llm_client, "_llm_semaphore", None, raising=False)
+    calls: list[dict] = []
+
+    class _Completions:
+        async def create(self, **kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                raise RuntimeError(
+                    "Error code: 400 - invalid_request_body: does not support feature "
+                    "structured-outputs"
+                )
+            return "second-response"
+
+    fake = SimpleNamespace(chat=SimpleNamespace(completions=_Completions()))
+    monkeypatch.setattr(llm_client, "get_llm_client", lambda: fake)
+
+    response = await asyncio.wait_for(
+        llm_client.complete(
+            agent="grader",
+            messages=[{"role": "user", "content": "grade this"}],
+            response_format={"type": "json_object"},
+        ),
+        timeout=5,
+    )
+    assert response == "second-response"
+    assert calls[1]["response_format"] is None, "the retry must drop response_format"
+    assert len(calls) == 2
