@@ -138,7 +138,8 @@ async def test_a_purge_that_cannot_delete_vectors_leaves_the_rows_for_a_retry(
 
 async def test_a_purge_failure_makes_the_run_partial(tmp_path, monkeypatch, capsys):
     """An unpurged instance contaminates the ones after it, so the run is not a
-    measurement any more: it must take the partial artifact path."""
+    measurement any more: it takes the partial artifact path, stops before
+    scoring against the contaminated haystack, and exits non-zero."""
     import argparse
 
     import eval.run_system_benchmark as rsb
@@ -153,7 +154,10 @@ async def test_a_purge_failure_makes_the_run_partial(tmp_path, monkeypatch, caps
         seen_partial.append(kw["partial"])
         return tmp_path / "results.json"
 
+    scored: list[str] = []
+
     async def fake_run_instance(client, user_id, instance, top_k, run_dir, **_kw):
+        scored.append(instance.question_id)
         return {
             "question_id": instance.question_id,
             "question_type": instance.question_type,
@@ -177,9 +181,11 @@ async def test_a_purge_failure_makes_the_run_partial(tmp_path, monkeypatch, caps
     args = argparse.Namespace(
         n=2, seed=1, top_k=5, session=True, chunk_chars=0, fuse=False, concurrency=1
     )
-    await rsb.main_async(args)
+    exit_code = await rsb.main_async(args)
 
     assert seen_partial == [True]
+    assert exit_code != 0  # a contaminated run is not a success
+    assert scored == [instances[0].question_id]  # and nothing after it was scored
     assert "PURGE FAILED for" in capsys.readouterr().out
 
 

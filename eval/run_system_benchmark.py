@@ -733,11 +733,16 @@ async def main_async(args) -> int:
             if purged:
                 print(f"    purged {purged} memories for {inst.question_id}")
             elif purged is None:
+                # The next instance shares this user, so anything left behind is
+                # recallable by it: every score after this point would be measured
+                # against a contaminated haystack. Stop, and report failure.
                 purge_failed.append(inst.question_id)
+                exit_code = 2
                 print(
                     f"    PURGE FAILED for {inst.question_id}: its memories may still be "
-                    "recallable by the next instance"
+                    "recallable, so the run stops here rather than score past it"
                 )
+                break
     except QuotaExhausted as exc:
         exit_code = 3
         print(f"\nQUOTA EXHAUSTED — aborting run early ({exc}). Partial results "
