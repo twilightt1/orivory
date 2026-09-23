@@ -36,6 +36,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+import uuid
 from pathlib import Path
 
 DEFAULT_WATCH_DIR = "~/.openclaw/workspace"
@@ -134,13 +135,29 @@ def to_session_payload(path: Path, text: str) -> dict:
 
 
 def post_import(url: str, token: str, payload: dict, timeout: int = 30) -> dict:
-    body = json.dumps(payload).encode()
+    """Send one session dump as MULTIPART, which is what the endpoint takes.
+
+    `/api/v1/imports` declares `file: UploadFile = File(...)`; a JSON body
+    answers 422 every time, so this daemon could never capture anything.
+    """
+    boundary = f"----orivory{uuid.uuid4().hex}"
+    body = b"".join([
+        f"--{boundary}\r\n".encode(),
+        b'Content-Disposition: form-data; name="file"; '
+        b'filename="openclaw-session.json"\r\n',
+        b"Content-Type: application/json\r\n\r\n",
+        json.dumps(payload).encode(),
+        f"\r\n--{boundary}\r\n".encode(),
+        b'Content-Disposition: form-data; name="source_format"\r\n\r\n',
+        b"openclaw",
+        f"\r\n--{boundary}--\r\n".encode(),
+    ])
     request = urllib.request.Request(
         f"{url.rstrip('/')}/api/v1/imports",
         data=body,
         headers={
             "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
         },
         method="POST",
     )
