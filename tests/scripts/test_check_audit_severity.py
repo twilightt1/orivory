@@ -179,3 +179,58 @@ def test_a_malformed_v3_vector_stays_unknown(tmp_path, monkeypatch, capsys):
                      _responder({"GHSA-aaaa-bbbb-cccc": record}))
     assert exit_code == 0
     assert "UNKNOWN 1" in capsys.readouterr().out
+
+
+# --- the scorer must agree with the published scores, not with my reading ---
+
+
+# NVD's own CVSS v3.1 metrics (fetched 2026-09-23 via services.nvd.nist.gov).
+# CVE-2021-44228 (Log4Shell) and CVE-2022-22965 (Spring4Shell).
+NVD_V31 = [
+    ("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H", 10.0),   # changed scope
+    ("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H", 9.8),    # unchanged
+]
+
+
+@pytest.mark.parametrize(("vector", "expected"), NVD_V31)
+def test_scoring_reproduces_nvd_scores(vector, expected):
+    assert gate.cvss_v3_base_score(vector) == pytest.approx(expected, abs=0.05)
+
+
+def test_a_v31_vector_is_scored_with_the_v31_changed_scope_expression():
+    """v3.0's changed-scope impact raises (ISS - 0.02) to 15, v3.1 raises
+    (ISS * 0.9731 - 0.02) to 13; both keep the 1.08 changed-scope multiplier.
+    Over all 1296 Scope:Changed vectors, the two expressions disagree about the
+    band for 5 of them — all HIGH <-> MEDIUM, none at CRITICAL, so this is a
+    fidelity fix rather than a missed alarm.
+
+    CVE-2021-45046's vector is the one real-world disagreement: the spec's
+    v3.1 arithmetic gives 9.1, the v3.0 expression gives 9.0, and 9.0 is what
+    the CNA and NVD publish. Both are CRITICAL, which is all the gate acts on.
+    """
+    v31 = "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:C/C:H/I:H/A:H"
+    assert gate.cvss_v3_base_score(v31) == pytest.approx(9.1, abs=0.05)
+    assert gate.word_for_score(gate.cvss_v3_base_score(v31)) == "CRITICAL"
+    v30 = v31.replace("3.1", "3.0")
+    assert gate.cvss_v3_base_score(v30) == pytest.approx(9.0, abs=0.05)
+    # a real band crossing: v3.0's expression says HIGH, v3.1's says MEDIUM
+    crossing = "CVSS:3.1/AV:P/AC:H/PR:L/UI:N/S:C/C:H/I:H/A:L"
+    assert gate.cvss_v3_base_score(crossing) == pytest.approx(6.9, abs=0.05)
+    assert gate.cvss_v3_base_score(crossing.replace("3.1", "3.0")) == pytest.approx(7.0, abs=0.05)
+    assert gate.word_for_score(6.9) == "MEDIUM" and gate.word_for_score(7.0) == "HIGH"
+
+
+def test_a_v30_vector_keeps_the_v30_expression():
+    """A record that carries a v3.0 vector must be scored with v3.0's formula:
+    the two differ only for changed scope."""
+    changed = "CVSS:3.0/AV:N/AC:H/PR:N/UI:N/S:C/C:H/I:H/A:H"
+    assert gate.cvss_v3_base_score(changed) != gate.cvss_v3_base_score(changed.replace("3.0", "3.1"))
+    unchanged = "CVSS:3.0/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"
+    assert gate.cvss_v3_base_score(unchanged) == pytest.approx(9.8, abs=0.05)
+
+
+def test_a_zero_score_is_none_not_low():
+    """CVSS v3.1 rates 0.0 as NONE; LOW starts at 0.1."""
+    zero = gate.cvss_v3_base_score("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:N")
+    assert zero == 0.0
+    assert gate.word_for_score(zero) == "NONE"

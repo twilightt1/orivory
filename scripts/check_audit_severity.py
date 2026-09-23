@@ -64,7 +64,9 @@ def word_for_score(score: float) -> str:
         return "HIGH"
     if score >= 4.0:
         return "MEDIUM"
-    return "LOW"
+    if score > 0:
+        return "LOW"
+    return "NONE"  # CVSS v3.1 rates 0.0 as NONE; LOW starts at 0.1
 
 
 def cvss_v3_base_score(vector: str) -> float | None:
@@ -74,7 +76,8 @@ def cvss_v3_base_score(vector: str) -> float | None:
     ignored); a missing or unknown metric yields None, never a guess.
     """
     parts = vector.split("/")
-    if len(parts) < 2 or not parts[0].upper().startswith("CVSS:3."):
+    version = parts[0].upper() if parts else ""
+    if len(parts) < 2 or not version.startswith("CVSS:3."):
         return None  # v2 vectors have no prefix, v4 is a different formula
     metrics = dict(part.split(":", 1) for part in parts[1:] if ":" in part)
     try:
@@ -89,12 +92,23 @@ def cvss_v3_base_score(vector: str) -> float | None:
         return 0.0
     if scope == "U":
         impact = 6.42 * impact_sub
+        multiplier = 1.0
     else:
-        impact = 7.52 * (impact_sub - 0.029) - 3.25 * (impact_sub - 0.02) ** 15
+        # The changed-scope impact expression is the one thing v3.1 changed in
+        # the base formula: v3.0 raises (ISS - 0.02) to 15, v3.1 raises
+        # (ISS * 0.9731 - 0.02) to 13. Scoring a v3.1 vector with v3.0's
+        # expression moves 5 of the 1296 Scope:Changed vectors across a band
+        # boundary (HIGH <-> MEDIUM, never CRITICAL), so the vector's own
+        # version decides which expression is used.
+        if version == "CVSS:3.0":
+            impact = 7.52 * (impact_sub - 0.029) - 3.25 * (impact_sub - 0.02) ** 15
+        else:
+            impact = 7.52 * (impact_sub - 0.029) - 3.25 * (impact_sub * 0.9731 - 0.02) ** 13
         if impact <= 0:
             return 0.0
+        multiplier = 1.08  # the changed-scope multiplier, unchanged since v3.0
     # Spec §7.1: round up to one decimal, capped at 10.
-    scaled = round(min(impact + exploitability, 10.0) * 100000)
+    scaled = round(min((impact + exploitability) * multiplier, 10.0) * 100000)
     return scaled / 100000 if scaled % 10000 == 0 else (math.floor(scaled / 10000) + 1) / 10
 
 

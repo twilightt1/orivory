@@ -56,8 +56,11 @@ async def _make_user(user_id: uuid.UUID, prefix: str) -> None:
 
 
 async def test_ingest_counts_only_real_index_successes(tmp_path, monkeypatch):
-    """A False return (or a raise) from the indexer is a FAILED upsert:
-    it must not be counted as created, and the failure must be reported."""
+    """A False return (or a raise) from the indexer is a FAILED upsert: it must
+    not be counted as created, and an instance that lost memories to the index is
+    not scored at all — the haystack it ran against is not the one the benchmark
+    means to measure (the caller turns the raise into that instance's error, which
+    keeps the run off the committed artifact and out of the mean)."""
     import app.retrieval.memory.write_back as write_back
 
     user_id = uuid.uuid4()
@@ -77,13 +80,107 @@ async def test_ingest_counts_only_real_index_successes(tmp_path, monkeypatch):
 
     monkeypatch.setattr(write_back, "index_new_memory", fake_index)
 
-    created = await ingest_instance(user_id, instance, tmp_path)
+    with pytest.raises(RuntimeError, match="2 of 3 memories never reached the index"):
+        await ingest_instance(user_id, instance, tmp_path)
 
     assert len(calls) == 3
-    assert created == 1  # only the third upsert landed
     report = json.loads((tmp_path / f"ingested_{instance.question_id}.json").read_text())
-    assert report["memories"] == 1
+    assert report["memories"] == 1  # only the third upsert landed
     assert report["index_failed"] == 2
+
+
+# --- the same two holes, one layer up: the run must not average them in -----
+
+
+async def test_a_purge_that_cannot_delete_vectors_leaves_the_rows_for_a_retry(
+    tmp_path, monkeypatch
+):
+    """Deleting the rows after a failed vector delete would strand vectors
+    nothing can find again — and the next instance shares the user, so it would
+    recall them. The purge reports None and keeps the rows so a retry can still
+    reach both halves."""
+    from sqlalchemy import select
+
+    import app.retrieval.memory.vector_store as vector_store
+    from app.database import AsyncSessionLocal
+    from app.models.memory import Memory
+
+    user_id = uuid.uuid4()
+    await _make_user(user_id, "bench-purge-fail")
+    async with AsyncSessionLocal() as db:
+        db.add(
+            Memory(
+                id=uuid.uuid4(),
+                user_id=user_id,
+                title="t",
+                content="c",
+                tags=[],
+                source_type="other",
+                source_ref="bench:qA:s0",
+            )
+        )
+        await db.commit()
+
+    async def refuses(_ids) -> bool:
+        return False
+
+    monkeypatch.setattr(vector_store, "delete_memories", refuses)
+
+    assert await purge_instance_memories(user_id, "qA") is None
+    async with AsyncSessionLocal() as db:
+        left = (
+            await db.execute(
+                select(Memory.source_ref).where(Memory.user_id == user_id)
+            )
+        ).scalars().all()
+    assert left == ["bench:qA:s0"]  # still there for the retry
+
+
+async def test_a_purge_failure_makes_the_run_partial(tmp_path, monkeypatch, capsys):
+    """An unpurged instance contaminates the ones after it, so the run is not a
+    measurement any more: it must take the partial artifact path."""
+    import argparse
+
+    import eval.run_system_benchmark as rsb
+
+    instances = load_instances(FIXTURE)[:2]
+    monkeypatch.setattr(rsb, "load_instances", lambda _path: instances)
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+
+    seen_partial: list[bool] = []
+
+    def artifact(**kw):
+        seen_partial.append(kw["partial"])
+        return tmp_path / "results.json"
+
+    async def fake_run_instance(client, user_id, instance, top_k, run_dir, **_kw):
+        return {
+            "question_id": instance.question_id,
+            "question_type": instance.question_type,
+            "correct": True,
+            "response": "a",
+            "memories_ingested": 1,
+            "memories_recalled": 1,
+            "ingest_seconds": 0.0,
+            "recall_seconds": 0.0,
+            "seconds": 0.0,
+            "error": None,
+        }
+
+    async def cannot_purge(_user_id, _question_id):
+        return None
+
+    monkeypatch.setattr(rsb, "run_instance", fake_run_instance)
+    monkeypatch.setattr(rsb, "purge_instance_memories", cannot_purge)
+    monkeypatch.setattr(rsb, "result_artifact_path", artifact)
+
+    args = argparse.Namespace(
+        n=2, seed=1, top_k=5, session=True, chunk_chars=0, fuse=False, concurrency=1
+    )
+    await rsb.main_async(args)
+
+    assert seen_partial == [True]
+    assert "PURGE FAILED for" in capsys.readouterr().out
 
 
 # --- finding 2: partial runs never masquerade as the clean artifact ------
@@ -182,6 +279,16 @@ async def test_run_loop_purges_each_instance_before_the_next(tmp_path, monkeypat
     ingested_user_ids: list[uuid.UUID] = []
     purges: list[str] = []
     real_purge = rsb.purge_instance_memories
+
+    # The embedded store is not running in this test, so the vector half has to
+    # be stubbed: a purge that cannot delete vectors now leaves the rows behind
+    # on purpose (see test_a_purge_that_cannot_delete_vectors_leaves_the_rows).
+    import app.retrieval.memory.vector_store as vector_store
+
+    async def vectors_gone(_ids) -> bool:
+        return True
+
+    monkeypatch.setattr(vector_store, "delete_memories", vectors_gone)
 
     async def fake_run_instance(client, user_id, instance, top_k, run_dir, **_kw):
         ingested_user_ids.append(user_id)
