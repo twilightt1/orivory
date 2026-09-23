@@ -19,8 +19,9 @@ from eval.benchmarks.memoryagentbench import Scenario
 
 # Per-question result record shape shared by both adapters' score paths:
 # {"question_id": str, "correct": bool} for LongMemEval-S style judging, and
-# {"question_id": str, "recalled_after_forget": bool, "competency": str} for
-# MemoryAgentBench (interpreted via interpret_result before it becomes "correct").
+# {"question_id": str, "recalled_after_forget": bool,
+#  "stale_fact_still_present": bool, "competency": str} for MemoryAgentBench
+# (interpreted via interpret_result before it becomes "correct").
 
 PHASES = ("plan", "ingest", "query", "score")
 
@@ -42,7 +43,9 @@ class RunnerConfig:
     limit: int | None = None
 
 
-def interpret_result(competency: str, recalled_after_forget: bool) -> str:
+def interpret_result(
+    competency: str, recalled_after_forget: bool, *, stale_fact_still_present: bool = False
+) -> str:
     """Interpret a MemoryAgentBench per-question recall flag per competency.
 
     POLARITY (fixture-specific, pinned by tests): the committed
@@ -53,13 +56,21 @@ def interpret_result(competency: str, recalled_after_forget: bool) -> str:
     gold is the to-be-forgotten fact itself) would INVERT this mapping; never
     hardcode ``True=BAD`` across the board.
 
+    Under that polarity the forgotten fact leaking back into the SAME response
+    is not a pass: a response carrying both the update and the verbatim stale
+    fact means the forget failed, so ``stale_fact_still_present=True`` forces
+    ``"fail"`` (the adapter already flags the response — see
+    :func:`eval.benchmarks.memoryagentbench.run_forgetting_scenario`).
+
     All other competencies (and unknown future ones) return
     ``"pending_interpretation"`` until the LLM-judge follow-up lands — the
     runner then reports them honestly as not yet scoreable rather than
     guessing.
     """
     if competency == "selective_forgetting":
-        return "pass" if recalled_after_forget else "fail"
+        if recalled_after_forget and not stale_fact_still_present:
+            return "pass"
+        return "fail"
     return "pending_interpretation"
 
 
@@ -141,7 +152,11 @@ async def run_score(config: RunnerConfig, results: list[dict]) -> dict:
     pending: list[dict] = []
     for record in results:
         if "recalled_after_forget" in record:
-            verdict = interpret_result(record.get("competency", ""), record["recalled_after_forget"])
+            verdict = interpret_result(
+                record.get("competency", ""),
+                record["recalled_after_forget"],
+                stale_fact_still_present=bool(record.get("stale_fact_still_present", False)),
+            )
             if verdict == "pending_interpretation":
                 pending.append({"question_id": record["question_id"], "competency": record.get("competency", "")})
             else:
