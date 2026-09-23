@@ -220,6 +220,46 @@ def test_selective_forgetting_fixture_polarity_true_is_pass():
     assert interpret_result("selective_forgetting", False) == "fail"
 
 
+def test_selective_forgetting_with_the_stale_fact_still_present_is_not_pass():
+    """Both the updated fact AND the verbatim forgotten fact in one response.
+
+    The adapter flags it (stale_fact_still_present=True — pinned in
+    test_memoryagentbench); scoring that response 'pass' would read a failed
+    forget as a success.
+    """
+    assert (
+        interpret_result("selective_forgetting", True, stale_fact_still_present=True)
+        == "fail"
+    )
+    assert (
+        interpret_result("selective_forgetting", True, stale_fact_still_present=False)
+        == "pass"
+    )
+
+
+async def test_run_score_stale_fact_leak_never_counts_as_pass(tmp_path):
+    config = RunnerConfig(
+        benchmark="memoryagentbench", dataset_path=MAB_FIXTURE, output_dir=tmp_path
+    )
+    results = [
+        {
+            "question_id": "fixture_sf_0001",
+            "competency": "selective_forgetting",
+            "recalled_after_forget": True,
+            "stale_fact_still_present": True,
+        },
+        {
+            "question_id": "fixture_sf_0002",
+            "competency": "selective_forgetting",
+            "recalled_after_forget": True,
+            "stale_fact_still_present": False,
+        },
+    ]
+    summary = await run_score(config, results)
+    assert summary["questions"] == 2
+    assert summary["mean"] == pytest.approx(0.5)
+
+
 def test_other_competencies_are_pending_interpretation():
     for competency in (
         "accurate_retrieval",

@@ -183,16 +183,31 @@ def generate_full_report(
     # LLM judge metrics
     if judge_summary:
         report["evaluation_modes"].append("llm_judge")
-        judge_score = judge_summary.get("avg_overall_score", 0.5)
-        if judge_score >= 0.8:
-            scores.append(0.4)  # Answer quality weight
-            report["answer_quality_status"] = "✅ Excellent"
-        elif judge_score >= 0.6:
-            scores.append(0.3)
-            report["answer_quality_status"] = "⚠️ Acceptable"
+        llm_cases = judge_summary.get("llm_cases", 0)
+        # The verdict is read from the LLM-JUDGED score only. The blended
+        # ``avg_overall_score`` mixes heuristic-fallback rows (constants up to
+        # ~0.9) in with judged ones, so reading it here let a run where every
+        # judge call failed over to heuristics claim "✅ Excellent" with zero
+        # judged cases.
+        judge_score = judge_summary.get("avg_overall_score_llm", 0.0)
+        report["answer_quality_llm_cases"] = llm_cases
+        report["answer_quality_score"] = judge_score
+        if not llm_cases:
+            report["answer_quality_score_source"] = "heuristic_fallback"
+            report["answer_quality_status"] = (
+                "⚠️ Not scored — 0 LLM-judged cases (heuristic fallback only)"
+            )
         else:
-            scores.append(0.1)
-            report["answer_quality_status"] = "❌ Poor"
+            report["answer_quality_score_source"] = "llm_judge"
+            if judge_score >= 0.8:
+                scores.append(0.4)  # Answer quality weight
+                report["answer_quality_status"] = "✅ Excellent"
+            elif judge_score >= 0.6:
+                scores.append(0.3)
+                report["answer_quality_status"] = "⚠️ Acceptable"
+            else:
+                scores.append(0.1)
+                report["answer_quality_status"] = "❌ Poor"
 
         # Add reasoning quality specifically
         report["reasoning_quality"] = judge_summary.get("reasoning_quality_score", 0.0)
@@ -247,9 +262,11 @@ def print_full_summary(report: dict[str, Any]) -> None:
         print(f"  Faithfulness:       {jq.get('avg_faithfulness', 0):.1%}")
         print(f"  Answer Relevancy:    {jq.get('avg_answer_relevancy', 0):.1%}")
         print(f"  Reasoning Quality:   {jq.get('reasoning_quality_score', 0):.1%}")
-        print(f"  Overall Score:      {jq.get('avg_overall_score', 0):.1%}")
+        print(f"  Overall Score:      {jq.get('avg_overall_score', 0):.1%} (blended, heuristic rows included)")
+        print(f"  LLM-Judged Cases:   {report.get('answer_quality_llm_cases', jq.get('llm_cases', 0))}")
         print(f"  Pass Rate:          {jq.get('pass_rate', 0):.1%}")
         print(f"  Status:             {report.get('answer_quality_status', 'N/A')}")
+        print(f"  Verdict from:       {report.get('answer_quality_score_source', 'N/A')}")
 
         # By difficulty
         if jq.get("by_difficulty"):
@@ -265,6 +282,8 @@ def print_full_summary(report: dict[str, Any]) -> None:
         status = "⚠️ Acceptable"
     else:
         status = "❌ Needs Improvement"
+    if report.get("answer_quality_score_source") == "heuristic_fallback":
+        status = "⚠️ Not scored — answer quality has no LLM-judged case; the answer-quality weight is omitted"
     print(f"  Score: {combined:.2f}/1.0 - {status}")
 
     if report.get("recommendations"):

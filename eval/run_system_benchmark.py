@@ -252,6 +252,11 @@ async def ingest_instance(user_id, instance, run_dir: Path, session_level: bool 
                           chunk_chars: int = 0) -> int:
     """Ingest one instance's haystack as memories (real embed + index).
 
+    Returns the number of memories whose vector write actually LANDED —
+    ``index_new_memory`` reports a failed upsert as ``False``/an exception and
+    those are never counted as created (the row is still in SQLite with the
+    durable outbox intent, but the index does not have it).
+
     Session-level strategy (v2): ONE memory per haystack session — the full
     turn-by-turn transcript as content, a topical title derived from the
     first substantive user turn, captured_at from the session date. A
@@ -266,6 +271,7 @@ async def ingest_instance(user_id, instance, run_dir: Path, session_level: bool 
     from app.retrieval.memory.write_back import index_new_memory
 
     created = 0
+    index_failed = 0
     memories: list[Memory] = []
     for session in instance.sessions:
         session_dt = _parse_session_date(session.date) or datetime(
@@ -362,14 +368,82 @@ async def ingest_instance(user_id, instance, run_dir: Path, session_level: bool 
         await db.commit()
     for memory in memories:  # real embed + qdrant upsert (graph skipped: off)
         try:
-            await index_new_memory(memory)
-            created += 1
+            landed = await index_new_memory(memory)
         except Exception as exc:
+            landed = False
             print(f"    index warning: {exc}")
+        if landed:
+            created += 1
+        else:
+            index_failed += 1
+    if index_failed:
+        print(
+            f"    index: {created}/{len(memories)} memories landed, "
+            f"{index_failed} FAILED (not counted as ingested)"
+        )
     (run_dir / f"ingested_{instance.question_id}.json").write_text(
-        json.dumps({"question_id": instance.question_id, "memories": created})
+        json.dumps(
+            {
+                "question_id": instance.question_id,
+                "memories": created,
+                "index_failed": index_failed,
+            }
+        )
     )
+    if index_failed:
+        # A haystack missing memories is not the haystack the benchmark means to
+        # measure: the instance is scored against whatever landed. Raising hands
+        # it to the caller's error path, which keeps the run off the committed
+        # artifact and out of the mean.
+        raise RuntimeError(
+            f"instance {instance.question_id}: {index_failed} of {len(memories)} "
+            "memories never reached the index, so its haystack is incomplete"
+        )
     return created
+
+
+async def purge_instance_memories(user_id, question_id: str) -> int | None:
+    """Delete one scored instance's memories (DB rows + vectors).
+
+    Returns the number of rows purged, or None when the vector delete did not
+    confirm. On None the SQL rows are deliberately left in place: dropping them
+    would strand vectors that nothing can find again, and the caller has to
+    treat the run as partial — the next instance shares the user and would
+    otherwise recall this haystack.
+
+    The run uses ONE benchmark user for the whole sample (the pinned
+    single-user protocol), and the retriever is user-scoped: without this,
+    a later instance's recall can return an earlier instance's haystack and
+    the scores become order-dependent. Cleaning up between instances keeps
+    that protocol intact — a user id per instance would break segment parity.
+    """
+    from sqlalchemy import delete, select
+
+    from app.database import AsyncSessionLocal
+    from app.models.memory import Memory
+    from app.retrieval.memory.vector_store import delete_memories as _delete_vectors
+
+    prefix = f"bench:{question_id}:"
+    async with AsyncSessionLocal() as db:
+        stale = (
+            await db.execute(
+                select(Memory.id).where(
+                    Memory.user_id == user_id,
+                    Memory.source_ref.startswith(prefix),
+                )
+            )
+        ).scalars().all()
+        if stale:
+            if not await _delete_vectors([str(i) for i in stale]):
+                return None
+            await db.execute(
+                delete(Memory).where(
+                    Memory.user_id == user_id,
+                    Memory.source_ref.startswith(prefix),
+                )
+            )
+            await db.commit()
+    return len(stale)
 
 
 async def stack_recall(user_id, query: str, top_k: int,
@@ -529,6 +603,38 @@ async def run_instance(client, user_id, instance, top_k, run_dir: Path,
     }
 
 
+def result_artifact_path(n: int, chunking: str, *, partial: bool) -> Path:
+    """Path for a run's results artifact.
+
+    ``partial=True`` (instances errored, or the run quit early) appends
+    ``_partial``: a partial run's mean covers fewer questions and must never
+    write the name a clean run commits under.
+    """
+    if n >= 100:
+        out = ROOT / "eval/benchmarks/results/longmemeval_s_system_n100.json"
+    else:
+        out = ROOT / (
+            "eval/benchmarks/results/longmemeval_s_system.json"
+            if chunking == "per_turn"
+            else "eval/benchmarks/results/longmemeval_s_system_session.json"
+        )
+    if partial:
+        out = out.with_name(f"{out.stem}_partial{out.suffix}")
+    return out
+
+
+def run_exit_code(records: list[dict], base_code: int = 0) -> int:
+    """Exit code for a finished run — 0 only when every instance completed.
+
+    ``base_code`` carries an earlier abort (3 = quota exhausted); otherwise an
+    instance that errored makes the run non-zero (2): the mean covers fewer
+    questions than the sample, which is not a clean success.
+    """
+    if base_code:
+        return base_code
+    return 2 if any(r.get("error") for r in records) else 0
+
+
 async def main_async(args) -> int:
     from uuid import uuid4
 
@@ -607,6 +713,7 @@ async def main_async(args) -> int:
     )
 
     records: list[dict] = []
+    purge_failed: list[str] = []
     t0 = time.time()
     exit_code = 0
     try:
@@ -618,6 +725,24 @@ async def main_async(args) -> int:
                     fuse=args.fuse,
                 )
             )
+            # Scored — drop this instance's haystack before the next one. One
+            # user for the whole sample (pinned single-user protocol) plus a
+            # user-scoped retriever means a later instance could otherwise
+            # recall an earlier instance's memories (order-dependent scores).
+            purged = await purge_instance_memories(benchmark_user_id, inst.question_id)
+            if purged:
+                print(f"    purged {purged} memories for {inst.question_id}")
+            elif purged is None:
+                # The next instance shares this user, so anything left behind is
+                # recallable by it: every score after this point would be measured
+                # against a contaminated haystack. Stop, and report failure.
+                purge_failed.append(inst.question_id)
+                exit_code = 2
+                print(
+                    f"    PURGE FAILED for {inst.question_id}: its memories may still be "
+                    "recallable, so the run stops here rather than score past it"
+                )
+                break
     except QuotaExhausted as exc:
         exit_code = 3
         print(f"\nQUOTA EXHAUSTED — aborting run early ({exc}). Partial results "
@@ -709,15 +834,10 @@ async def main_async(args) -> int:
         "per_question": records,
     }
     chunking = "session_level" if args.session else "per_turn"
-    suffix = ""
-    if args.n >= 100:
-        out = ROOT / f"eval/benchmarks/results/longmemeval_s_system_n100{suffix}.json"
-    else:
-        out = ROOT / (
-            "eval/benchmarks/results/longmemeval_s_system.json"
-            if chunking == "per_turn"
-            else "eval/benchmarks/results/longmemeval_s_system_session.json"
-        )
+    # A partial run is one that errored instances or quit early: its mean
+    # covers fewer questions than the sample.
+    partial = bool(errors) or bool(purge_failed) or len(records) < len(selected)
+    out = result_artifact_path(n=args.n, chunking=chunking, partial=partial)
     if out.exists():
         # Never overwrite a committed/frozen results file: new runs get a
         # timestamped sibling (learned the hard way — an n=100 rerun once
@@ -726,13 +846,21 @@ async def main_async(args) -> int:
         out = out.with_name(f"{out.stem}_{stamp}{out.suffix}")
     out.write_text(json.dumps(payload, indent=2))
     print(f"\nSYSTEM mean: {mean:.3f} ({correct}/{len(scored)}, errors={len(errors)})")
+    if partial:
+        print(
+            f"PARTIAL RUN — {len(errors)} instance(s) errored, {len(purge_failed)} "
+            f"unpurged, {len(records)}/"
+            f"{len(selected)} completed: the mean covers {len(scored)} question(s) "
+            f"and this run did NOT write the committed result artifact. "
+            f"Output: {out}"
+        )
     if comparison:
         print(f"baseline {comparison['baseline_mean']} → system {mean} "
               f"(delta {comparison['delta']:+.3f}, same_seed={comparison['same_seed']})")
     type_summary = {k: "{}/{}".format(v["correct"], v["n"]) for k, v in by_type.items()}
     print(f"by type: {type_summary}")
     print(f"total: {total}s → {out}")
-    return exit_code
+    return run_exit_code(records, base_code=exit_code)
 
 
 def main() -> int:

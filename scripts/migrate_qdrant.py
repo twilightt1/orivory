@@ -306,9 +306,13 @@ def memory_rows(session: Session, *, namespace: str | None = PERSONAL) -> dict[s
     """``{memory_id: {...}}`` for every memory row, eligible or not.
 
     Eligible = the read path's serve set: ``state_of`` current or needs-check
-    (superseded and dirty are history/never-served), and NOT a projection whose
-    source identity the user suppressed (a forgotten source must not keep a
-    servable vector, R28).
+    (invalidated, superseded and dirty are history/never-served), and NOT a
+    projection whose source identity the user suppressed (a forgotten source
+    must not keep a servable vector, R28).
+
+    Every consumer decides with ``record["reason"] is None``, so EVERY
+    non-servable state must map to a reason: an unmapped one is silently
+    re-embedded and accepted by ``verify`` after cutover.
 
     ``namespace`` is the P4a namespace boundary (Task 4): a bulk read here is
     never an unscoped read — it defaults to ``personal``, the only namespace
@@ -326,6 +330,11 @@ def memory_rows(session: Session, *, namespace: str | None = PERSONAL) -> dict[s
         reason = None
         if state == "superseded":
             reason = "superseded"
+        elif state == "invalidated":
+            # state_of's TOP precedence: an invalidated (forgotten) row must
+            # not be re-embedded by a backfill, and the audit that gates the
+            # cutover reads this same map.
+            reason = "invalidated"
         elif state == "dirty":
             reason = "dirty"
         elif memory.source_ref and (memory.user_id.hex, memory.source_ref) in suppressed:
