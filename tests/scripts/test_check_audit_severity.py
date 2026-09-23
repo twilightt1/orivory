@@ -116,3 +116,66 @@ def test_ci_runs_the_severity_script_and_not_a_grep():
     run = audit[0]["run"]
     assert "scripts/check_audit_severity.py pip-audit.json" in run
     assert "grep -q 'CRITICAL'" not in run
+
+
+# --- vectors, for the records OSV sends with no severity word ---------------
+# Some OSV records carry severity only as a top-level CVSS v3 vector, so a gate
+# that reads database_specific.severity alone calls them UNKNOWN and lets a 9.8
+# through. The vector below is the real one on CVE-2020-14343, which has no
+# database_specific.severity (verified live against api.osv.dev).
+CVE_2020_14343_VECTOR = "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"
+
+
+@pytest.mark.parametrize(
+    ("vector", "score"),
+    [
+        (CVE_2020_14343_VECTOR, 9.8),
+        ("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H", 10.0),  # scope-changed branch (log4shell)
+        ("CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H", 7.8),
+        ("CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:L/I:L/A:N", 5.4),
+        ("CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:U/C:L/I:N/A:N", 3.1),
+    ],
+)
+def test_cvss_v3_base_scores_match_published_values(vector, score):
+    assert gate.cvss_v3_base_score(vector) == pytest.approx(score)
+
+
+def test_a_vector_with_a_critical_score_fails_the_gate(tmp_path, monkeypatch, capsys):
+    """The CVE-2020-14343 shape end to end: no severity word, only the 9.8 vector."""
+    record = {"id": "CVE-2020-14343", "severity": [{"type": "CVSS_V3", "score": CVE_2020_14343_VECTOR}]}
+    exit_code = _run(tmp_path, _payload({"id": "CVE-2020-14343"}), monkeypatch,
+                     _responder({"CVE-2020-14343": record}))
+    assert exit_code == 1
+    assert "critical advisories by OSV (1): CVE-2020-14343" in capsys.readouterr().out
+
+
+def test_a_vector_with_a_medium_score_is_counted_but_does_not_block(tmp_path, monkeypatch, capsys):
+    record = {"severity": [{"type": "CVSS_V3", "score": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:L/I:L/A:N"}]}
+    exit_code = _run(tmp_path, _payload({"id": "GHSA-aaaa-bbbb-cccc"}), monkeypatch,
+                     _responder({"GHSA-aaaa-bbbb-cccc": record}))
+    assert exit_code == 0
+    assert "MEDIUM 1" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("vtype", "vector"),
+    [
+        ("CVSS_V4", "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N"),
+        ("CVSS_V2", "AV:N/AC:L/Au:N/C:P/I:P/A:P"),
+    ],
+)
+def test_a_v2_or_v4_vector_stays_unknown(tmp_path, monkeypatch, capsys, vtype, vector):
+    """Unscoreable vectors must surface as UNKNOWN, never as a silent pass."""
+    record = {"severity": [{"type": vtype, "score": vector}]}
+    exit_code = _run(tmp_path, _payload({"id": "GHSA-aaaa-bbbb-cccc"}), monkeypatch,
+                     _responder({"GHSA-aaaa-bbbb-cccc": record}))
+    assert exit_code == 0
+    assert "UNKNOWN 1" in capsys.readouterr().out
+
+
+def test_a_malformed_v3_vector_stays_unknown(tmp_path, monkeypatch, capsys):
+    record = {"severity": [{"type": "CVSS_V3", "score": "CVSS:3.1/AV:Z/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"}]}
+    exit_code = _run(tmp_path, _payload({"id": "GHSA-aaaa-bbbb-cccc"}), monkeypatch,
+                     _responder({"GHSA-aaaa-bbbb-cccc": record}))
+    assert exit_code == 0
+    assert "UNKNOWN 1" in capsys.readouterr().out
