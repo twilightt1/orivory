@@ -36,7 +36,10 @@ done
 
 command -v docker >/dev/null 2>&1 || { warn "docker is required: https://docs.docker.com/get-docker/"; exit 1; }
 
-mkdir -p "$DIR"
+# The data directory is created HERE, not left to Docker: the container runs
+# as the unprivileged `app` user, and a bind-mount target dockerd creates for
+# it is root-owned — bootstrap_sqlite() then cannot write and first boot dies.
+mkdir -p "$DIR/data"
 
 if docker image inspect "$IMAGE" >/dev/null 2>&1; then
   say "using local image $IMAGE"
@@ -77,10 +80,10 @@ AGENT_TOKEN=$(curl -fsS -X POST "$API/agents" \
   | python3 -c "import sys,json;print(json.load(sys.stdin)['token'])")
 
 say "storing + recalling your first memory (zero API keys needed)"
-curl -fsS -X POST "$API/memories" -H "Authorization: Bearer $TOKEN" \
+curl -fsS -X POST "$API/memories" -H "Authorization: Bearer $AGENT_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"content":"Orivory remembers this without any API keys."}' >/dev/null
-RECALL=$(curl -fsS -X POST "$API/memories/recall" -H "Authorization: Bearer $TOKEN" \
+RECALL=$(curl -fsS -X POST "$API/memories/recall" -H "Authorization: Bearer $AGENT_TOKEN" \
   -H 'Content-Type: application/json' -d '{"query":"what does Orivory remember?"}' \
   | python3 -c "import sys,json;d=json.load(sys.stdin);print(d['results'][0]['content'] if d['results'] else 'NO-RECALL')")
 say "recalled: $RECALL"
