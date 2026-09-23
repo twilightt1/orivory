@@ -20,3 +20,7 @@ services:
 
 volumes:
   orivory-data:
+    # Compose would otherwise name this `<project>_orivory-data`; the backup
+    # runbook mounts the literal name, so backups came out EMPTY and a restore
+    # landed in a volume nothing reads.
+    name: orivory-data
