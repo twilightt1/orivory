@@ -321,16 +321,12 @@ jobs:
       - name: Check for critical vulnerabilities
         run: |
           python -m pip_audit --requirement requirements.txt --requirement requirements-dev.txt -f json > pip-audit.json || true
-          
-          if grep -q 'CRITICAL' pip-audit.json 2>/dev/null; then
-            echo "⚠️  Critical severity vulnerabilities found!"
-            cat pip-audit.json
-            echo ""
-            echo "Please review and update affected packages."
-            exit 1
-          else
-            echo "✅ No critical severity vulnerabilities found"
-          fi
+          # pip-audit's JSON carries no severity field, so grepping it for
+          # "CRITICAL" matched advisory prose (missed real criticals, failed on
+          # descriptions). The script resolves each reported id against OSV and
+          # exits non-zero on CRITICAL — and non-zero if it cannot reach OSV,
+          # because a gate that never ran must not read green.
+          python scripts/check_audit_severity.py pip-audit.json
 
       - name: Upload audit results
         uses: actions/upload-artifact@v4
