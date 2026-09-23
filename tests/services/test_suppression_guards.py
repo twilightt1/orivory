@@ -461,3 +461,54 @@ async def test_a_producer_label_is_never_pinned_by_a_forget(db):
     assert await _suppressions() == [], "no ledger row for a producer label"
     async with database.AsyncSessionLocal() as session:
         assert state_of(await session.get(Memory, row.id)) == "invalidated"
+
+
+async def test_the_loser_of_a_suppression_race_backfills_the_winner(db, monkeypatch):
+    """A rival's row wins the insert; the hash we carry must still land.
+
+    Review finding, verified: both faces answered ``IntegrityError`` with a
+    bare ``pass``. The winner's row was written earlier with a NULL
+    ``content_hash`` (its own forget carried none — R38 backfills nothing
+    across time), so the LOSING forget's hash is the only one that can pin the
+    bytes it just forgot. Losing it means a re-upload of those bytes slips past
+    the hash guard forever.
+
+    The pre-read is made to miss on this call, which is the race's actual
+    shape: the rival commits between our read and our insert. Without that,
+    the found-row branch would fill the values and the ``IntegrityError``
+    branch would never run — which is exactly why this defect survived.
+    """
+    owner = await _owner(db)
+    winner = MemorySuppression(id=uuid.uuid4().hex, user_id=owner, source_ref="doc-raced",
+                               reason="forgotten", namespace="personal", content_hash=None)
+    db.add(winner)
+    await db.commit()
+
+    real_execute = db.execute
+    seen: list[int] = []
+
+    class _Miss:
+        def scalar_one_or_none(self):
+            return None
+
+    async def missing_once(*args, **kwargs):
+        seen.append(1)
+        if len(seen) == 1:
+            return _Miss()
+        return await real_execute(*args, **kwargs)
+
+    monkeypatch.setattr(db, "execute", missing_once)
+    pinned = "ab" * 32
+    assert await suppress_source_async(db, user_id=owner, source_ref="doc-raced",
+                                       reason="forgotten", namespace="personal",
+                                       content_hash=pinned) is True
+    await db.commit()
+
+    row = (await db.execute(
+        select(MemorySuppression).where(MemorySuppression.user_id == owner,
+                                        MemorySuppression.source_ref == "doc-raced")
+    )).scalar_one()
+    assert row.content_hash == pinned, (
+        "the loser's content_hash must be filled into the winner's row: it is the only "
+        "pin on the forgotten bytes"
+    )

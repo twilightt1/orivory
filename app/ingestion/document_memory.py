@@ -174,6 +174,43 @@ def _fill_missing_suppression_fields(existing, *, namespace: str | None,
         existing.namespace = namespace
 
 
+def _fill_losing_suppression(db: Session, *, user_id, source_ref: str,
+                             namespace: str | None, content_hash: str | None) -> None:
+    """Teach the ledger what the LOSING side of a suppression race carried.
+
+    The rival's row commits between our pre-read and our insert, so this
+    caller saw neither the row nor what it holds: reload it and fill what it
+    lacks (same NULL-only rule as the found-row branch — the first writer's
+    values always win). Without this the hash that pins the BYTES is dropped on
+    the floor and a re-upload of the same file slips past the guard.
+    Caller's transaction; the caller commits.
+    """
+    existing = db.execute(
+        select(MemorySuppression).where(
+            MemorySuppression.user_id == user_id,
+            MemorySuppression.source_ref == source_ref)
+    ).scalar_one_or_none()
+    if existing is not None:
+        _fill_missing_suppression_fields(existing, namespace=namespace,
+                                         content_hash=content_hash)
+        db.flush()
+
+
+async def _fill_losing_suppression_async(db: AsyncSession, *, user_id, source_ref: str,
+                                          namespace: str | None,
+                                          content_hash: str | None) -> None:
+    """Async face of :func:`_fill_losing_suppression` — same row, same rule."""
+    existing = (await db.execute(
+        select(MemorySuppression).where(
+            MemorySuppression.user_id == user_id,
+            MemorySuppression.source_ref == source_ref)
+    )).scalar_one_or_none()
+    if existing is not None:
+        _fill_missing_suppression_fields(existing, namespace=namespace,
+                                         content_hash=content_hash)
+        await db.flush()
+
+
 def projection_content_hash(row) -> str | None:
     """The upload-time content hash a projection row carries, or ``None``.
 
@@ -239,7 +276,13 @@ def suppress_source(db: Session, *, user_id, source_ref: str, reason: str = "for
                                      namespace=namespace, content_hash=content_hash))
             db.flush()
     except IntegrityError:
-        pass
+        # A rival forget landed the row between our read and our insert. That
+        # row is the ledger, and its own forget may have carried nothing —
+        # while THIS one carries the hash that pins the bytes (or the namespace
+        # that scopes them). Teach the winner what it lacks: a re-upload of the
+        # same file is otherwise unrecognisable to the hash guard forever.
+        _fill_losing_suppression(db, user_id=user_id, source_ref=source_ref,
+                                 namespace=namespace, content_hash=content_hash)
     return True
 
 
@@ -274,7 +317,12 @@ async def suppress_source_async(db: AsyncSession, *, user_id, source_ref: str,
                                      namespace=namespace, content_hash=content_hash))
             await db.flush()
     except IntegrityError:
-        pass
+        # Same race, same rule as the sync face: reload the winner and teach it
+        # what this forget carries (see ``_fill_losing_suppression``).
+        await _fill_losing_suppression_async(
+            db, user_id=user_id, source_ref=source_ref,
+            namespace=namespace, content_hash=content_hash,
+        )
     return True
 
 
