@@ -282,8 +282,18 @@ def main() -> int:
     parser.add_argument("--chunk-chars", type=int, default=None)
     parser.add_argument("--top-k", type=int, default=None)
     fuse = parser.add_mutually_exclusive_group()
-    fuse.add_argument("--fuse", dest="fuse", action="store_true")
-    fuse.add_argument("--no-fuse", dest="fuse", action="store_false")
+    fuse.add_argument(
+        "--fuse",
+        dest="fuse",
+        action="store_true",
+        help="also recall with the rewritten query and union results",
+    )
+    fuse.add_argument(
+        "--no-fuse",
+        dest="fuse",
+        action="store_false",
+        help="skip the second rewritten-query recall",
+    )
     parser.set_defaults(fuse=None)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()

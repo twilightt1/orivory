@@ -167,6 +167,11 @@ def build_stack_metadata(
         "passage_prefix": fingerprint["passage_prefix"],
         "retriever": "MemoryRetriever (vector + salience + entity boost + rerank)",
         "recall_top_k": top_k,
+        "retrieval": {
+            "hybrid_enabled": bool(settings.RETRIEVAL_HYBRID_ENABLED),
+            "rerank_pool_multiplier": settings.RETRIEVAL_RERANK_POOL_MULTIPLIER,
+            "rrf_k": settings.RETRIEVAL_RRF_K,
+        },
         "git_head": git_head,
         "git_dirty": git_dirty,
         "dataset_path": str(dataset_path),

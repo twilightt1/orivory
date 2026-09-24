@@ -3,13 +3,22 @@ _RETRIEVAL_CONTRACT_KEYS = (
     "embeddings_actual",
     "rerank",
     "recall_top_k",
+    "retrieval",
 )
+_RETRIEVAL_POLICY_KEYS = ("hybrid_enabled", "rerank_pool_multiplier", "rrf_k")
 _CONTEXT_POLICY_KEYS = ("session_level", "chunk_chars", "fuse")
 
 
 def retrieval_contract_matches(recorded: object, current: object) -> bool:
-    """Require the active embedding, rerank, recall, and ingestion contracts to match."""
+    """Require matching embedding, retrieval, rerank, recall, and ingest contracts."""
     if not isinstance(recorded, dict) or not isinstance(current, dict):
+        return False
+
+    recorded_retrieval = recorded.get("retrieval")
+    current_retrieval = current.get("retrieval")
+    if not isinstance(recorded_retrieval, dict) or not isinstance(current_retrieval, dict):
+        return False
+    if any(key not in recorded_retrieval or key not in current_retrieval for key in _RETRIEVAL_POLICY_KEYS):
         return False
     if any(recorded.get(key) != current.get(key) for key in _RETRIEVAL_CONTRACT_KEYS):
         return False

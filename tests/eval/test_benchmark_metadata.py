@@ -16,6 +16,11 @@ def test_stack_metadata_reflects_actual_backend(monkeypatch):
     assert meta["embedding_backend"] == "local-arctic"
     assert "arctic" in meta["embeddings_actual"]["model_id"].lower()
     assert meta["recall_top_k"] == 10
+    assert meta["retrieval"] == {
+        "hybrid_enabled": embedder.settings.RETRIEVAL_HYBRID_ENABLED,
+        "rerank_pool_multiplier": embedder.settings.RETRIEVAL_RERANK_POOL_MULTIPLIER,
+        "rrf_k": embedder.settings.RETRIEVAL_RRF_K,
+    }
     assert meta["git_head"] and "git_dirty" in meta
     assert meta["dataset_sha256"] and meta["dataset_path"]
     assert meta["dataset_source"] in {"worktree", "external-checkout-fallback"}
