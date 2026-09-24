@@ -74,6 +74,19 @@ def test_production_local_embeddings_do_not_require_openai_key():
     assert settings.USE_LOCAL_EMBEDDINGS is True
 
 
+@pytest.mark.parametrize("api_key", ["", "   "])
+def test_production_remote_embeddings_without_nonblank_key_fall_back_to_local(api_key):
+    settings = _production_settings(USE_LOCAL_EMBEDDINGS=False, OPENAI_API_KEY=api_key)
+
+    assert settings.USE_LOCAL_EMBEDDINGS is True
+
+
+def test_production_remote_embeddings_require_explicit_nonblank_key():
+    settings = _production_settings(USE_LOCAL_EMBEDDINGS=False, OPENAI_API_KEY="configured")
+
+    assert settings.USE_LOCAL_EMBEDDINGS is False
+
+
 def test_production_compression_requires_openai_key():
     with pytest.raises(ValidationError, match="OPENAI_API_KEY"):
         _production_settings(OPENAI_API_KEY="", COMPRESSION_ENABLED=True)

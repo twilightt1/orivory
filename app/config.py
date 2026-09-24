@@ -280,9 +280,9 @@ class Settings(BaseSettings):
             and _is_local_host(self.QDRANT_URL)
         ):
             self.QDRANT_MODE = "local"
-        # If an operator explicitly disables the local model without supplying
-        # an OpenAI-compatible embedding key, restore the zero-cost local path.
-        if not self.USE_LOCAL_EMBEDDINGS and not self.OPENAI_API_KEY:
+        # If an operator explicitly disables the local model without a
+        # nonblank OpenAI-compatible embedding key, restore the zero-cost path.
+        if not self.USE_LOCAL_EMBEDDINGS and not self.OPENAI_API_KEY.strip():
             self.USE_LOCAL_EMBEDDINGS = True
         return self
 
@@ -367,7 +367,7 @@ class Settings(BaseSettings):
 
     def _require_provider_keys(self) -> None:
         required_keys = {"OPENROUTER_API_KEY": self.OPENROUTER_API_KEY}
-        if self.COMPRESSION_ENABLED:
+        if self.COMPRESSION_ENABLED or not self.USE_LOCAL_EMBEDDINGS:
             required_keys["OPENAI_API_KEY"] = self.OPENAI_API_KEY
         missing = [name for name, value in required_keys.items() if not value.strip()]
         if missing:
