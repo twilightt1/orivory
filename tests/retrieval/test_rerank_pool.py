@@ -161,6 +161,17 @@ def recall_env(monkeypatch, barrier_outbox):
     return uid
 
 
+@pytest.fixture(autouse=True)
+def _pin_the_paid_transport(monkeypatch):
+    """This module exercises the Jina HTTP lane — pin it.
+
+    ``RERANK_BACKEND=auto`` resolves to the bundled local cross-encoder, so
+    every test here that mocks ``get_jina_client`` must ask for the paid lane
+    by name; the auto/local resolution is pinned in test_local_rerank.py.
+    """
+    monkeypatch.setattr(settings, "RERANK_BACKEND", "jina")
+
+
 # ── R10/R4: count invariant over top_k x pool shape ─────────────────────────
 
 

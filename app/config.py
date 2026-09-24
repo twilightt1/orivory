@@ -199,11 +199,12 @@ class Settings(BaseSettings):
     # hold the recall path for the client's own 30 s default. Overrunning it is
     # a `RerankUnavailable` — dense order continues, counted.
     JINA_RERANKER_TIMEOUT_SECONDS: float = 10.0
-    # Which transport serves the opt-in rerank above: "auto" (default) picks
-    # Jina when JINA_API_KEY is set and the bundled local ONNX cross-encoder
-    # (gte-multilingual-reranker-base, int8) otherwise — the $0 self-host path
-    # never needs the paid API, and the keyed lane keeps the model it was
-    # measured with. "jina" / "local" pin one explicitly. Validated at load.
+    # Which transport serves the opt-in rerank above: "auto" (default) is the
+    # bundled local ONNX cross-encoder (gte-multilingual-reranker-base, int8) —
+    # the $0 self-host path is the default, so a recall never reaches for the
+    # paid API unasked. "jina" pins the paid HTTP lane (the model the frozen
+    # benchmark was reranked with); "local" pins the bundled one. Validated at
+    # load.
     RERANK_BACKEND: str = "auto"
     # ── Embedding backend support matrix (frozen v1.1.0) ──
     #   jina  (USE_JINA_EMBEDDINGS=true + JINA_API_KEY): SUPPORTED default

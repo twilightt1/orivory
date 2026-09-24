@@ -178,10 +178,10 @@ async def test_local_lane_empty_pool_short_circuits(local_backend, monkeypatch):
 # ── dispatch ────────────────────────────────────────────────────────────────
 
 
-def test_backend_auto_prefers_jina_only_with_a_key(monkeypatch):
+def test_backend_auto_is_local_even_with_a_key(monkeypatch):
     monkeypatch.setattr(settings, "RERANK_BACKEND", "auto")
     monkeypatch.setattr(settings, "JINA_API_KEY", "jina-key")
-    assert reranker_module._backend() == "jina"
+    assert reranker_module._backend() == "local", "$0 is the default; the paid lane is opt-in"
     monkeypatch.setattr(settings, "JINA_API_KEY", "")
     assert reranker_module._backend() == "local", "$0 self-host path needs no paid API"
 
@@ -189,7 +189,7 @@ def test_backend_auto_prefers_jina_only_with_a_key(monkeypatch):
 def test_backend_pins_are_honoured(monkeypatch):
     monkeypatch.setattr(settings, "JINA_API_KEY", "")
     monkeypatch.setattr(settings, "RERANK_BACKEND", "JINA")
-    assert reranker_module._backend() == "jina", "an explicit pin outranks the key check"
+    assert reranker_module._backend() == "jina", "an explicit pin wins over the key check"
 
 
 def test_bogus_backend_is_refused_at_load():
