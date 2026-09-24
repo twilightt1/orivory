@@ -123,10 +123,10 @@ def test_accepts_ort_intra_op_boundary_values():
 
 @pytest.mark.parametrize("cap", [0, -1])
 def test_rejects_invalid_reranker_cap(cap):
-    """The cap is the per-call `min(top_k, cap)`: a 0 cap asks the transport
+    """The cap is the per-call `min(top_k, cap)`: a 0 cap asks the scorer
     for zero rows on every request — a typo, not a configuration."""
-    with pytest.raises(ValidationError, match="JINA_RERANKER_TOP_N"):
-        _base_settings(JINA_RERANKER_TOP_N=cap)
+    with pytest.raises(ValidationError, match="RERANK_TOP_N"):
+        _base_settings(RERANK_TOP_N=cap)
 
 
 @pytest.mark.parametrize("multiplier", [0, -1.0])
@@ -135,14 +135,6 @@ def test_rejects_invalid_rerank_pool_multiplier(multiplier):
     that silently collapses the fetch, and the invariant would hide it."""
     with pytest.raises(ValidationError, match="RETRIEVAL_RERANK_POOL_MULTIPLIER"):
         _base_settings(RETRIEVAL_RERANK_POOL_MULTIPLIER=multiplier)
-
-
-@pytest.mark.parametrize("timeout", [0, -0.5])
-def test_rejects_invalid_reranker_timeout(timeout):
-    """A non-positive timeout turns every rerank call into a failure the
-    moment it is attempted; R11(p2) made it a bound, not a suggestion."""
-    with pytest.raises(ValidationError, match="JINA_RERANKER_TIMEOUT_SECONDS"):
-        _base_settings(JINA_RERANKER_TIMEOUT_SECONDS=timeout)
 
 
 def test_environment_whitespace_is_normalized_before_the_production_gate():

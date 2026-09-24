@@ -480,12 +480,12 @@ class ExactCosineStore:
 
 
 async def _local_rerank_standin(query: str, chunks: list[dict], *, top_n: int | None = None):
-    """The offline stand-in for the Jina cross-encoder (documented substitution).
+    """The offline stand-in for the cross-encoder (documented substitution).
 
     Deterministic IDF-weighted token coverage over the SQL-authorized ``content``:
     a rare query term in a document moves it up, a common one barely does. It
     mirrors the real ``rerank`` contract — ``[{**chunk, "rerank_score"}]``, best
-    first, at most ``min(top_n, JINA_RERANKER_TOP_N)`` rows — so the pipeline's
+    first, at most ``min(top_n, RERANK_TOP_N)`` rows — so the pipeline's
     merge and revalidation run exactly as in production.
     """
     query_terms = set(_word_tokens(fold(query)))
@@ -507,7 +507,7 @@ async def _local_rerank_standin(query: str, chunks: list[dict], *, top_n: int | 
         (chunk, score(docs[i])) for i, chunk in enumerate(chunks)
     ]
     scored.sort(key=lambda pair: (-pair[1], str(pair[0].get("memory_id", ""))))
-    cap = reranker_module.settings.JINA_RERANKER_TOP_N
+    cap = reranker_module.settings.RERANK_TOP_N
     limit = min(int(top_n), cap) if top_n is not None else cap
     return [
         {**chunk, "rerank_score": value}

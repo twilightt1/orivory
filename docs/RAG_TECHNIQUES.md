@@ -133,36 +133,26 @@ Cheaper than re-embedding the whole corpus, and the signal is much stronger
 than cosine similarity alone.
 
 **Status: opt-in per deployment** (`RETRIEVAL_SEMANTIC_RERANK=false` by
-default). It is an outbound call carrying memory text, which is why the
-pipeline SQL-authorizes and re-reads every candidate BEFORE the transport sees
-it (spec §7.5/§14: no pre-ACL outbound text).
+default). Nothing leaves the box, and the pipeline still SQL-authorizes and
+re-reads every candidate BEFORE the scorer sees it (spec §7.5/§14: no
+pre-ACL text reaches even a local model).
 
-**Where.** [`app/retrieval/reranker.py`](../app/retrieval/reranker.py) dispatches
-on `RERANK_BACKEND` (`auto` by default — the local lane; `jina` must be pinned
-explicitly because it is the paid transport):
-
-- `jina` — the Jina rerank API (`jina-reranker-v2-base-multilingual`), one HTTP
-  call bounded by `JINA_RERANKER_TIMEOUT_SECONDS` (default 10). Paid, and the
-  model the frozen benchmark was reranked with — opt-in by pin only.
-- `local` — the bundled ONNX cross-encoder
-  (`gte-multilingual-reranker-base`, int8, Apache-2.0) via
-  [`app/retrieval/local_reranker.py`](../app/retrieval/local_reranker.py):
-  341 MB downloaded once into `LOCAL_E5_DIR`, scored on the embed executor like
-  the local embeddings, no API key, no outbound memory text.
-
-`auto` picks `jina` when `JINA_API_KEY` is set and `local` otherwise, so the
-$0 self-host path never needs the paid reranker. Measured on the dev Mac
-(int8, batch=1): 135 ms per pair at 512 tokens, 324 ms at 1024 — the Jina
-model's own int8 export is 137/351 ms, so the local lane costs the same and
-saves the licence (Jina's weights are CC-BY-NC). One recall call reranks the
-whole pool, so both lanes belong to the opt-in regime, not the default path.
+**Where.** [`app/retrieval/reranker.py`](../app/retrieval/reranker.py) is the
+entry point; the lane is the bundled ONNX cross-encoder
+(`gte-multilingual-reranker-base`, int8, Apache-2.0) via
+[`app/retrieval/local_reranker.py`](../app/retrieval/local_reranker.py):
+341 MB downloaded once into `LOCAL_E5_DIR`, scored on the embed executor like
+the local embeddings, no API key, no per-call cost, no outbound memory text.
+Measured on the dev Mac (int8, batch=1): 135 ms per pair at 512 tokens, 324 ms
+at 1024. One recall call scores the whole pool, so the rerank belongs to the
+opt-in regime, not the default path.
 
 **Semantics (P2).** The window is the retrieval pool
 `top_k x RETRIEVAL_RERANK_POOL_MULTIPLIER` (signed default 2.0);
-`JINA_RERANKER_TOP_N` (default 20) is only the per-call CAP on the transport's
+`RERANK_TOP_N` (default 20) is only the per-call CAP on the scorer's
 answer, and the reranked head is MERGED into dense order — the served count is
-`min(top_k, eligible)` and never shrinks because rerank ran. A timeout, a
-non-2xx or a malformed body is typed (`RerankUnavailable` /
+`min(top_k, eligible)` and never shrinks because rerank ran. A scoring failure
+or an answer with nothing usable in it is typed (`RerankUnavailable` /
 `RerankInvalidResponse`): the answer continues in dense order, counted as
 `retrieval.rerank_failed`. A `0.0` relevance is DATA, never absence.
 

@@ -516,11 +516,11 @@ class MemoryRetriever:
                 stage_ms["refill"] = (time.perf_counter() - t_refill) * 1000.0
                 counts["refill"] = added
 
-        # 5b) Semantic rerank (Jina or the bundled local cross-encoder — the
-        # transport is RERANK_BACKEND, opt-in): the input is now
+        # 5b) Semantic rerank (the bundled local cross-encoder, opt-in via
+        # RETRIEVAL_SEMANTIC_RERANK): the input is now
         # SQL-authorized current content. A rerank FAILURE — the typed
         # RerankUnavailable/RerankInvalidResponse, or anything unexpected the
-        # transport throws — degrades to dense order and is counted (R11(p2));
+        # lane throws — degrades to dense order and is counted (R11(p2));
         # a SUCCESS merges instead of replacing (R10(p2)).
         if self.semantic_rerank and len(candidates) > 1:
             fallback_candidates = candidates

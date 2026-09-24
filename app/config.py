@@ -153,10 +153,11 @@ class Settings(BaseSettings):
     JINA_EMBED_MODEL: str = "jina-embeddings-v3"
     JINA_EMBED_DIMENSIONS: int = 1024
     # Cross-encoder rerank inside MemoryRetriever: reorder the vector
-    # candidate pool by true query-document relevance (Jina reranker)
-    # before salience/decay modifiers. Off by default — per-deployment.
+    # candidate pool by true query-document relevance (the bundled local ONNX
+    # cross-encoder, app/retrieval/local_reranker.py — no API key, no per-call
+    # cost) before salience/decay modifiers. Off by default — per-deployment,
+    # and it spends CPU (a full pool is ~6 s of scoring) rather than money.
     RETRIEVAL_SEMANTIC_RERANK: bool = False
-    JINA_RERANKER_MODEL: str = "jina-reranker-v2-base-multilingual"
     # Per-call CAP on the reranker's own answer, never the rerank window: the
     # per-call `top_n` is the request's own top_k clamped to this value
     # (ruling R4(p2)). The REQUEST carries the whole candidate pool — up to
@@ -170,7 +171,7 @@ class Settings(BaseSettings):
     # boost x decay. Serving a larger window, raise it to `top_k x pool
     # multiplier`; it stays a cap, and the extra ranks cost only what the
     # opt-in rerank flag spends.
-    JINA_RERANKER_TOP_N: int = 20
+    RERANK_TOP_N: int = 20
     # Rerank pool: dense candidates fetched per requested result (ruling
     # R4(p2), signed default 2.0). One pool feeds the eligibility filter, the
     # reranker and scoring; a pool smaller than top_k cannot satisfy the count
@@ -195,17 +196,6 @@ class Settings(BaseSettings):
     # at load (>= 1): a negative k zero-divides at rank 0, and the outage
     # fallback reads it with the hybrid flag OFF.
     RETRIEVAL_RRF_K: int = 60
-    # Bound on ONE rerank HTTP call (ruling R11(p2)): a hung transport must not
-    # hold the recall path for the client's own 30 s default. Overrunning it is
-    # a `RerankUnavailable` — dense order continues, counted.
-    JINA_RERANKER_TIMEOUT_SECONDS: float = 10.0
-    # Which transport serves the opt-in rerank above: "auto" (default) is the
-    # bundled local ONNX cross-encoder (gte-multilingual-reranker-base, int8) —
-    # the $0 self-host path is the default, so a recall never reaches for the
-    # paid API unasked. "jina" pins the paid HTTP lane (the model the frozen
-    # benchmark was reranked with); "local" pins the bundled one. Validated at
-    # load.
-    RERANK_BACKEND: str = "auto"
     # ── Embedding backend support matrix (frozen v1.1.0) ──
     #   jina  (USE_JINA_EMBEDDINGS=true + JINA_API_KEY): SUPPORTED default
     #           for full-stack. Matches the frozen benchmark baseline.
@@ -353,27 +343,19 @@ class Settings(BaseSettings):
         # ── The P2 numeric knobs (T1/T2/T5): each one has a domain a typo can
         # leave silently — a 0-width embed executor raises inside the first
         # request, a negative ORT width fails far from load, a 0 cap asks the
-        # reranker transport for zero rows on every call, a non-positive pool
-        # multiplier collapses the fetch the count invariant lives on, and a
-        # non-positive timeout turns every rerank into a failure. Refuse at
-        # load (the EMBED_BATCH_SIZE/RRF_K precedent).
+        # scorer for zero rows on every call, and a non-positive pool
+        # multiplier collapses the fetch the count invariant lives on. Refuse
+        # at load (the EMBED_BATCH_SIZE/RRF_K precedent).
         if self.EMBED_EXECUTOR_WORKERS < 1:
             raise ValueError("EMBED_EXECUTOR_WORKERS must be >= 1")
         if self.EMBED_ORT_INTRA_OP_THREADS < 0:
             raise ValueError(
                 "EMBED_ORT_INTRA_OP_THREADS must be >= 0 (0 = ONNX Runtime's own default)"
             )
-        if self.JINA_RERANKER_TOP_N < 1:
-            raise ValueError("JINA_RERANKER_TOP_N must be >= 1")
+        if self.RERANK_TOP_N < 1:
+            raise ValueError("RERANK_TOP_N must be >= 1")
         if self.RETRIEVAL_RERANK_POOL_MULTIPLIER <= 0:
             raise ValueError("RETRIEVAL_RERANK_POOL_MULTIPLIER must be > 0")
-        if self.JINA_RERANKER_TIMEOUT_SECONDS <= 0:
-            raise ValueError("JINA_RERANKER_TIMEOUT_SECONDS must be > 0")
-        if self.RERANK_BACKEND.strip().lower() not in {"auto", "jina", "local"}:
-            # A typo would otherwise decide the transport at call time (a
-            # non-"local" value falls through to the HTTP lane and turns the
-            # opt-in rerank into a counted failure on every recall).
-            raise ValueError("RERANK_BACKEND must be one of: auto, jina, local")
 
     def _validate_production_settings(self) -> None:
         self._require_explicit_cors_origins()

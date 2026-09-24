@@ -43,7 +43,7 @@ os.environ.setdefault("OPENROUTER_API_KEY", os.environ.get("OPENAI_API_KEY", "")
 if os.environ.get("OPENAI_BASE_URL"):
     os.environ["OPENROUTER_BASE_URL"] = os.environ["OPENAI_BASE_URL"]
 os.environ["QDRANT_LOCAL_PATH"] = str(_RESULTS_DIR / "qdrant")
-os.environ["JINA_RERANKER_TOP_N"] = "15"
+os.environ["RERANK_TOP_N"] = "15"
 os.environ["RETRIEVAL_SEMANTIC_RERANK"] = "1"
 
 from eval.benchmarks.llm_judge import JUDGE_PROMPT_VERSION  # noqa: E402

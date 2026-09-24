@@ -69,7 +69,7 @@ os.environ["QDRANT_LOCAL_PATH"] = str(_RESULTS_DIR / "qdrant")
 # Benchmark answers from top-15: the reranker's own top_n must not truncate
 # the pool below that — pin the cap here, independent of the shipped default
 # (20 since R13(p2)).
-os.environ["JINA_RERANKER_TOP_N"] = "15"
+os.environ["RERANK_TOP_N"] = "15"
 os.environ["RETRIEVAL_SEMANTIC_RERANK"] = "1"
 
 from eval.benchmarks.llm_judge import JUDGE_PROMPT_VERSION, build_judge_messages  # noqa: E402
@@ -183,8 +183,8 @@ def build_stack_metadata(
         },
         "rerank": {
             "enabled": bool(settings.RETRIEVAL_SEMANTIC_RERANK),
-            "model": settings.JINA_RERANKER_MODEL,
-            "top_n": settings.JINA_RERANKER_TOP_N,
+            "model": "gte-multilingual-reranker-base (local ONNX, int8)",
+            "top_n": settings.RERANK_TOP_N,
         },
         "answer": {
             "model": MODEL,

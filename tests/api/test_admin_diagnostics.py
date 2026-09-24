@@ -30,7 +30,7 @@ def _diagnostics_payload():
             "storage_backend": "fs",
             "llm_model": "openai/gpt-4o-mini",
             "embed_model": "text-embedding-3-small",
-            "reranker_model": "jina-reranker-v2-base-multilingual",
+            "reranker_model": "gte-multilingual-reranker-base (local ONNX, int8)",
             "rate_limit_per_minute": 60,
             "rate_limit_per_day": 1000,
         },

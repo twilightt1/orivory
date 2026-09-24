@@ -361,11 +361,10 @@ jobs:
       EMBED_DIMENSIONS: "1536"
       EMBED_BATCH_SIZE: "64"
       JINA_API_KEY: test-jina-key
-      JINA_RERANKER_MODEL: jina-reranker-v2-base-multilingual
       # R13: the per-call CAP, kept at the shipped default — CI is not a
       # deployment, and a pre-R13 5 here is the same stale default the
       # example files carried.
-      JINA_RERANKER_TOP_N: "20"
+      RERANK_TOP_N: "20"
       EVALUATOR_FAILURE_MODE: warn_only
       RATE_LIMIT_PER_MINUTE: "600"
       RATE_LIMIT_PER_DAY: "10000"

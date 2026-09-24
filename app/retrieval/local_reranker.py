@@ -1,17 +1,14 @@
 """Local GTE multilingual reranker on onnxruntime (no torch, no paid API).
 
 ``Alibaba-NLP/gte-multilingual-reranker-base`` (Apache-2.0) as the int8 export
-published by ``onnx-community`` — the licence-clean counterpart of the Jina
-lane (the hosted model, ``jina-reranker-v2-base-multilingual``, is CC-BY-NC).
-Measured on the dev Mac, int8, batch=1: 135 ms/pair at 512 tokens and 324 ms
-at 1024, against 137/351 ms for the Jina model's own int8 export — same cost
-class, 341 MB on disk (~1.1 GB resident once ORT has the session).
+published by ``onnx-community`` — a permissive licence for a lane that ships
+in the box. Measured on the dev Mac, int8, batch=1: 135 ms/pair at 512 tokens
+and 324 ms at 1024, 341 MB on disk (~1.1 GB resident once ORT has the session).
 
 Scoring is sequence classification: one forward pass per (query, document
 window) pair, higher logit = more relevant. Long memories are split into
 overlapping *token* windows and max-pooled, because the ONNX graph truncates
-silently where the hosted API runs a sliding window server-side — a 4k-char
-session chunk would otherwise lose its tail.
+silently — a 4k-char session chunk would otherwise lose its tail.
 
 Files live next to the embedding models (``LOCAL_E5_DIR``, shared with
 ``e5_local`` — one directory, one lazy-download story) and are verified by

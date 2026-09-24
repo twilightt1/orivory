@@ -1,8 +1,8 @@
-"""Local (ONNX) rerank lane: windowing, outcome parity, backend dispatch.
+"""Local (ONNX) rerank lane: windowing, outcome parity, failure typing.
 
-The local lane must be indistinguishable from the Jina lane where it matters:
-same ordering/dedup/top_n semantics, same typed failures, and the same
-"dense order continues" fallback. The model itself enters only through
+The lane is the only one, so these pins ARE the rerank contract: ordering,
+dedup, the ``RERANK_TOP_N`` cap, typed failures, and the "dense order
+continues" fallback. The model itself enters only through
 ``local_reranker.score_pairs``, so every contract pin here runs against a stub
 — the one test that drives the real ONNX session is cache-guarded (house
 artifact guard: never download 341 MB in CI).
@@ -11,12 +11,11 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-from pydantic import ValidationError
 
-from app.config import Settings, settings
+from app.config import settings
 from app.retrieval import local_reranker
 from app.retrieval import reranker as reranker_module
-from app.retrieval.reranker import RerankUnavailable
+from app.retrieval.reranker import RerankInvalidResponse, RerankUnavailable
 
 # ── fakes ───────────────────────────────────────────────────────────────────
 
@@ -70,12 +69,6 @@ def _chunk(mid, content, score=0.5):
     return {"memory_id": mid, "content": content, "score": score}
 
 
-@pytest.fixture()
-def local_backend(monkeypatch):
-    monkeypatch.setattr(settings, "RERANK_BACKEND", "local")
-    monkeypatch.setattr(settings, "JINA_API_KEY", "")
-
-
 # ── windowing ───────────────────────────────────────────────────────────────
 
 
@@ -117,7 +110,7 @@ def test_pair_score_is_the_max_over_windows(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_local_lane_orders_and_stamps(local_backend, monkeypatch):
+async def test_the_lane_orders_and_stamps(monkeypatch):
     async def _scores(_query, docs):
         return [0.1, 0.9, 0.4][: len(docs)]
 
@@ -129,21 +122,20 @@ async def test_local_lane_orders_and_stamps(local_backend, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_local_lane_caps_at_top_n(local_backend, monkeypatch):
+async def test_the_lane_caps_at_top_n(monkeypatch):
     async def _scores(_query, docs):
         return [0.1, 0.9, 0.4, 0.3][: len(docs)]
 
     monkeypatch.setattr(local_reranker, "score_pairs", _scores)
-    monkeypatch.setattr(settings, "JINA_RERANKER_TOP_N", 2)
+    monkeypatch.setattr(settings, "RERANK_TOP_N", 2)
     rows = await reranker_module.rerank("q", [_chunk(str(i), "c") for i in range(4)])
-    assert len(rows) == 2, "JINA_RERANKER_TOP_N is the transport cap on the local lane too"
+    assert len(rows) == 2, "RERANK_TOP_N caps the lane's own answer"
 
 
 @pytest.mark.asyncio
-async def test_local_lane_keeps_the_best_chunk_per_memory(local_backend, monkeypatch):
-    """Two chunks of one memory: the Jina lane sees them pre-sorted by score and
-    keeps the first; the local lane must land on the same chunk, not on
-    whichever happened to sit earlier in the pool."""
+async def test_the_lane_keeps_the_best_chunk_per_memory(monkeypatch):
+    """Two chunks of one memory: the rows arrive in pool order, so the dedup
+    must land on the highest-scored chunk, not on whichever sat first."""
 
     async def _scores(_query, docs):
         return [0.2, 0.8][: len(docs)]
@@ -157,7 +149,7 @@ async def test_local_lane_keeps_the_best_chunk_per_memory(local_backend, monkeyp
 
 
 @pytest.mark.asyncio
-async def test_local_lane_failure_is_typed_unavailable(local_backend, monkeypatch):
+async def test_a_scoring_failure_is_typed_unavailable(monkeypatch):
     async def _boom(_query, _docs):
         raise OSError("model file gone")
 
@@ -167,7 +159,7 @@ async def test_local_lane_failure_is_typed_unavailable(local_backend, monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_local_lane_empty_pool_short_circuits(local_backend, monkeypatch):
+async def test_an_empty_pool_short_circuits(monkeypatch):
     async def _scores(_query, _docs):  # pragma: no cover - must not be reached
         raise AssertionError("no chunks handed in → no session work")
 
@@ -175,32 +167,17 @@ async def test_local_lane_empty_pool_short_circuits(local_backend, monkeypatch):
     assert await reranker_module.rerank("q", []) == []
 
 
-# ── dispatch ────────────────────────────────────────────────────────────────
+@pytest.mark.asyncio
+async def test_scoring_nothing_at_all_is_typed_invalid_response(monkeypatch):
+    """R14(p2) outlives the transport it was written for: a scorer that answers
+    with no row at all is a counted invalid response, never a silent fallback."""
 
+    async def _no_rows(_query, _docs):
+        return []
 
-def test_backend_auto_is_local_even_with_a_key(monkeypatch):
-    monkeypatch.setattr(settings, "RERANK_BACKEND", "auto")
-    monkeypatch.setattr(settings, "JINA_API_KEY", "jina-key")
-    assert reranker_module._backend() == "local", "$0 is the default; the paid lane is opt-in"
-    monkeypatch.setattr(settings, "JINA_API_KEY", "")
-    assert reranker_module._backend() == "local", "$0 self-host path needs no paid API"
-
-
-def test_backend_pins_are_honoured(monkeypatch):
-    monkeypatch.setattr(settings, "JINA_API_KEY", "")
-    monkeypatch.setattr(settings, "RERANK_BACKEND", "JINA")
-    assert reranker_module._backend() == "jina", "an explicit pin wins over the key check"
-
-
-def test_bogus_backend_is_refused_at_load():
-    with pytest.raises(ValidationError, match="RERANK_BACKEND"):
-        Settings(
-            _env_file=None,
-            DATABASE_URL="sqlite+aiosqlite:////tmp/orivory-local-rerank-test.db",
-            ALLOWED_ORIGINS="http://localhost:3000",
-            ENVIRONMENT="development",
-            RERANK_BACKEND="locl",
-        )
+    monkeypatch.setattr(local_reranker, "score_pairs", _no_rows)
+    with pytest.raises(RerankInvalidResponse):
+        await reranker_module.rerank("q", [_chunk("a", "c")])
 
 
 # ── the real model (cache-guarded house artifact) ───────────────────────────
