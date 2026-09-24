@@ -33,15 +33,14 @@ def get_jina_client() -> httpx.AsyncClient:
 
 
 def _backend() -> str:
-    """Resolve ``RERANK_BACKEND`` for this call: "auto" = Jina when a key is
-    configured, the bundled ONNX cross-encoder when there is none — the $0
-    self-host path needs no paid API, and a keyed lane keeps the model the
-    frozen benchmark was measured with. The setting is validated at load, so
+    """Resolve ``RERANK_BACKEND`` for this call: "auto" (default) is the bundled
+    local ONNX cross-encoder — the $0 self-host path is the default, so an
+    opt-in rerank never reaches for the paid API unless it is asked to. "jina"
+    pins the paid HTTP lane (the model the frozen benchmark was reranked
+    with), "local" pins the bundled one. The setting is validated at load, so
     anything that arrives here is one of the three spells."""
     backend = (settings.RERANK_BACKEND or "auto").strip().lower()
-    if backend == "auto":
-        return "jina" if (settings.JINA_API_KEY or "").strip() else "local"
-    return backend
+    return "local" if backend == "auto" else backend
 
 
 def _finalize(
@@ -126,8 +125,8 @@ async def rerank(query: str, chunks: list[dict], *, top_n: int | None = None) ->
     caller merges the rest back in dense order, so the served result count
     never depends on this transport.
 
-    Which transport runs is ``RERANK_BACKEND`` (``_backend``): the Jina HTTP
-    lane, or the bundled local ONNX cross-encoder.
+    Which transport runs is ``RERANK_BACKEND`` (``_backend``): the bundled
+    local ONNX cross-encoder by default, the paid Jina HTTP lane when pinned.
 
     Raises :class:`RerankUnavailable` (transport/status/timeout — bounded by
     ``JINA_RERANKER_TIMEOUT_SECONDS`` — and every local model-side failure) or

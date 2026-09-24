@@ -138,10 +138,12 @@ pipeline SQL-authorizes and re-reads every candidate BEFORE the transport sees
 it (spec §7.5/§14: no pre-ACL outbound text).
 
 **Where.** [`app/retrieval/reranker.py`](../app/retrieval/reranker.py) dispatches
-on `RERANK_BACKEND` (`auto` by default):
+on `RERANK_BACKEND` (`auto` by default — the local lane; `jina` must be pinned
+explicitly because it is the paid transport):
 
 - `jina` — the Jina rerank API (`jina-reranker-v2-base-multilingual`), one HTTP
-  call bounded by `JINA_RERANKER_TIMEOUT_SECONDS` (default 10).
+  call bounded by `JINA_RERANKER_TIMEOUT_SECONDS` (default 10). Paid, and the
+  model the frozen benchmark was reranked with — opt-in by pin only.
 - `local` — the bundled ONNX cross-encoder
   (`gte-multilingual-reranker-base`, int8, Apache-2.0) via
   [`app/retrieval/local_reranker.py`](../app/retrieval/local_reranker.py):

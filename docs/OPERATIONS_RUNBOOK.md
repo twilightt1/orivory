@@ -468,10 +468,12 @@ sqlite3 data/orivory.db "SELECT status, kind, COUNT(*) FROM index_outbox GROUP B
     dense order and the `retrieval.rerank_failed` counter increments. A rising
     rate means the reranker is down (or slow) — alert on the rate, not on the
     occurrence.
-  - `RERANK_BACKEND` (`auto` by default) picks the transport: `auto` = Jina
-    when `JINA_API_KEY` is set, the bundled ONNX cross-encoder
-    (`gte-multilingual-reranker-base` int8, Apache-2.0) otherwise; `jina` /
-    `local` pin one and a typo is refused at load. The local lane downloads
+  - `RERANK_BACKEND` (`auto` by default) picks the transport: `auto` = the
+    bundled ONNX cross-encoder (`gte-multilingual-reranker-base` int8,
+    Apache-2.0) — the $0 path, so a recall never spends money unasked; `jina`
+    pins the paid HTTP lane (the model the frozen benchmark was reranked
+    with); `local` spells the default out. A typo is refused at load. The
+    local lane downloads
     ~341 MB once into `LOCAL_E5_DIR` (the same directory as the embedding
     models) and pays the ONNX session build (~2 s, ~1.1 GB resident) on its
     first call — nothing warms it at boot, so enable it before the traffic, not
