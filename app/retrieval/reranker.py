@@ -31,6 +31,92 @@ def get_jina_client() -> httpx.AsyncClient:
         _client = httpx.AsyncClient(timeout=30.0)
     return _client
 
+
+def _backend() -> str:
+    """Resolve ``RERANK_BACKEND`` for this call: "auto" = Jina when a key is
+    configured, the bundled ONNX cross-encoder when there is none — the $0
+    self-host path needs no paid API, and a keyed lane keeps the model the
+    frozen benchmark was measured with. The setting is validated at load, so
+    anything that arrives here is one of the three spells."""
+    backend = (settings.RERANK_BACKEND or "auto").strip().lower()
+    if backend == "auto":
+        return "jina" if (settings.JINA_API_KEY or "").strip() else "local"
+    return backend
+
+
+def _finalize(
+    rows: list[tuple[int, float]],
+    chunks: list[dict],
+    limit: int,
+    *,
+    transport: str,
+    raw_count: int,
+) -> list[dict]:
+    """Dedup by memory, stamp ``rerank_score``, best first.
+
+    ``raw_count`` is how many rows the transport answered with, so an empty
+    answer and an all-unusable one stay distinguishable in the raised message.
+    """
+    reranked = []
+    seen: set = set()
+    for index, score in rows:
+        original = chunks[index]
+        key = original.get("memory_id", index)
+        if key in seen:
+            # One memory, one row (M1): a row repeating an already-ranked index
+            # would return the same memory twice and occupy a head slot that a
+            # distinct row should have had. The FIRST row for a memory wins.
+            continue
+        seen.add(key)
+        original = original.copy()
+        # A 0.0 relevance IS a score: consumers read it by key presence
+        # (retriever.py), never by truthiness.
+        original["rerank_score"] = score
+        reranked.append(original)
+
+    if not reranked:
+        # Ruling R14(p2): an EMPTY ``results`` list is the same failure as rows
+        # that are all unusable — the transport answered and left nothing to
+        # rank on. Returning [] here would hide it as "nothing to rerank"
+        # (dense order, uncounted); as an invalid response it is counted and
+        # dense order continues all the same.
+        detail = f"all {raw_count} rows were unusable" if raw_count else "an empty 'results' list"
+        raise RerankInvalidResponse(f"{transport}: {detail}")
+
+    reranked.sort(key=lambda x: x["rerank_score"], reverse=True)
+    # The cap is the transport's ANSWER size. Jina enforces it server-side; this
+    # lane scores the whole pool, so the cut has to happen here — same place for
+    # both, so "at most JINA_RERANKER_TOP_N rows" holds whichever one ran.
+    reranked = reranked[:limit]
+    log.info(
+        "Reranked",
+        extra={"in": len(chunks), "out": len(reranked), "top_n": limit, "transport": transport},
+    )
+    return reranked
+
+
+async def _local_rerank(query: str, chunks: list[dict], limit: int) -> list[dict]:
+    """The local ONNX lane: score every chunk, then the shared finalize.
+
+    Any model-side failure (missing files, a broken session, an OOM) is typed
+    as :class:`RerankUnavailable` so the caller's existing fallback — dense
+    order, ``retrieval.rerank_failed`` counted — covers it unchanged.
+    """
+    from app.retrieval import local_reranker
+
+    try:
+        scores = await local_reranker.score_pairs(query, [c["content"] for c in chunks])
+    except Exception as e:
+        raise RerankUnavailable(f"Local rerank failed: {type(e).__name__}: {e}") from e
+    # Sorted before the shared finalize so its "first row for a memory wins"
+    # rule lands on the same chunk the Jina lane would have kept (Jina answers
+    # pre-sorted; this lane's rows arrive in pool order).
+    parsed = sorted(enumerate(scores), key=lambda row: row[1], reverse=True)
+    return _finalize(
+        parsed, chunks, limit, transport="Local rerank", raw_count=len(chunks)
+    )
+
+
 async def rerank(query: str, chunks: list[dict], *, top_n: int | None = None) -> list[dict]:
     """Score ``chunks`` against ``query`` and return the best rows, best first.
 
@@ -40,11 +126,15 @@ async def rerank(query: str, chunks: list[dict], *, top_n: int | None = None) ->
     caller merges the rest back in dense order, so the served result count
     never depends on this transport.
 
+    Which transport runs is ``RERANK_BACKEND`` (``_backend``): the Jina HTTP
+    lane, or the bundled local ONNX cross-encoder.
+
     Raises :class:`RerankUnavailable` (transport/status/timeout — bounded by
-    ``JINA_RERANKER_TIMEOUT_SECONDS``) or :class:`RerankInvalidResponse`
-    (unusable body: no ``results`` list, an empty one, or nothing usable in
-    it). A malformed ROW is skipped instead of killing the pool (ruling
-    R11(p2) — one bad ``index`` used to raise and drop every row).
+    ``JINA_RERANKER_TIMEOUT_SECONDS`` — and every local model-side failure) or
+    :class:`RerankInvalidResponse` (unusable body: no ``results`` list, an
+    empty one, or nothing usable in it). A malformed ROW is skipped instead of
+    killing the pool (ruling R11(p2) — one bad ``index`` used to raise and drop
+    every row).
     """
     if not chunks:
         return []
@@ -52,6 +142,9 @@ async def rerank(query: str, chunks: list[dict], *, top_n: int | None = None) ->
     limit = settings.JINA_RERANKER_TOP_N
     if top_n is not None:
         limit = min(int(top_n), limit)
+
+    if _backend() == "local":
+        return await _local_rerank(query, chunks, limit)
 
     client = get_jina_client()
     try:
@@ -85,8 +178,7 @@ async def rerank(query: str, chunks: list[dict], *, top_n: int | None = None) ->
     if not isinstance(rows, list):
         raise RerankInvalidResponse("Jina rerank response has no usable 'results' list")
 
-    reranked = []
-    seen: set = set()
+    parsed: list[tuple[int, float]] = []
     for item in rows:
         if not isinstance(item, dict):
             continue
@@ -99,29 +191,6 @@ async def rerank(query: str, chunks: list[dict], *, top_n: int | None = None) ->
         except (TypeError, ValueError):
             log.warning("Skipping rerank row without a numeric score", extra={"index": index})
             continue
-        original = chunks[index]
-        key = original.get("memory_id", index)
-        if key in seen:
-            # One memory, one row (M1): a row repeating an already-ranked index
-            # would return the same memory twice and occupy a head slot that a
-            # distinct row should have had. The FIRST row for a memory wins.
-            continue
-        seen.add(key)
-        original = original.copy()
-        # A 0.0 relevance IS a score: consumers read it by key presence
-        # (retriever.py), never by truthiness.
-        original["rerank_score"] = score
-        reranked.append(original)
+        parsed.append((index, score))
 
-    if not reranked:
-        # Ruling R14(p2): an EMPTY ``results`` list is the same failure as rows
-        # that are all unusable — the transport answered and left nothing to
-        # rank on. Returning [] here would hide it as "nothing to rerank"
-        # (dense order, uncounted); as an invalid response it is counted and
-        # dense order continues all the same.
-        detail = f"all {len(rows)} rows were unusable" if rows else "an empty 'results' list"
-        raise RerankInvalidResponse(f"Jina rerank: {detail}")
-
-    reranked.sort(key=lambda x: x["rerank_score"], reverse=True)
-    log.info("Reranked", extra={"in": len(chunks), "out": len(reranked), "top_n": limit})
-    return reranked
+    return _finalize(parsed, chunks, limit, transport="Jina rerank", raw_count=len(rows))

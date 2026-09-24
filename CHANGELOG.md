@@ -14,6 +14,15 @@ tree; the runtime is the one container (SQLite + embedded Qdrant +
 single local owner (`LOCAL_OWNER_EMAIL`), and the agent tokens (`memory:read` /
 `memory:write`, ledgered per call) are unchanged for memory consumers.
 
+### Added
+- **The rerank has a local lane.** `RERANK_BACKEND` (`auto` by default) picks
+  the transport for the opt-in cross-encoder: Jina when `JINA_API_KEY` is set,
+  otherwise the bundled ONNX `gte-multilingual-reranker-base` (int8, Apache-2.0,
+  341 MB, no key, no outbound memory text). Both lanes share the pool, the cap
+  and the typed failures, so the $0 self-host path no longer needs the paid
+  reranker. Measured at parity in cost (135/324 ms per pair at 512/1024 tokens
+  against 137/351 ms for the Jina model's own int8 export).
+
 ### Changed
 - **The lite image IS the image.** `Dockerfile.lite` was renamed to
   `Dockerfile` and the legacy full-stack Dockerfile (Postgres / Redis / MinIO /

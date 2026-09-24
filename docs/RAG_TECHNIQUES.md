@@ -137,9 +137,23 @@ default). It is an outbound call carrying memory text, which is why the
 pipeline SQL-authorizes and re-reads every candidate BEFORE the transport sees
 it (spec §7.5/§14: no pre-ACL outbound text).
 
-**Where.** [`app/retrieval/reranker.py`](../app/retrieval/reranker.py) — the
-Jina rerank API (`jina-reranker-v2-base-multilingual`), one HTTP call bounded by
-`JINA_RERANKER_TIMEOUT_SECONDS` (default 10).
+**Where.** [`app/retrieval/reranker.py`](../app/retrieval/reranker.py) dispatches
+on `RERANK_BACKEND` (`auto` by default):
+
+- `jina` — the Jina rerank API (`jina-reranker-v2-base-multilingual`), one HTTP
+  call bounded by `JINA_RERANKER_TIMEOUT_SECONDS` (default 10).
+- `local` — the bundled ONNX cross-encoder
+  (`gte-multilingual-reranker-base`, int8, Apache-2.0) via
+  [`app/retrieval/local_reranker.py`](../app/retrieval/local_reranker.py):
+  341 MB downloaded once into `LOCAL_E5_DIR`, scored on the embed executor like
+  the local embeddings, no API key, no outbound memory text.
+
+`auto` picks `jina` when `JINA_API_KEY` is set and `local` otherwise, so the
+$0 self-host path never needs the paid reranker. Measured on the dev Mac
+(int8, batch=1): 135 ms per pair at 512 tokens, 324 ms at 1024 — the Jina
+model's own int8 export is 137/351 ms, so the local lane costs the same and
+saves the licence (Jina's weights are CC-BY-NC). One recall call reranks the
+whole pool, so both lanes belong to the opt-in regime, not the default path.
 
 **Semantics (P2).** The window is the retrieval pool
 `top_k x RETRIEVAL_RERANK_POOL_MULTIPLIER` (signed default 2.0);

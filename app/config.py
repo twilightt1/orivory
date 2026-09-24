@@ -199,6 +199,12 @@ class Settings(BaseSettings):
     # hold the recall path for the client's own 30 s default. Overrunning it is
     # a `RerankUnavailable` — dense order continues, counted.
     JINA_RERANKER_TIMEOUT_SECONDS: float = 10.0
+    # Which transport serves the opt-in rerank above: "auto" (default) picks
+    # Jina when JINA_API_KEY is set and the bundled local ONNX cross-encoder
+    # (gte-multilingual-reranker-base, int8) otherwise — the $0 self-host path
+    # never needs the paid API, and the keyed lane keeps the model it was
+    # measured with. "jina" / "local" pin one explicitly. Validated at load.
+    RERANK_BACKEND: str = "auto"
     # ── Embedding backend support matrix (frozen v1.1.0) ──
     #   jina  (USE_JINA_EMBEDDINGS=true + JINA_API_KEY): SUPPORTED default
     #           for full-stack. Matches the frozen benchmark baseline.
@@ -362,6 +368,11 @@ class Settings(BaseSettings):
             raise ValueError("RETRIEVAL_RERANK_POOL_MULTIPLIER must be > 0")
         if self.JINA_RERANKER_TIMEOUT_SECONDS <= 0:
             raise ValueError("JINA_RERANKER_TIMEOUT_SECONDS must be > 0")
+        if self.RERANK_BACKEND.strip().lower() not in {"auto", "jina", "local"}:
+            # A typo would otherwise decide the transport at call time (a
+            # non-"local" value falls through to the HTTP lane and turns the
+            # opt-in rerank into a counted failure on every recall).
+            raise ValueError("RERANK_BACKEND must be one of: auto, jina, local")
 
     def _validate_production_settings(self) -> None:
         self._require_explicit_cors_origins()
