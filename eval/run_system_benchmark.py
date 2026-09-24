@@ -72,6 +72,29 @@ os.environ["QDRANT_LOCAL_PATH"] = str(_RESULTS_DIR / "qdrant")
 os.environ["JINA_RERANKER_TOP_N"] = "15"
 os.environ["RETRIEVAL_SEMANTIC_RERANK"] = "1"
 
+# Graph builds are OFF for the bench ingest (``--with-graph`` restores the
+# app's normal behaviour). ``index_new_memory`` enqueues one background
+# entity-graph build per memory, and each build spends an entity-extraction
+# call from the SHARED LLM gate (LLM_MAX_CONCURRENCY, 3 by default). On a
+# free-tier model (~16-36 s per extraction) ~184 builds per instance drain at
+# 4-5/min and the recall/answer calls queue behind them — measured: Q&A
+# stalled 22 min right after a 60 s ingest, while the same recall in a fresh
+# process answered in 2.9 s. The graph is best-effort derived data, so the
+# bench measures retrieval instead of the extraction backlog; the memory row
+# and its vector are written either way. ``stack["graph_builds"]`` records it.
+GRAPH_BUILDS_ENABLED = False
+
+
+def _apply_graph_build_switch(enabled: bool) -> None:
+    """Turn the per-memory graph build on or off for this run (default off)."""
+    global GRAPH_BUILDS_ENABLED
+    GRAPH_BUILDS_ENABLED = enabled
+    if enabled:
+        return
+    from app.retrieval.memory import write_back
+
+    write_back.safe_enqueue_graph_build = lambda *args, **kwargs: None
+
 from eval.benchmarks.llm_judge import JUDGE_PROMPT_VERSION, build_judge_messages  # noqa: E402
 from eval.benchmarks.longmemeval_s import load_instances  # noqa: E402
 
@@ -163,6 +186,7 @@ def build_stack_metadata(
         "query_prefix": fingerprint["query_prefix"],
         "passage_prefix": fingerprint["passage_prefix"],
         "retriever": "MemoryRetriever (vector + salience + entity boost + rerank)",
+        "graph_builds": "on" if GRAPH_BUILDS_ENABLED else "off (bench ingest)",
         "recall_top_k": top_k,
         "git_head": git_head,
         "git_dirty": git_dirty,
@@ -183,6 +207,10 @@ def build_stack_metadata(
         },
         "rerank": {
             "enabled": bool(settings.RETRIEVAL_SEMANTIC_RERANK),
+            # Which transport actually serves the rerank: `auto` picks Jina
+            # when a key is configured, the bundled ONNX cross-encoder
+            # otherwise (RERANK_BACKEND in app/config.py).
+            "backend": getattr(settings, "RERANK_BACKEND", "auto"),
             "model": settings.JINA_RERANKER_MODEL,
             "top_n": settings.JINA_RERANKER_TOP_N,
         },
@@ -366,7 +394,7 @@ async def ingest_instance(user_id, instance, run_dir: Path, session_level: bool 
     async with AsyncSessionLocal() as db:
         db.add_all(memories)
         await db.commit()
-    for memory in memories:  # real embed + qdrant upsert (graph skipped: off)
+    for memory in memories:  # real embed + qdrant upsert (see the graph-build note up top)
         try:
             landed = await index_new_memory(memory)
         except Exception as exc:
@@ -882,12 +910,18 @@ def main() -> int:
                              "query, union by id) — 0.650 on the seed "
                              "sample vs 0.700 single-pass; multi-hop "
                              "experiments only")
+    parser.add_argument("--with-graph", action="store_true",
+                        help="keep the per-memory entity-graph build during "
+                             "ingest (OFF by default: on a slow model the "
+                             "builds flood the shared LLM gate and stall the "
+                             "run — see the note at the top of this file)")
     parser.add_argument("--chunk-chars", type=int, default=0,
                         help="split each session into turn-aligned chunks of "
                              "at most this many chars (session-level only; "
                              "0 = one memory per session, the diluting "
                              "extreme) — the RAG sweet spot is ~4000")
     args = parser.parse_args()
+    _apply_graph_build_switch(args.with_graph)
     return asyncio.run(main_async(args))
 
 
