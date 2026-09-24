@@ -6,7 +6,7 @@
 |---|---|
 | Offline eval, deterministic, CI-safe | `python eval/run_eval.py --mode offline` (the only lane) |
 | Benchmark LongMemEval-S / MemoryAgentBench | `python eval/run_benchmark.py --benchmark longmemeval_s --dataset <json> --output-dir <dir> --phase plan` → `ingest` → `query` → `score` |
-|| Resume interrupted system run (same local retrieval contract only) || `python eval/resume_system_run.py --results <results.json>` ||
+| Resume interrupted system run (same local retrieval contract only) | `python eval/resume_system_run.py --results <results.json>` |
 
 Legacy one-shots (paths cứng, không CLI args — chạy đúng như ghi, đừng
 copy pattern): `run_judge_only.py` (extreme dataset), `run_real_sample.py`,
