@@ -31,7 +31,7 @@ Production must use:
 - `ENVIRONMENT=production`
 - an explicit `CONFIG_ENCRYPTION_KEY` (Fernet; no default is derived in production)
 - explicit `ALLOWED_ORIGINS`, never `*`
-- real provider keys for `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, and `JINA_API_KEY`
+- real provider keys for `OPENROUTER_API_KEY` and `OPENAI_API_KEY`
 
 The published port binds loopback only (`127.0.0.1:8000`) — put a reverse proxy
 in front of it to expose the API. Also set when they differ from the defaults:
@@ -40,6 +40,11 @@ the P1b migration CLI probes it, plus `migrate.lock`, to refuse to run while
 the app is alive).
 
 The app validates these guardrails at startup in production mode.
+
+The default embedding lane is local ONNX (384 dimensions). Deployments with an
+existing hosted-embedding index must re-embed into a fresh collection before
+cutover; stored vectors cannot be converted, and the fingerprint guard refuses
+to mix contracts. Preserve the old index until the new one is verified.
 
 ## Identity
 

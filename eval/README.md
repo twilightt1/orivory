@@ -6,7 +6,7 @@
 |---|---|
 | Offline eval, deterministic, CI-safe | `python eval/run_eval.py --mode offline` (the only lane) |
 | Benchmark LongMemEval-S / MemoryAgentBench | `python eval/run_benchmark.py --benchmark longmemeval_s --dataset <json> --output-dir <dir> --phase plan` → `ingest` → `query` → `score` |
-| Resume run dài bị ngắt (rate limit) | `python eval/resume_system_run.py` (system) · `eval/complete_mapreduce_run.py` (map-reduce, FROZEN — run completed, do not extend) |
+|| Resume interrupted system run (same local retrieval contract only) || `python eval/resume_system_run.py --results <results.json>` ||
 
 Legacy one-shots (paths cứng, không CLI args — chạy đúng như ghi, đừng
 copy pattern): `run_judge_only.py` (extreme dataset), `run_real_sample.py`,
@@ -125,17 +125,23 @@ When a real query fails or produces weak citations, add it to the dataset with:
 - the category impacted
 ---
 
-## Frozen baseline (v1.1.0, do not tune — regression-gate only)
+## Historical baselines (v1.1.0; preserve artifacts, not current regression gates)
 
 Config `orivory_stack`, seed `20260906`, judge `longmemeval-official-v1`:
 
 | Run | File | Score |
 |---|---|---|
-| Single-pass + Jina rerank, n=100 | `benchmarks/results/longmemeval_s_system_n100.json` | **0.570**, Wilson 95% CI [0.472, 0.663] |
+| Single-pass + hosted rerank (historical), n=100 | `benchmarks/results/longmemeval_s_system_n100.json` | **0.570**, Wilson 95% CI [0.472, 0.663] |
 | No-rerank baseline, n=100 | (PR #18) | 0.490, CI [0.394, 0.587] |
 | Map-reduce answering, n=70 clean | `benchmarks/results/longmemeval_s_system_n100_mapreduce.json` | 0.486 — NEGATIVE, single-pass stays default |
 
-Rule: any retrieval-code change must re-run the n=100 single-pass config
-and stay within the frozen CI before merge. Tuning the score further is
-explicitly out of scope until ≥5 active installs (see
+The 0.570 result is a historical hosted-model measurement. The shipped default
+retrieval lane is local, so that score cannot be reproduced by the current
+benchmark config; keep the committed artifact as provenance, not as a current
+regression target.
+
+Rule: for retrieval-code changes, re-run the n=100 single-pass lane and compare
+only against a baseline with the same local embedding/rerank configuration; the
+historical hosted score above is not a regression gate. Tuning the score further
+is explicitly out of scope until ≥5 active installs (see
 [open-source-positioning.md §5](https://github.com/twilightt1/orivory-private/blob/main/docs/ideas/open-source-positioning.md) (private)).

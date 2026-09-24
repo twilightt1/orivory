@@ -59,8 +59,8 @@ A request with no Authorization header IS that owner; an agent token
   `/data/models` or `~/.cache/orivory/e5` on the volume) when that matters.
   `EMBED_WARMUP_ON_BOOT=false` skips the boot warm-up and pays a cold session
   (~610-685 ms) on the first request instead.
-- **Provider keys are optional** — with no embedding key the bundled local ONNX
-  model is the default; OpenAI / OpenRouter / Jina keys are opt-ins.
+- **Embeddings are local by default** — bundled ONNX models, no embedding key
+  or per-call cost. OpenAI-compatible embeddings remain an explicit legacy opt-in.
 - **A measured ceiling, not an infinite archive.** One laptop-class box (macOS,
   M-series, one process, warm cache) on synthetic notes:
 

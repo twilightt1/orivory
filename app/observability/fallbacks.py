@@ -2,8 +2,8 @@
 
 Every fail-open path in the retrieval/RAG pipeline must count its
 activations here. Rationale: fallbacks are correct behavior, but a rising
-fallback rate means the system is bleeding silently (Jina down for a week
-looks identical to Jina healthy when every failure falls back to vector
+fallback rate means the system is bleeding silently (a scorer failing for a
+week looks identical to a healthy scorer when every failure falls back to vector
 order). Observe first, operate second: alert on rate, not on occurrence.
 
 Process-local by design (same scope as the SQLite cost ledger). Inspect via
@@ -12,7 +12,7 @@ A multi-process deployment should aggregate the debug logs centrally.
 
 Canonical path names (keep stable; dashboards alert on them):
   retrieval.vector_unavailable   vector store down, BM25-only answers
-  retrieval.rerank_failed        Jina/reranker error, vector order kept
+  retrieval.rerank_failed        local scoring error, vector order kept
   retrieval.bm25_rebuild_failed  BM25 lazy rebuild failed, stale index used
   mcp.search_sql_fallback        MCP search answered from the SQL ordering
                                  (freshness barrier timed out / vector outage /

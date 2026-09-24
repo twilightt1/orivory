@@ -23,7 +23,7 @@ New features:
 - ChromaDB vector retrieval for semantic search.
 - BM25 lexical retrieval for exact product and API terms.
 - Reciprocal Rank Fusion for combining retriever results.
-- Jina reranking for final context selection.
+- Local ONNX cross-encoder reranking for final context selection.
 
 ## Version 2.2.0 — Async Ingestion
 

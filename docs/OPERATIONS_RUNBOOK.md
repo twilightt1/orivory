@@ -567,7 +567,7 @@ labels the current code emits — this table IS the alert surface:
 | label | means |
 |---|---|
 | `retrieval.vector_unavailable` | vector store down, the lexical leg answered (SQLite) or the typed 503 was served |
-| `retrieval.rerank_failed` | Jina/reranker error or timeout, dense order kept |
+| `retrieval.rerank_failed` | local reranker model failure, dense order kept |
 | `mcp.search_sql_fallback` | MCP search answered from the SQL ordering — barrier timeout, vector outage, or a degraded leg served empty (R23/R25) |
 | `index.outbox_drain_failed` | a drain round raised; intents stay pending for the retry |
 

@@ -28,7 +28,6 @@ def _production_settings(**overrides):
         "DATABASE_URL": _SQLITE_URL,
         "OPENROUTER_API_KEY": "«redacted:sk-…»",
         "OPENAI_API_KEY": "«redacted:sk-…»",
-        "JINA_API_KEY": "jina-production",
         "CONFIG_ENCRYPTION_KEY": "production-config-encryption-key-32chars",
         "ALLOWED_ORIGINS": "https://app.orivory.example",
         "ENVIRONMENT": "production",
@@ -40,7 +39,14 @@ def _production_settings(**overrides):
 def test_zerokey_embeddings_default_to_the_local_model():
     """No embedding key means the bundled local ONNX model — the zero-cost
     path a fresh self-host boots with."""
-    settings = _base_settings(JINA_API_KEY="", OPENAI_API_KEY="")
+    settings = _base_settings(OPENAI_API_KEY="")
+
+    assert settings.USE_LOCAL_EMBEDDINGS is True
+
+
+def test_local_embeddings_stay_default_when_openai_key_is_present():
+    """An API key must not silently switch fresh stores onto a paid vector lane."""
+    settings = _base_settings(OPENAI_API_KEY="configured")
 
     assert settings.USE_LOCAL_EMBEDDINGS is True
 

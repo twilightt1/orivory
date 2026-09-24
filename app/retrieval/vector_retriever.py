@@ -48,7 +48,7 @@ class VectorUnavailableError(Exception):
 
 
 def _current_dim() -> int:
-    """The ACTIVE embedding dimension (384 local / 1024 Jina / 1536 OpenAI)."""
+    """The ACTIVE embedding dimension (384 local / configured API dimension)."""
     return int(current_fingerprint()["dim"])
 
 

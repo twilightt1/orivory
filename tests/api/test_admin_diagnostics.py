@@ -48,7 +48,6 @@ def test_admin_diagnostics_payload_is_secret_safe():
     assert "JWT_SECRET_KEY" not in encoded
     assert "OPENAI_API_KEY" not in encoded
     assert "OPENROUTER_API_KEY" not in encoded
-    assert "JINA_API_KEY" not in encoded
     assert "DATABASE_URL" not in encoded
     assert "SENDGRID_API_KEY" not in encoded
     assert "SECRET" not in encoded.upper()

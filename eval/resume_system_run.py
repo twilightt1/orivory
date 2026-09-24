@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Resume a system benchmark run: re-run only failed questions and merge.
 
-A long n=100 run can hit transient embedding-provider rate limits near the
-end (measured: Jina 429s after ~180 min of sustained load; the key
-recovered once load stopped). Questions whose recall failed (recalled=0)
-say nothing about retrieval quality — recording them as wrong would
-misreport the system.
+A long n=100 run can hit transient embedding-provider failures near the end.
+Questions whose recall failed (recalled=0) say nothing about retrieval quality —
+recording them as wrong would misreport the system. This resume path pins the
+current local embedding/rerank lane and rejects result files from a different
+retrieval contract.
 
 This script:
 1. loads the run's results JSON,
@@ -53,6 +53,11 @@ os.environ.setdefault("OPENROUTER_API_KEY", os.environ.get("OPENAI_API_KEY", "")
 if os.environ.get("OPENAI_BASE_URL"):
     os.environ["OPENROUTER_BASE_URL"] = os.environ["OPENAI_BASE_URL"]
 os.environ["QDRANT_LOCAL_PATH"] = str(_RESULTS_DIR / "qdrant")
+# Resume only the current self-host retrieval lane, regardless of stale .env
+# flags left by a prior provider configuration.
+os.environ["USE_LOCAL_EMBEDDINGS"] = "1"
+os.environ["RETRIEVAL_SEMANTIC_RERANK"] = "1"
+os.environ["RERANK_TOP_N"] = "15"
 
 from uuid import uuid4  # noqa: E402
 
@@ -62,6 +67,7 @@ from eval.benchmarks.longmemeval_s import load_instances  # noqa: E402
 from eval.run_system_benchmark import (  # noqa: E402
     DATASET,
     answer_from_stack,
+    build_stack_metadata,
     ingest_instance,
     judge_one,
 )
@@ -89,10 +95,27 @@ async def main_async(args) -> int:
     from app.database import AsyncSessionLocal
     from app.models.user import User
 
-    await bootstrap_sqlite()
-
     results_path = args.results
     payload = json.loads(results_path.read_text())
+    recorded_stack = payload.get("stack")
+    current_stack = build_stack_metadata(top_k=args.top_k)
+    contract_keys = (
+        "embedding_backend",
+        "embeddings_actual",
+        "rerank",
+        "recall_top_k",
+    )
+    if not isinstance(recorded_stack, dict) or any(
+        recorded_stack.get(key) != current_stack.get(key) for key in contract_keys
+    ):
+        print(
+            "refusing to resume: recorded retrieval contract differs from the "
+            "current local embedding/rerank lane; start a fresh run",
+            file=sys.stderr,
+        )
+        return 2
+
+    await bootstrap_sqlite()
     records = payload["per_question"]
 
     failed_idx = [
@@ -143,7 +166,7 @@ async def main_async(args) -> int:
             user_row = await db.get(User, user_id)
             await delete_instance_memories(db, user_id, qid)
             user_id_str = str(user_row.id)
-        # re-ingest under the resume user (fresh embeds with recovered API)
+        # Re-ingest under the resume user using the verified local model.
         user_uuid = uuid.UUID(user_id_str)
         ingested = await ingest_instance(
             user_uuid, instance, run_dir, session_level=args.session,
@@ -188,9 +211,10 @@ async def main_async(args) -> int:
     payload["by_type"] = by_type
     payload["resumed"] = {
         "questions": len(failed_idx),
-        "reason": "transient embedding-provider rate limits near the end of "
-                  "the original run (recalled=0); re-ran with the same "
-                  "config once the provider recovered",
+        "reason": (
+            "re-ran zero-recall records under the matching "
+            "local retrieval contract"
+        ),
         "timestamp_utc": datetime.now(UTC).isoformat(),
     }
     results_path.write_text(json.dumps(payload, indent=2))

@@ -46,8 +46,6 @@ def test_current_fingerprint_uses_the_arctic_cls_contract(monkeypatch):
             {
                 "USE_LOCAL_EMBEDDINGS": True,
                 "LOCAL_EMBED_MODEL": "e5",
-                "USE_JINA_EMBEDDINGS": True,
-                "JINA_API_KEY": "jina-test-key",
             },
             {
                 "model_id": "Xenova/multilingual-e5-small",
@@ -72,34 +70,6 @@ def test_current_fingerprint_uses_the_arctic_cls_contract(monkeypatch):
         (
             {
                 "USE_LOCAL_EMBEDDINGS": False,
-                "USE_JINA_EMBEDDINGS": True,
-                "JINA_API_KEY": "jina-test-key",
-                "JINA_EMBED_MODEL": "jina-embeddings-v4-text-small",
-            },
-            {
-                "model_id": "jina-embeddings-v4-text-small",
-                "model_revision": None,
-                "revision": None,
-                "artifact_digest": None,
-                "tokenizer_digest": None,
-                "graph_outputs": ["embedding"],
-                "pooling": "api",
-                "query_prefix": "",
-                "passage_prefix": "",
-                "max_tokens": None,
-                "truncation": "provider-defined",
-                "padding": "provider-defined",
-                "normalize": None,
-                "dim": 1024,
-                "precision": "float32",
-                "provider": "jina-api",
-                "doc_format": "title-content-v1",
-            },
-        ),
-        (
-            {
-                "USE_LOCAL_EMBEDDINGS": False,
-                "USE_JINA_EMBEDDINGS": False,
                 "EMBED_MODEL": "text-embedding-3-large",
             },
             {
@@ -145,12 +115,6 @@ def test_legacy_mean_fingerprint_stays_deterministic():
 
 def test_current_fingerprint_uses_configured_dimensions(monkeypatch):
     monkeypatch.setattr(settings, "USE_LOCAL_EMBEDDINGS", False)
-    monkeypatch.setattr(settings, "USE_JINA_EMBEDDINGS", True)
-    monkeypatch.setattr(settings, "JINA_API_KEY", "jina-test-key")
-    monkeypatch.setattr(settings, "JINA_EMBED_DIMENSIONS", 768)
-    assert fp.current_fingerprint()["dim"] == 768
-
-    monkeypatch.setattr(settings, "USE_JINA_EMBEDDINGS", False)
     monkeypatch.setattr(settings, "EMBED_DIMENSIONS", 3072)
     assert fp.current_fingerprint()["dim"] == 3072
 

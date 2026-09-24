@@ -13,7 +13,8 @@ def test_stack_metadata_reflects_actual_backend(monkeypatch):
         concurrency=4,
     )
     assert meta["embeddings_actual"]["pooling"] == "cls"
-    assert "jina" not in meta["embeddings_actual"]["model_id"].lower()
+    assert meta["embedding_backend"] == "local-arctic"
+    assert "arctic" in meta["embeddings_actual"]["model_id"].lower()
     assert meta["recall_top_k"] == 10
     assert meta["git_head"] and "git_dirty" in meta
     assert meta["dataset_sha256"] and meta["dataset_path"]

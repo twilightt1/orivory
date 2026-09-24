@@ -160,7 +160,7 @@ or an answer with nothing usable in it is typed (`RerankUnavailable` /
 (pool/top_k/merge/typed failures/zero score) and the §9 gate
 [`tests/retrieval/test_p2_gate.py`](../tests/retrieval/test_p2_gate.py)
 (over real stores). The ablation's rerank arm (`eval/ablation_retrieval_p2.py`)
-measures the STAGE with a local stand-in scorer, never Jina's quality.
+measures the STAGE with a local stand-in scorer, not the cross-encoder's semantic quality.
 
 ---
 

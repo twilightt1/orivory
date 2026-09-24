@@ -115,8 +115,9 @@ cat <<EOF
       "transport":"streamable-http",
       "headers":{"Authorization":"Bearer $AGENT_TOKEN"}}}}}
 
-  Next: rerun this script any time (it replaces its own agent token) or add keys for better
-  recall: docker rm -f orivory-lite, then add -e JINA_API_KEY=... and rerun.
+  Embeddings are local by default; no embedding-provider key is needed.
+  Optional rerank: set RETRIEVAL_SEMANTIC_RERANK=true in the container
+  environment (first use downloads the ONNX model and adds CPU/RAM cost).
 
   Manage: docker logs -f orivory-lite | docker restart orivory-lite |
           docker rm -f orivory-lite   (stop)

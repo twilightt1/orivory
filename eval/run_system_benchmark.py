@@ -12,9 +12,9 @@ answer comes from:
                entity boosts + rerank), capped at RECALL_TOP_K memories.
 
 Honest protocol: every answer + verdict is a real LLM call through the
-gateway in .env. The stack's retrieval is real (embeddings via Jina,
-ranking via the retriever). Nothing fabricated. This is the FIRST
-system-vs-baseline comparison — same seed, same judge, same n.
+gateway in .env. Retrieval is real and local (embeddings + reranking); nothing
+is fabricated. This is the FIRST system-vs-baseline comparison — same seed,
+same judge, same n.
 
 Usage (from a checkout with .env, dataset under eval/benchmarks/data/):
     QDRANT_MODE=local python3 eval/run_system_benchmark.py \
@@ -66,6 +66,9 @@ if os.environ.get("OPENAI_BASE_URL"):
 # Qdrant local path: default /data/qdrant is a Docker volume; on a dev box
 # point it inside the results dir.
 os.environ["QDRANT_LOCAL_PATH"] = str(_RESULTS_DIR / "qdrant")
+# The benchmark is a reproducible self-host lane regardless of stale .env
+# provider flags/keys.
+os.environ["USE_LOCAL_EMBEDDINGS"] = "1"
 # Benchmark answers from top-15: the reranker's own top_n must not truncate
 # the pool below that — pin the cap here, independent of the shipped default
 # (20 since R13(p2)).
@@ -198,9 +201,6 @@ def build_stack_metadata(
             "max_tokens": 8,
         },
         "timeouts_seconds": {
-            "embedding_jina": 60,
-            "embedding_openai": 30,
-            "rerank": 30,
             "answer_and_judge_client": 240,
         },
         "execution": {
@@ -499,9 +499,8 @@ async def answer_from_stack(
     """Answer the question from what the stack recalls (single pass).
 
     NOTE: a two-phase map-reduce variant was tried (PR #20) and LOST to
-    single-pass (0.486 vs 0.570 clean) — it lives on only as a frozen copy
-    inside eval/complete_mapreduce_run.py for reproducibility of the
-    recorded negative result. Do not re-add it here.
+    single-pass (0.486 vs 0.570 hosted). The historical output remains in the
+    results archive, but its retrieval lane is retired. Do not re-add it here.
     """
     from openai import AsyncOpenAI
 

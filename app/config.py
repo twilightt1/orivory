@@ -149,9 +149,6 @@ class Settings(BaseSettings):
     EMBED_WARMUP_ON_BOOT: bool = True
 
 
-    JINA_API_KEY: str = ""
-    JINA_EMBED_MODEL: str = "jina-embeddings-v3"
-    JINA_EMBED_DIMENSIONS: int = 1024
     # Cross-encoder rerank inside MemoryRetriever: reorder the vector
     # candidate pool by true query-document relevance (the bundled local ONNX
     # cross-encoder, app/retrieval/local_reranker.py — no API key, no per-call
@@ -196,20 +193,10 @@ class Settings(BaseSettings):
     # at load (>= 1): a negative k zero-divides at rank 0, and the outage
     # fallback reads it with the hybrid flag OFF.
     RETRIEVAL_RRF_K: int = 60
-    # ── Embedding backend support matrix (frozen v1.1.0) ──
-    #   jina  (USE_JINA_EMBEDDINGS=true + JINA_API_KEY): SUPPORTED default
-    #           for full-stack. Matches the frozen benchmark baseline.
-    #   local (USE_LOCAL_EMBEDDINGS=true): SUPPORTED for lite/self-contained
-    #           mode only (384-dim, no API key). Do not mix with Jina/OpenAI
-    #           in one store — the dim guard will refuse.
-    #   openai (fallback when neither above applies): LEGACY, unbenchmarked,
-    #           kept so old deployments boot. Not supported for recall quality.
-    # Use jina for embeddings instead of OpenAI
-    USE_JINA_EMBEDDINGS: bool = True
-    # Local ONNX embeddings (384-dim, no API key). Takes precedence over
-    # Jina/OpenAI when true — keeps lite mode and benchmarks self-contained.
-    # Do not mix backends in one store.
-    USE_LOCAL_EMBEDDINGS: bool = False
+    # Local ONNX embeddings are the default (384-dim, no API key, no per-call
+    # cost). OpenAI-compatible embeddings remain an explicit legacy opt-in;
+    # do not mix backends in one store (the fingerprint guard refuses it).
+    USE_LOCAL_EMBEDDINGS: bool = True
     # Which local model backs USE_LOCAL_EMBEDDINGS: "arctic"
     # (snowflake-arctic-embed-xs, default — best English bench, CLS pooling) or
     # "e5" (multilingual, opt-in Vietnamese, mean pooling). Both 384-dim but
@@ -292,11 +279,9 @@ class Settings(BaseSettings):
             and _is_local_host(self.QDRANT_URL)
         ):
             self.QDRANT_MODE = "local"
-        # Zero-key deployments must still remember: no embedding API key means
-        # the bundled local model (384-dim, no download beyond ONNX).
-        # ponytail: keyed backends win whenever a key exists; the dim
-        # guard refuses mixing backends in one store.
-        if not self.USE_LOCAL_EMBEDDINGS and not self.JINA_API_KEY and not self.OPENAI_API_KEY:
+        # If an operator explicitly disables the local model without supplying
+        # an OpenAI-compatible embedding key, restore the zero-cost local path.
+        if not self.USE_LOCAL_EMBEDDINGS and not self.OPENAI_API_KEY:
             self.USE_LOCAL_EMBEDDINGS = True
         return self
 
@@ -383,7 +368,6 @@ class Settings(BaseSettings):
         required_keys = {
             "OPENROUTER_API_KEY": self.OPENROUTER_API_KEY,
             "OPENAI_API_KEY": self.OPENAI_API_KEY,
-            "JINA_API_KEY": self.JINA_API_KEY,
         }
         missing = [name for name, value in required_keys.items() if not value.strip()]
         if missing:

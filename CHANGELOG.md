@@ -19,15 +19,19 @@ single local owner (`LOCAL_OWNER_EMAIL`), and the agent tokens (`memory:read` /
   is the bundled ONNX `gte-multilingual-reranker-base` (int8, Apache-2.0,
   341 MB, no key, no per-call cost, no outbound memory text) behind
   `RETRIEVAL_SEMANTIC_RERANK`; the paid HTTP rerank lane and the
-  `RERANK_BACKEND` switch are gone. `JINA_RERANKER_TOP_N` became `RERANK_TOP_N`
-  (same cap, same default 20, still validated at load) and the whole pool, the
-  merge and the typed failures are unchanged. Measured 135/324 ms per pair at
-  512/1024 tokens on the dev Mac, int8.
+  backend selector are gone. The former provider-specific cap is now
+  `RERANK_TOP_N` (same cap/default 20, validated at load); pool, merge and
+  typed failures are unchanged. Measured 135/324 ms per pair at 512/1024
+  tokens on the dev Mac, int8.
   - Note for anyone reproducing the pre-1.1.0 benchmark: that run reranked with
     the hosted model, so the artifact's number is not reproducible from this
     tree.
 
 ### Changed
+- **Embeddings default to local ONNX (Arctic, 384 dimensions).** The hosted
+  embedding lane and provider-specific settings are removed; the OpenAI-compatible
+  path remains an explicit legacy opt-in. Existing hosted indexes need fresh
+  embeddings before cutover; the fingerprint guard blocks mixed contracts.
 - **The lite image IS the image.** `Dockerfile.lite` was renamed to
   `Dockerfile` and the legacy full-stack Dockerfile (Postgres / Redis / MinIO /
   Celery / Qdrant-server era) was deleted, so every builder — `docker build`,
@@ -193,11 +197,11 @@ single local owner (`LOCAL_OWNER_EMAIL`), and the agent tokens (`memory:read` /
 - **Benchmark tuning ladder, all with Wilson 95% CIs** (#13–#19):
   session-level chunking (NEGATIVE, recorded honestly) → system-vs-baseline
   n=20 → semantic-dominant ranking (0.700 vs 0.600) → chunk overlap fusion
-  (0.650) → official n=100 run (0.490 [0.394, 0.587]) → Jina semantic
-  rerank (0.570 vs 0.490, CIs separate).
+  (0.650) → official n=100 run (0.490 [0.394, 0.587]) → hosted semantic
+  rerank (0.570 vs 0.490, CIs separate; historical, retired).
 - **Map-reduce answering experiment** (#20) — NEGATIVE result (0.486 clean
-  vs 0.570 single-pass), recorded honestly; resume/complete scripts kept
-  for long runs.
+  vs 0.570 hosted single-pass), recorded honestly; the archived result remains,
+  while its retired provider-specific completion recipe is removed.
 - **Judge hardening** — exact-token match, env-aware gateway/model, real
   judged pilot fixture.
 
