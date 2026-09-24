@@ -120,23 +120,27 @@ def _windows(tok, text: str, room: int) -> list[str]:
     if len(ids) <= room:
         return [text]
     step = min(_WINDOW_STRIDE, room)
-    return [tok.decode(ids[i : i + room]) for i in range(0, len(ids), step)][:_MAX_WINDOWS]
+    starts = range(0, len(ids), step)[:_MAX_WINDOWS]
+    return [tok.decode(ids[i : i + room]) for i in starts]
 
 
 def _score_pair(sess, tok, query: str, doc: str) -> float:
-    q_ids = tok.encode(query).ids
+    query_ids = tok.encode(query).ids
+    bounded_query = query
+    if len(query_ids) > _MAX_TOKENS // 2:
+        bounded_query = tok.decode(query_ids[: _MAX_TOKENS // 2])
+        query_ids = tok.encode(bounded_query).ids
+    room = max(1, _MAX_TOKENS - len(query_ids) - 8)
     best = None
-    # The query rides in the same sequence as the window, special tokens
-    # included; the slack keeps the window from pushing the query out.
-    room = max(64, _MAX_TOKENS - len(q_ids) - 8)
     for window in _windows(tok, doc, room):
-        enc = tok.encode(query, window)
+        enc = tok.encode(bounded_query, window)
         ids = np.asarray([enc.ids[:_MAX_TOKENS]], dtype=np.int64)
         mask = np.asarray([enc.attention_mask[:_MAX_TOKENS]], dtype=np.int64)
         logits = np.asarray(sess.run(None, e5_local._feed(sess, ids, mask))[0])
         # [1, 1] for this export; a 2-column head would make column 0 the
         # "irrelevant" logit, so read the LAST column rather than [0].
-        score = float(logits.reshape(1, -1)[0, -1])
+        logit = float(logits.reshape(1, -1)[0, -1])
+        score = float(1.0 / (1.0 + np.exp(-np.clip(logit, -60.0, 60.0))))
         best = score if best is None else max(best, score)
     return best if best is not None else 0.0
 

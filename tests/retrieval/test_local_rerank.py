@@ -31,6 +31,7 @@ class _FakeTok:
 
     def __init__(self):
         self._ids: dict[str, int] = {}
+        self.decode_calls = 0
 
     def _id(self, word: str) -> int:
         return self._ids.setdefault(word, len(self._ids))
@@ -40,6 +41,7 @@ class _FakeTok:
         return _Enc([self._id(w) for w in words])
 
     def decode(self, ids):
+        self.decode_calls += 1
         rev = {v: k for k, v in self._ids.items()}
         return " ".join(rev[i] for i in ids)
 
@@ -55,11 +57,13 @@ class _FakeSess:
     def __init__(self, values):
         self._values = list(values)
         self.calls = 0
+        self.input_ids = []
 
     def get_inputs(self):
         return [_In("input_ids"), _In("attention_mask"), _In("token_type_ids")]
 
-    def run(self, _outputs, _feed):
+    def run(self, _outputs, feed):
+        self.input_ids.append(feed["input_ids"].copy())
         value = self._values[min(self.calls, len(self._values) - 1)]
         self.calls += 1
         return [np.asarray([[value]], dtype=np.float32)]
@@ -94,6 +98,21 @@ def test_windows_stop_at_the_cap():
     tok = _FakeTok()
     text = " ".join(f"w{i}" for i in range(100))
     assert len(local_reranker._windows(tok, text, room=4)) == local_reranker._MAX_WINDOWS
+    assert tok.decode_calls == local_reranker._MAX_WINDOWS
+
+
+def test_long_query_is_bounded_before_document_windowing(monkeypatch):
+    monkeypatch.setattr(local_reranker, "_MAX_TOKENS", 16)
+    tok = _FakeTok()
+    sess = _FakeSess([0.5])
+    query = " ".join(f"q{i}" for i in range(20))
+
+    local_reranker._score_pair(sess, tok, query, "doc-a doc-b")
+
+    input_ids = sess.input_ids[0][0].tolist()
+    assert len(input_ids) <= 16
+    assert tok._id("doc-a") in input_ids, "long queries must not truncate every document token"
+    assert tok._id("q19") not in input_ids, "the query is capped before pair encoding"
 
 
 def test_pair_score_is_the_max_over_windows(monkeypatch):
@@ -103,7 +122,17 @@ def test_pair_score_is_the_max_over_windows(monkeypatch):
     doc = " ".join(f"w{i}" for i in range(200))  # 200 tokens, 4 windows at 64
     score = local_reranker._score_pair(sess, tok, "q", doc)
     assert sess.calls == local_reranker._MAX_WINDOWS, "one forward pass per window, capped"
-    assert score == pytest.approx(0.9), "max-pool over windows, not the last/first one"
+    assert score == pytest.approx(1.0 / (1.0 + np.exp(-0.9))), "max-pool over windows, not the last/first one"
+
+
+def test_negative_logit_maps_to_positive_relevance():
+    tok = _FakeTok()
+    sess = _FakeSess([-2.0])
+
+    score = local_reranker._score_pair(sess, tok, "q", "doc")
+
+    assert score == pytest.approx(1.0 / (1.0 + np.exp(2.0)))
+    assert 0.0 < score < 1.0
 
 
 # ── contract parity through the shared entry point ──────────────────────────

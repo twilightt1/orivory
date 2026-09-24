@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.models.document import Document
 from app.models.index_outbox import IndexOutbox
+from app.retrieval.embedding_fingerprint import current_fingerprint
 from app.services.health_service import CheckPayload, run_readiness_checks
 
 DOCUMENT_TERMINAL_FAILURE_STATUSES = ("failed", "error")
@@ -29,14 +30,15 @@ _check_celery = None  # type: ignore[assignment]  # dormant on the slim branch: 
 
 def build_config_summary() -> dict[str, Any]:
     origins = [origin.strip() for origin in settings.ALLOWED_ORIGINS.split(",") if origin.strip()]
+    fingerprint = current_fingerprint()
     return {
         "environment": settings.ENVIRONMENT,
         "docs_enabled": settings.ENVIRONMENT != "production",
         "cors_origins_count": len(origins),
         "storage_backend": settings.STORAGE_BACKEND,
         "llm_model": settings.LLM_MODEL,
-        "embed_model": settings.EMBED_MODEL,
-        "embed_dimensions": settings.EMBED_DIMENSIONS,
+        "embed_model": fingerprint["model_id"],
+        "embed_dimensions": fingerprint["dim"],
         "reranker_model": "gte-multilingual-reranker-base (local ONNX, int8)",
         # The per-call CAP on the reranker's own answer (`min(request top_k,
         # this)`), NOT the rerank window. The window is the retrieval pool:

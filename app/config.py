@@ -152,8 +152,9 @@ class Settings(BaseSettings):
     # Cross-encoder rerank inside MemoryRetriever: reorder the vector
     # candidate pool by true query-document relevance (the bundled local ONNX
     # cross-encoder, app/retrieval/local_reranker.py — no API key, no per-call
-    # cost) before salience/decay modifiers. Off by default — per-deployment,
-    # and it spends CPU (a full pool is ~6 s of scoring) rather than money.
+    # cost) before salience/decay modifiers. Off by default: full-pool scoring
+    # is ~6 s at the default pool and grows with candidate/window count; keep it
+    # opt-in until an evidence artifact establishes the latency budget.
     RETRIEVAL_SEMANTIC_RERANK: bool = False
     # Per-call CAP on the reranker's own answer, never the rerank window: the
     # per-call `top_n` is the request's own top_k clamped to this value
@@ -365,10 +366,9 @@ class Settings(BaseSettings):
                 raise ValueError("ALLOWED_ORIGINS must contain explicit HTTP(S) origins in production")
 
     def _require_provider_keys(self) -> None:
-        required_keys = {
-            "OPENROUTER_API_KEY": self.OPENROUTER_API_KEY,
-            "OPENAI_API_KEY": self.OPENAI_API_KEY,
-        }
+        required_keys = {"OPENROUTER_API_KEY": self.OPENROUTER_API_KEY}
+        if self.COMPRESSION_ENABLED:
+            required_keys["OPENAI_API_KEY"] = self.OPENAI_API_KEY
         missing = [name for name, value in required_keys.items() if not value.strip()]
         if missing:
             raise ValueError(f"Missing provider keys in production: {', '.join(missing)}")

@@ -31,7 +31,10 @@ Production must use:
 - `ENVIRONMENT=production`
 - an explicit `CONFIG_ENCRYPTION_KEY` (Fernet; no default is derived in production)
 - explicit `ALLOWED_ORIGINS`, never `*`
-- real provider keys for `OPENROUTER_API_KEY` and `OPENAI_API_KEY`
+- `OPENROUTER_API_KEY` for hosted LLM calls
+- `OPENAI_API_KEY` only when `COMPRESSION_ENABLED=true` or the legacy
+  OpenAI-compatible embedding lane is explicitly configured; local ONNX
+  embeddings are the default and require no provider key
 
 The published port binds loopback only (`127.0.0.1:8000`) — put a reverse proxy
 in front of it to expose the API. Also set when they differ from the defaults:

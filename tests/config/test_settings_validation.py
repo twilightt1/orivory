@@ -64,8 +64,19 @@ def test_production_rejects_wildcard_cors():
 
 
 def test_production_rejects_missing_provider_keys():
+    with pytest.raises(ValidationError, match="OPENROUTER_API_KEY"):
+        _production_settings(OPENROUTER_API_KEY="")
+
+
+def test_production_local_embeddings_do_not_require_openai_key():
+    settings = _production_settings(OPENAI_API_KEY="")
+
+    assert settings.USE_LOCAL_EMBEDDINGS is True
+
+
+def test_production_compression_requires_openai_key():
     with pytest.raises(ValidationError, match="OPENAI_API_KEY"):
-        _production_settings(OPENAI_API_KEY="")
+        _production_settings(OPENAI_API_KEY="", COMPRESSION_ENABLED=True)
 
 
 def test_production_rejects_missing_config_encryption_key():
@@ -166,7 +177,7 @@ def test_production_spellings_with_whitespace_still_validate(spelling):
     with pytest.raises(ValidationError, match="ALLOWED_ORIGINS"):
         _production_settings(ENVIRONMENT=spelling, ALLOWED_ORIGINS="")
     with pytest.raises(ValidationError, match="OPENAI_API_KEY"):
-        _production_settings(ENVIRONMENT=spelling, OPENAI_API_KEY="")
+        _production_settings(ENVIRONMENT=spelling, OPENAI_API_KEY="", COMPRESSION_ENABLED=True)
 
 
 def test_normalizes_evaluator_failure_mode():

@@ -5,9 +5,12 @@
 > volume, zero external services — that is not a "mode", it is the product.
 
 ```bash
-docker run -d --name orivory -p 127.0.0.1:8000:8000 -v orivory-data:/data \
-  -e OPENAI_API_KEY=sk-... ghcr.io/twilightt1/orivory:lite
+docker run -d --name orivory -p 127.0.0.1:8000:8000 -v orivory-data:/data \\
+  ghcr.io/twilightt1/orivory:lite
 ```
+
+Local ONNX embeddings need no API key. Add `-e OPENROUTER_API_KEY=...` only if
+using hosted LLM calls; `OPENAI_API_KEY` is optional for local embeddings.
 
 The API binds **127.0.0.1 on the host** (loopback only) — put a reverse proxy
 in front of it to expose it. Inside the container it listens on 0.0.0.0.

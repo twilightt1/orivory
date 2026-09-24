@@ -116,8 +116,10 @@ cat <<EOF
       "headers":{"Authorization":"Bearer $AGENT_TOKEN"}}}}}
 
   Embeddings are local by default; no embedding-provider key is needed.
-  Optional rerank: set RETRIEVAL_SEMANTIC_RERANK=true in the container
-  environment (first use downloads the ONNX model and adds CPU/RAM cost).
+  Optional rerank: to enable it, recreate the container (data persists):
+    docker rm -f orivory-lite
+    docker run -d --name orivory-lite -p "127.0.0.1:$PORT:8000" -v "$DIR/data:/data" --restart unless-stopped -e RETRIEVAL_SEMANTIC_RERANK=true "$IMAGE"
+  First use downloads the ONNX model; scoring can add seconds per recall and uses extra CPU/RAM.
 
   Manage: docker logs -f orivory-lite | docker restart orivory-lite |
           docker rm -f orivory-lite   (stop)

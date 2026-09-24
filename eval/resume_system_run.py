@@ -64,6 +64,7 @@ from uuid import uuid4  # noqa: E402
 # Import AFTER env so settings pick up the run's DATABASE_URL
 from app.database import bootstrap_sqlite  # noqa: E402
 from eval.benchmarks.longmemeval_s import load_instances  # noqa: E402
+from eval.retrieval_contract import retrieval_contract_matches  # noqa: E402
 from eval.run_system_benchmark import (  # noqa: E402
     DATASET,
     answer_from_stack,
@@ -98,16 +99,60 @@ async def main_async(args) -> int:
     results_path = args.results
     payload = json.loads(results_path.read_text())
     recorded_stack = payload.get("stack")
-    current_stack = build_stack_metadata(top_k=args.top_k)
-    contract_keys = (
-        "embedding_backend",
-        "embeddings_actual",
-        "rerank",
-        "recall_top_k",
-    )
-    if not isinstance(recorded_stack, dict) or any(
-        recorded_stack.get(key) != current_stack.get(key) for key in contract_keys
+    if not isinstance(recorded_stack, dict):
+        print("refusing to resume: result has no retrieval contract", file=sys.stderr)
+        return 2
+    recorded_execution = recorded_stack.get("execution")
+    if not isinstance(recorded_execution, dict):
+        print("refusing to resume: result lacks execution metadata", file=sys.stderr)
+        return 2
+    recorded_policy = recorded_execution.get("context_policy")
+    if not isinstance(recorded_policy, dict):
+        print("refusing to resume: result lacks a complete context policy", file=sys.stderr)
+        return 2
+    session_level = recorded_policy.get("session_level")
+    chunk_chars = recorded_policy.get("chunk_chars")
+    fuse = recorded_policy.get("fuse")
+    if (
+        not isinstance(session_level, bool)
+        or not isinstance(chunk_chars, int)
+        or isinstance(chunk_chars, bool)
+        or not isinstance(fuse, bool)
     ):
+        print("refusing to resume: result lacks a complete context policy", file=sys.stderr)
+        return 2
+    recorded_policy = {
+        "session_level": session_level,
+        "chunk_chars": chunk_chars,
+        "fuse": fuse,
+    }
+
+    for argument, key in (("session", "session_level"), ("chunk_chars", "chunk_chars"), ("fuse", "fuse")):
+        recorded_value = recorded_policy[key]
+        requested_value = getattr(args, argument)
+        if requested_value is not None and requested_value != recorded_value:
+            print("refusing to resume: requested context policy differs from the run", file=sys.stderr)
+            return 2
+        setattr(args, argument, recorded_value)
+
+    recorded_top_k = recorded_stack.get("recall_top_k")
+    if (
+        not isinstance(recorded_top_k, int)
+        or isinstance(recorded_top_k, bool)
+        or recorded_top_k < 1
+        or (args.top_k is not None and args.top_k != recorded_top_k)
+    ):
+        print("refusing to resume: requested top_k differs from the run", file=sys.stderr)
+        return 2
+    args.top_k = recorded_top_k
+
+    current_stack = build_stack_metadata(
+        top_k=args.top_k,
+        session_level=args.session,
+        chunk_chars=args.chunk_chars,
+        fuse=args.fuse,
+    )
+    if not retrieval_contract_matches(recorded_stack, current_stack):
         print(
             "refusing to resume: recorded retrieval contract differs from the "
             "current local embedding/rerank lane; start a fresh run",
@@ -172,7 +217,9 @@ async def main_async(args) -> int:
             user_uuid, instance, run_dir, session_level=args.session,
             chunk_chars=args.chunk_chars,
         )
-        response, recalled = await answer_from_stack(user_uuid, instance, args.top_k)
+        response, recalled = await answer_from_stack(
+            user_uuid, instance, args.top_k, fuse=args.fuse
+        )
         correct = await judge_one(client, instance, response)
         records[i] = {
             "question_id": qid,
@@ -228,9 +275,16 @@ def main() -> int:
     parser.add_argument("--results", type=Path, required=True)
     parser.add_argument("--from-index", type=int, default=None,
                         help="re-run every record at/after this index (else: recalled=0)")
-    parser.add_argument("--session", action="store_true", default=True)
-    parser.add_argument("--chunk-chars", type=int, default=4000)
-    parser.add_argument("--top-k", type=int, default=15)
+    session = parser.add_mutually_exclusive_group()
+    session.add_argument("--session", dest="session", action="store_true")
+    session.add_argument("--no-session", dest="session", action="store_false")
+    parser.set_defaults(session=None)
+    parser.add_argument("--chunk-chars", type=int, default=None)
+    parser.add_argument("--top-k", type=int, default=None)
+    fuse = parser.add_mutually_exclusive_group()
+    fuse.add_argument("--fuse", dest="fuse", action="store_true")
+    fuse.add_argument("--no-fuse", dest="fuse", action="store_false")
+    parser.set_defaults(fuse=None)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
     return asyncio.run(main_async(args))
