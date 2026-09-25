@@ -1,6 +1,29 @@
 from eval.run_system_benchmark import build_stack_metadata
 
 
+def test_benchmark_graph_build_switch_is_reversible(monkeypatch):
+    from app.retrieval.memory import write_back
+    from eval import run_system_benchmark
+
+    original = write_back.safe_enqueue_graph_build
+    calls = []
+    monkeypatch.setattr(run_system_benchmark, "GRAPH_BUILDS_ENABLED", False)
+    monkeypatch.setattr(run_system_benchmark, "_GRAPH_BUILD_ORIGINAL", original)
+    monkeypatch.setattr(
+        write_back,
+        "safe_enqueue_graph_build",
+        lambda *args, **kwargs: calls.append(args),
+    )
+
+    run_system_benchmark._apply_graph_build_switch(False)
+    write_back.safe_enqueue_graph_build("memory-id")
+    assert calls == []
+
+    run_system_benchmark._apply_graph_build_switch(True)
+    assert write_back.safe_enqueue_graph_build is original
+    assert run_system_benchmark.GRAPH_BUILDS_ENABLED is True
+
+
 def test_stack_metadata_reflects_actual_backend(monkeypatch):
     from app.retrieval import embedder
 
@@ -29,5 +52,7 @@ def test_stack_metadata_reflects_actual_backend(monkeypatch):
     assert meta["runtime"]["python"]
     assert "onnxruntime" in meta["runtime"]["packages"]
     assert meta["rerank"]["top_n"] >= 1
+    assert meta["rerank"]["model"] == "gte-multilingual-reranker-base (local ONNX, int8)"
+    assert meta["graph_builds"] == "off (bench ingest)"
     assert meta["execution"]["requested_concurrency"] == 4
     assert meta["execution"]["actual_concurrency"] == 1

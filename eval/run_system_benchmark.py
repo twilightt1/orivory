@@ -75,6 +75,29 @@ os.environ["USE_LOCAL_EMBEDDINGS"] = "1"
 os.environ["RERANK_TOP_N"] = "15"
 os.environ["RETRIEVAL_SEMANTIC_RERANK"] = "1"
 
+# The per-memory entity graph is best-effort derived data. During benchmark
+# ingest its LLM calls share the answer/rewrite gate and can starve the scored
+# queries; keep it off unless --with-graph is explicitly requested.
+GRAPH_BUILDS_ENABLED = False
+_GRAPH_BUILD_ORIGINAL = None
+
+
+def _skip_graph_build(*args, **kwargs) -> None:
+    return None
+
+
+def _apply_graph_build_switch(enabled: bool) -> None:
+    global GRAPH_BUILDS_ENABLED, _GRAPH_BUILD_ORIGINAL
+    from app.retrieval.memory import write_back
+
+    if _GRAPH_BUILD_ORIGINAL is None:
+        _GRAPH_BUILD_ORIGINAL = write_back.safe_enqueue_graph_build
+    write_back.safe_enqueue_graph_build = (
+        _GRAPH_BUILD_ORIGINAL if enabled else _skip_graph_build
+    )
+    GRAPH_BUILDS_ENABLED = enabled
+
+
 from eval.benchmarks.llm_judge import JUDGE_PROMPT_VERSION, build_judge_messages  # noqa: E402
 from eval.benchmarks.longmemeval_s import load_instances  # noqa: E402
 
@@ -166,6 +189,7 @@ def build_stack_metadata(
         "query_prefix": fingerprint["query_prefix"],
         "passage_prefix": fingerprint["passage_prefix"],
         "retriever": "MemoryRetriever (vector + salience + entity boost + rerank)",
+        "graph_builds": "on" if GRAPH_BUILDS_ENABLED else "off (bench ingest)",
         "recall_top_k": top_k,
         "retrieval": {
             "hybrid_enabled": bool(settings.RETRIEVAL_HYBRID_ENABLED),
@@ -886,12 +910,18 @@ def main() -> int:
                              "query, union by id) — 0.650 on the seed "
                              "sample vs 0.700 single-pass; multi-hop "
                              "experiments only")
+    parser.add_argument(
+        "--with-graph",
+        action="store_true",
+        help="keep per-memory entity-graph builds enabled during benchmark ingest",
+    )
     parser.add_argument("--chunk-chars", type=int, default=0,
                         help="split each session into turn-aligned chunks of "
                              "at most this many chars (session-level only; "
                              "0 = one memory per session, the diluting "
                              "extreme) — the RAG sweet spot is ~4000")
     args = parser.parse_args()
+    _apply_graph_build_switch(args.with_graph)
     return asyncio.run(main_async(args))
 
 
