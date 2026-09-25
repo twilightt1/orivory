@@ -72,7 +72,9 @@ def check_wildcard_cors_rejected() -> CheckResult:
 
 
 def check_provider_keys_required() -> CheckResult:
-    return _expect_validation_error("required provider keys", "OPENAI_API_KEY", OPENAI_API_KEY="")
+    return _expect_validation_error(
+        "required provider keys", "OPENROUTER_API_KEY", OPENROUTER_API_KEY=""
+    )
 
 
 def _service_block(compose_text: str, service_name: str) -> str:
