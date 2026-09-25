@@ -67,6 +67,7 @@ from eval.benchmarks.longmemeval_s import load_instances  # noqa: E402
 from eval.retrieval_contract import retrieval_contract_matches  # noqa: E402
 from eval.run_system_benchmark import (  # noqa: E402
     DATASET,
+    _apply_graph_build_switch,
     answer_from_stack,
     build_stack_metadata,
     ingest_instance,
@@ -102,6 +103,14 @@ async def main_async(args) -> int:
     if not isinstance(recorded_stack, dict):
         print("refusing to resume: result has no retrieval contract", file=sys.stderr)
         return 2
+    recorded_graph_builds = recorded_stack.get("graph_builds")
+    if not isinstance(recorded_graph_builds, str) or recorded_graph_builds not in {
+        "on",
+        "off (bench ingest)",
+    }:
+        print("refusing to resume: result lacks a valid graph-build policy", file=sys.stderr)
+        return 2
+    _apply_graph_build_switch(recorded_graph_builds == "on")
     recorded_execution = recorded_stack.get("execution")
     if not isinstance(recorded_execution, dict):
         print("refusing to resume: result lacks execution metadata", file=sys.stderr)

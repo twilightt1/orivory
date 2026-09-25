@@ -3,15 +3,26 @@ _RETRIEVAL_CONTRACT_KEYS = (
     "embeddings_actual",
     "rerank",
     "recall_top_k",
+    "graph_builds",
     "retrieval",
 )
 _RETRIEVAL_POLICY_KEYS = ("hybrid_enabled", "rerank_pool_multiplier", "rrf_k")
 _CONTEXT_POLICY_KEYS = ("session_level", "chunk_chars", "fuse")
+_GRAPH_BUILD_POLICIES = frozenset(("on", "off (bench ingest)"))
 
 
 def retrieval_contract_matches(recorded: object, current: object) -> bool:
-    """Require matching embedding, retrieval, rerank, recall, and ingest contracts."""
+    """Require matching embedding, retrieval, rerank, ingest, and graph policies."""
     if not isinstance(recorded, dict) or not isinstance(current, dict):
+        return False
+    recorded_graph_builds = recorded.get("graph_builds")
+    current_graph_builds = current.get("graph_builds")
+    if (
+        not isinstance(recorded_graph_builds, str)
+        or not isinstance(current_graph_builds, str)
+        or recorded_graph_builds not in _GRAPH_BUILD_POLICIES
+        or current_graph_builds not in _GRAPH_BUILD_POLICIES
+    ):
         return False
 
     recorded_retrieval = recorded.get("retrieval")
