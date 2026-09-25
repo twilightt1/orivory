@@ -32,7 +32,7 @@ Implemented the final fix wave on branch `p0-audit-baseline`. The branch is loca
 - Fingerprints now include model/revision, artifact and tokenizer SHA-256 values where verified, graph output, pooling, prefixes, max-token/truncation/padding policy, normalization, dimension, precision, provider, and document-format version.
 - Arctic XS and multilingual E5 downloads use pinned upstream revisions and verify expected artifact/tokenizer hashes. Production Arctic mean pooling remains unchanged.
 - Retained Chroma MiniLM is represented explicitly as its own 384-dimensional contract with its bundled artifact/tokenizer provenance.
-- Jina dimensions use `settings.JINA_EMBED_DIMENSIONS`; OpenAI dimensions use `settings.EMBED_DIMENSIONS` in the active fingerprint. Provider-defined API truncation/normalization is represented as unknown rather than asserted.
+- The separate 1024-dimensional provider branch was removed. Current local and OpenAI-compatible dimensions remain fingerprinted; provider-defined API truncation/normalization is represented as unknown rather than asserted.
 
 ### SQLite and schema readiness
 

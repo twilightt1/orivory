@@ -122,10 +122,9 @@ def fingerprint_generation(fingerprint: str | dict[str, Any]) -> str:
 def current_fingerprint() -> dict[str, Any]:
     """Fingerprint for the active embedding contract.
 
-    P1b puts local Arctic XS on CLS pooling (``ARCTIC_CLS_FINGERPRINT``); e5
-    keeps mean. API providers expose null immutable artifact provenance
-    because the provider does not publish a revision through this interface;
-    the fields remain explicit instead of claiming one.
+    Local models pin artifact bytes and revisions; the OpenAI-compatible API
+    does not expose immutable artifact provenance through this interface, so
+    those fields remain explicit instead of claiming one.
     """
     if settings.USE_LOCAL_EMBEDDINGS and settings.LOCAL_EMBED_MODEL == "arctic":
         return dict(ARCTIC_CLS_FINGERPRINT)
@@ -146,24 +145,6 @@ def current_fingerprint() -> dict[str, Any]:
             precision="float32",
             provider="onnxruntime-cpu",
             graph_outputs=["last_hidden_state"],
-        )
-    if settings.USE_JINA_EMBEDDINGS and settings.JINA_API_KEY:
-        return _contract(
-            model_id=settings.JINA_EMBED_MODEL,
-            revision=None,
-            artifact_digest=None,
-            tokenizer_digest=None,
-            pooling="api",
-            query_prefix="",
-            passage_prefix="",
-            max_tokens=None,
-            truncation="provider-defined",
-            padding="provider-defined",
-            normalize=None,
-            dim=settings.JINA_EMBED_DIMENSIONS,
-            precision="float32",
-            provider="jina-api",
-            graph_outputs=["embedding"],
         )
     return _contract(
         model_id=settings.EMBED_MODEL,

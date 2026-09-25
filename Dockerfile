@@ -4,7 +4,7 @@
 #
 #   docker build -t orivory:lite .
 #   docker run -d -p 8000:8000 -v orivory-data:/data \
-#     -e OPENAI_API_KEY=sk-... orivory:lite
+#     orivory:lite
 #
 # The Next.js frontend is NOT included (Orivory targets agents via /mcp + API).
 # This is the ONLY Dockerfile: the legacy full-stack one (libpq/Qdrant server/

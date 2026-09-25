@@ -32,11 +32,10 @@ The substitutions (recorded, because an ablation is only as honest as its seams)
   Qdrant HNSW, which APPROXIMATES this order; at fixture scale the exact order is
   the one the store is trying to reproduce.
 - **Lexical leg**: real SQLite FTS5 (T4's DDL + triggers, the real MATCH grammar).
-- **Reranker**: the Jina cross-encoder is a paid remote API and is unreachable
-  offline, so the rerank stage is driven by a deterministic local IDF-weighted
-  token-coverage scorer (:func:`_local_rerank_standin`). It measures the STAGE —
-  SQL-authorized content, the merge semantics, the ordering effect — never Jina's
-  semantic quality.
+- **Reranker**: this ablation isolates pipeline-stage behavior with a deterministic
+  local IDF-weighted token-coverage scorer (:func:`_local_rerank_standin`), rather
+  than loading the full cross-encoder. It measures the STAGE — SQL-authorized
+  content, merge semantics, ordering effect — not model quality.
 - **Query rewrite**: identity (no LLM offline).
 - **Modifiers**: every row shares one ``captured_at``, one salience and no pin, so
   entity boost / time decay are a UNIFORM multiplier and the served order is the
@@ -480,12 +479,12 @@ class ExactCosineStore:
 
 
 async def _local_rerank_standin(query: str, chunks: list[dict], *, top_n: int | None = None):
-    """The offline stand-in for the Jina cross-encoder (documented substitution).
+    """The offline stand-in for the cross-encoder (documented substitution).
 
     Deterministic IDF-weighted token coverage over the SQL-authorized ``content``:
     a rare query term in a document moves it up, a common one barely does. It
     mirrors the real ``rerank`` contract — ``[{**chunk, "rerank_score"}]``, best
-    first, at most ``min(top_n, JINA_RERANKER_TOP_N)`` rows — so the pipeline's
+    first, at most ``min(top_n, RERANK_TOP_N)`` rows — so the pipeline's
     merge and revalidation run exactly as in production.
     """
     query_terms = set(_word_tokens(fold(query)))
@@ -507,7 +506,7 @@ async def _local_rerank_standin(query: str, chunks: list[dict], *, top_n: int | 
         (chunk, score(docs[i])) for i, chunk in enumerate(chunks)
     ]
     scored.sort(key=lambda pair: (-pair[1], str(pair[0].get("memory_id", ""))))
-    cap = reranker_module.settings.JINA_RERANKER_TOP_N
+    cap = reranker_module.settings.RERANK_TOP_N
     limit = min(int(top_n), cap) if top_n is not None else cap
     return [
         {**chunk, "rerank_score": value}
@@ -1326,14 +1325,13 @@ async def run_ablation(workdir: Path) -> dict:
                 "dense_only's numbers are a BEST CASE and the measured "
                 f"{deltas['hybrid_rrf']['overall']['recall@5_gain']:+.4f} overall gain is conservative. "
                 "The substitution is one of convenience at this scale, not an offline casualty — "
-                "Qdrant runs embedded in this repo (lite mode); the only offline-unreachable seam "
-                "here is Jina."
+                "Qdrant runs embedded in this repo (lite mode)."
             ),
             "lexical": "REAL SQLite FTS5 (T4 DDL + triggers, real MATCH grammar)",
             "rerank": (
-                "Jina cross-encoder is a paid remote API and unreachable offline: the stage runs "
-                "a deterministic local IDF-weighted token-coverage scorer. Measures the STAGE "
-                "(SQL-authorized content, merge, ordering effect), never Jina's semantic quality."
+                "A deterministic local IDF-weighted token-coverage scorer runs the stage. "
+                "Measures SQL-authorized content, merge and ordering behavior, not cross-encoder "
+                "semantic quality."
             ),
             "rewrite": "identity (no LLM offline)",
             "modifiers": "uniform by construction: one captured_at, one salience, no pins",

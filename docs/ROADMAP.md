@@ -18,8 +18,10 @@
 
 ### Benchmark era (2026-09-05 → 2026-09-09, PR #11–#20)
 - OpenClaw auto-capture, one-command installer, compression.
-- Tuning ladder with Wilson CIs: 0.490 official n=100 → 0.570 Jina rerank;
+- Tuning ladder with Wilson CIs: 0.490 official n=100 → 0.570 hosted rerank;
   two NEGATIVE results recorded honestly (session chunking, map-reduce).
+  The hosted lane is retired; this historical score is not reproducible from the
+  shipped default retrieval config.
 - Judge hardening (exact-token match, judged pilot).
 
 ### Review + remediation batch (2026-09-10)

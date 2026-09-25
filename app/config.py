@@ -149,14 +149,13 @@ class Settings(BaseSettings):
     EMBED_WARMUP_ON_BOOT: bool = True
 
 
-    JINA_API_KEY: str = ""
-    JINA_EMBED_MODEL: str = "jina-embeddings-v3"
-    JINA_EMBED_DIMENSIONS: int = 1024
     # Cross-encoder rerank inside MemoryRetriever: reorder the vector
-    # candidate pool by true query-document relevance (Jina reranker)
-    # before salience/decay modifiers. Off by default — per-deployment.
+    # candidate pool by true query-document relevance (the bundled local ONNX
+    # cross-encoder, app/retrieval/local_reranker.py — no API key, no per-call
+    # cost) before salience/decay modifiers. Off by default: full-pool scoring
+    # is ~6 s at the default pool and grows with candidate/window count; keep it
+    # opt-in until an evidence artifact establishes the latency budget.
     RETRIEVAL_SEMANTIC_RERANK: bool = False
-    JINA_RERANKER_MODEL: str = "jina-reranker-v2-base-multilingual"
     # Per-call CAP on the reranker's own answer, never the rerank window: the
     # per-call `top_n` is the request's own top_k clamped to this value
     # (ruling R4(p2)). The REQUEST carries the whole candidate pool — up to
@@ -170,7 +169,7 @@ class Settings(BaseSettings):
     # boost x decay. Serving a larger window, raise it to `top_k x pool
     # multiplier`; it stays a cap, and the extra ranks cost only what the
     # opt-in rerank flag spends.
-    JINA_RERANKER_TOP_N: int = 20
+    RERANK_TOP_N: int = 20
     # Rerank pool: dense candidates fetched per requested result (ruling
     # R4(p2), signed default 2.0). One pool feeds the eligibility filter, the
     # reranker and scoring; a pool smaller than top_k cannot satisfy the count
@@ -195,24 +194,10 @@ class Settings(BaseSettings):
     # at load (>= 1): a negative k zero-divides at rank 0, and the outage
     # fallback reads it with the hybrid flag OFF.
     RETRIEVAL_RRF_K: int = 60
-    # Bound on ONE rerank HTTP call (ruling R11(p2)): a hung transport must not
-    # hold the recall path for the client's own 30 s default. Overrunning it is
-    # a `RerankUnavailable` — dense order continues, counted.
-    JINA_RERANKER_TIMEOUT_SECONDS: float = 10.0
-    # ── Embedding backend support matrix (frozen v1.1.0) ──
-    #   jina  (USE_JINA_EMBEDDINGS=true + JINA_API_KEY): SUPPORTED default
-    #           for full-stack. Matches the frozen benchmark baseline.
-    #   local (USE_LOCAL_EMBEDDINGS=true): SUPPORTED for lite/self-contained
-    #           mode only (384-dim, no API key). Do not mix with Jina/OpenAI
-    #           in one store — the dim guard will refuse.
-    #   openai (fallback when neither above applies): LEGACY, unbenchmarked,
-    #           kept so old deployments boot. Not supported for recall quality.
-    # Use jina for embeddings instead of OpenAI
-    USE_JINA_EMBEDDINGS: bool = True
-    # Local ONNX embeddings (384-dim, no API key). Takes precedence over
-    # Jina/OpenAI when true — keeps lite mode and benchmarks self-contained.
-    # Do not mix backends in one store.
-    USE_LOCAL_EMBEDDINGS: bool = False
+    # Local ONNX embeddings are the default (384-dim, no API key, no per-call
+    # cost). OpenAI-compatible embeddings remain an explicit legacy opt-in;
+    # do not mix backends in one store (the fingerprint guard refuses it).
+    USE_LOCAL_EMBEDDINGS: bool = True
     # Which local model backs USE_LOCAL_EMBEDDINGS: "arctic"
     # (snowflake-arctic-embed-xs, default — best English bench, CLS pooling) or
     # "e5" (multilingual, opt-in Vietnamese, mean pooling). Both 384-dim but
@@ -295,11 +280,9 @@ class Settings(BaseSettings):
             and _is_local_host(self.QDRANT_URL)
         ):
             self.QDRANT_MODE = "local"
-        # Zero-key deployments must still remember: no embedding API key means
-        # the bundled local model (384-dim, no download beyond ONNX).
-        # ponytail: keyed backends win whenever a key exists; the dim
-        # guard refuses mixing backends in one store.
-        if not self.USE_LOCAL_EMBEDDINGS and not self.JINA_API_KEY and not self.OPENAI_API_KEY:
+        # If an operator explicitly disables the local model without a
+        # nonblank OpenAI-compatible embedding key, restore the zero-cost path.
+        if not self.USE_LOCAL_EMBEDDINGS and not self.OPENAI_API_KEY.strip():
             self.USE_LOCAL_EMBEDDINGS = True
         return self
 
@@ -346,22 +329,19 @@ class Settings(BaseSettings):
         # ── The P2 numeric knobs (T1/T2/T5): each one has a domain a typo can
         # leave silently — a 0-width embed executor raises inside the first
         # request, a negative ORT width fails far from load, a 0 cap asks the
-        # reranker transport for zero rows on every call, a non-positive pool
-        # multiplier collapses the fetch the count invariant lives on, and a
-        # non-positive timeout turns every rerank into a failure. Refuse at
-        # load (the EMBED_BATCH_SIZE/RRF_K precedent).
+        # scorer for zero rows on every call, and a non-positive pool
+        # multiplier collapses the fetch the count invariant lives on. Refuse
+        # at load (the EMBED_BATCH_SIZE/RRF_K precedent).
         if self.EMBED_EXECUTOR_WORKERS < 1:
             raise ValueError("EMBED_EXECUTOR_WORKERS must be >= 1")
         if self.EMBED_ORT_INTRA_OP_THREADS < 0:
             raise ValueError(
                 "EMBED_ORT_INTRA_OP_THREADS must be >= 0 (0 = ONNX Runtime's own default)"
             )
-        if self.JINA_RERANKER_TOP_N < 1:
-            raise ValueError("JINA_RERANKER_TOP_N must be >= 1")
+        if self.RERANK_TOP_N < 1:
+            raise ValueError("RERANK_TOP_N must be >= 1")
         if self.RETRIEVAL_RERANK_POOL_MULTIPLIER <= 0:
             raise ValueError("RETRIEVAL_RERANK_POOL_MULTIPLIER must be > 0")
-        if self.JINA_RERANKER_TIMEOUT_SECONDS <= 0:
-            raise ValueError("JINA_RERANKER_TIMEOUT_SECONDS must be > 0")
 
     def _validate_production_settings(self) -> None:
         self._require_explicit_cors_origins()
@@ -386,11 +366,9 @@ class Settings(BaseSettings):
                 raise ValueError("ALLOWED_ORIGINS must contain explicit HTTP(S) origins in production")
 
     def _require_provider_keys(self) -> None:
-        required_keys = {
-            "OPENROUTER_API_KEY": self.OPENROUTER_API_KEY,
-            "OPENAI_API_KEY": self.OPENAI_API_KEY,
-            "JINA_API_KEY": self.JINA_API_KEY,
-        }
+        required_keys = {"OPENROUTER_API_KEY": self.OPENROUTER_API_KEY}
+        if self.COMPRESSION_ENABLED or not self.USE_LOCAL_EMBEDDINGS:
+            required_keys["OPENAI_API_KEY"] = self.OPENAI_API_KEY
         missing = [name for name, value in required_keys.items() if not value.strip()]
         if missing:
             raise ValueError(f"Missing provider keys in production: {', '.join(missing)}")

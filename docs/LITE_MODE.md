@@ -5,9 +5,12 @@
 > volume, zero external services — that is not a "mode", it is the product.
 
 ```bash
-docker run -d --name orivory -p 127.0.0.1:8000:8000 -v orivory-data:/data \
-  -e OPENAI_API_KEY=sk-... ghcr.io/twilightt1/orivory:lite
+docker run -d --name orivory -p 127.0.0.1:8000:8000 -v orivory-data:/data \\
+  ghcr.io/twilightt1/orivory:lite
 ```
+
+Local ONNX embeddings need no API key. Add `-e OPENROUTER_API_KEY=...` only if
+using hosted LLM calls; `OPENAI_API_KEY` is optional for local embeddings.
 
 The API binds **127.0.0.1 on the host** (loopback only) — put a reverse proxy
 in front of it to expose it. Inside the container it listens on 0.0.0.0.
@@ -59,8 +62,8 @@ A request with no Authorization header IS that owner; an agent token
   `/data/models` or `~/.cache/orivory/e5` on the volume) when that matters.
   `EMBED_WARMUP_ON_BOOT=false` skips the boot warm-up and pays a cold session
   (~610-685 ms) on the first request instead.
-- **Provider keys are optional** — with no embedding key the bundled local ONNX
-  model is the default; OpenAI / OpenRouter / Jina keys are opt-ins.
+- **Embeddings are local by default** — bundled ONNX models, no embedding key
+  or per-call cost. OpenAI-compatible embeddings remain an explicit legacy opt-in.
 - **A measured ceiling, not an infinite archive.** One laptop-class box (macOS,
   M-series, one process, warm cache) on synthetic notes:
 

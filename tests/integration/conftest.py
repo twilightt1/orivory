@@ -16,7 +16,6 @@ _TEST_ENV_DEFAULTS = {
     "QDRANT_LOCAL_PATH": "/tmp/orivory-live-qdrant",
     "OPENROUTER_API_KEY": "test-openrouter-key",
     "OPENAI_API_KEY": "test-openai-key",
-    "JINA_API_KEY": "test-jina-key",
     "ENVIRONMENT": "test",
 }
 

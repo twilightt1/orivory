@@ -194,8 +194,8 @@ class TestCollectionName:
         assert vector_store.COLLECTION_NAME == "Orivory_memories"
 
 
-class TestUpsertMemorySync:
-    """Tests for upsert_memory_sync function."""
+class TestMemoryUpsert:
+    """Tests for asynchronous and synchronous memory upserts."""
 
     def test_upsert_memory_sync_writes_one_point(self, monkeypatch):
         memory = MagicMock()
@@ -230,6 +230,34 @@ class TestUpsertMemorySync:
         assert point.payload["content"] == "Title: Test\nContent"
         assert point.payload["kind"] == "memory"
         assert point.payload["orivory_memory_revision"] == 2
+
+
+    async def test_precomputed_embedding_is_written_without_reembedding(self, monkeypatch):
+        memory = MagicMock()
+        memory.id = uuid4()
+        memory.user_id = uuid4()
+        memory.title = "Test"
+        memory.content = "Content"
+        memory.source_type = "manual"
+        memory.captured_at = None
+        memory.salience = 0.5
+        memory.pinned = False
+        memory.tags = []
+        memory.revision = 2
+
+        client = _FakeClient()
+        _async_face(monkeypatch, client)
+
+        async def should_not_embed(_texts):
+            raise AssertionError("precomputed vector should avoid another model call")
+
+        monkeypatch.setattr(vector_store, "embed_texts", should_not_embed)
+        await vector_store.upsert_memory(memory, embedding=[0.3] * 8)
+
+        upsert = next(kwargs for name, kwargs in client.calls if name == "upsert")
+        (point,) = upsert["points"]
+        assert point.vector == [0.3] * 8
+        assert point.payload["content"] == "Title: Test\nContent"
 
     def test_upsert_memories_sync_batches_into_one_point_per_memory(self, monkeypatch):
         memories = [MagicMock(id=uuid4(), user_id=uuid4(), title=None, content=f"body {i}",

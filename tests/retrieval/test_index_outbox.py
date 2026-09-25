@@ -26,6 +26,7 @@ from sqlalchemy.pool import NullPool
 
 import app.main as main
 from app import database
+from app.config import settings
 from app.database import Base, sync_session
 from app.models.index_outbox import IndexGeneration, IndexOutbox
 from app.models.memory import Memory
@@ -247,6 +248,137 @@ async def test_drain_skips_stale_revision_and_applies_latest(db, owner, monkeypa
     assert report == {"claimed": 2, "applied": 1, "skipped": 1, "blocked": 0, "failed": 0}
     assert upserts == [(str(memory.id), "v2", 2)]  # the latest SQL state, once
     assert [row.status for row in await _outbox_rows()] == ["done", "done"]
+
+
+async def test_freshness_drain_prefetches_local_embeddings_with_bounded_concurrency(
+    db, owner, monkeypatch
+):
+    monkeypatch.setattr(settings, "USE_LOCAL_EMBEDDINGS", True)
+    monkeypatch.setattr(settings, "EMBED_EXECUTOR_WORKERS", 2)
+    active = 0
+    max_active = 0
+    written: list[tuple[str, list[float] | None]] = []
+
+    async def embed(memory):
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        await asyncio.sleep(0.01)
+        active -= 1
+        return [float(memory.revision)]
+
+    async def upsert(memory, *, embedding=None):
+        written.append((str(memory.id), embedding))
+
+    monkeypatch.setattr(outbox, "embed_memory", embed)
+    monkeypatch.setattr(outbox, "upsert_memory", upsert)
+
+    foreign_id = uuid.uuid4()
+    db.add(
+        User(
+            id=foreign_id,
+            email=f"{foreign_id.hex}@foreign.test.invalid",
+            hashed_password="x",
+            display_name="Foreign",
+            is_verified=True,
+            is_active=True,
+        )
+    )
+    await db.commit()
+
+    priority_memories = [_memory(owner, f"parallel-{index}") for index in range(4)]
+    foreign_memories = [_memory(foreign_id, name) for name in ("foreign-tagged", "wrong-owner")]
+    memories = [*priority_memories, *foreign_memories]
+    for memory in memories:
+        db.add(memory)
+        outbox.bump_revision(memory)
+        await outbox.enqueue_upsert(db, memory)
+        if memory is foreign_memories[1]:
+            queued = (
+                await db.execute(select(IndexOutbox).where(IndexOutbox.entity_id == memory.id.hex))
+            ).scalar_one()
+            queued.tenant_id = owner.hex
+    await db.commit()
+
+    report = await outbox.drain_pending(priority_tenant=owner.hex)
+
+    assert report == {"claimed": 6, "applied": 6, "skipped": 0, "blocked": 0, "failed": 0}
+    assert max_active == 2
+    assert {memory_id for memory_id, _ in written} == {str(memory.id) for memory in memories}
+    assert {memory_id for memory_id, embedding in written if embedding is not None} == {
+        str(memory.id) for memory in priority_memories
+    }
+
+
+async def test_freshness_drain_falls_back_to_serial_when_prefetch_fails(
+    db, owner, monkeypatch
+):
+    monkeypatch.setattr(settings, "USE_LOCAL_EMBEDDINGS", True)
+    monkeypatch.setattr(settings, "EMBED_EXECUTOR_WORKERS", 2)
+    written: list[str] = []
+    prefetch_attempted = False
+
+    async def fail_prefetch(_rows, *, priority_tenant):
+        nonlocal prefetch_attempted
+        prefetch_attempted = True
+        assert priority_tenant == owner.hex
+        raise RuntimeError("snapshot read unavailable")
+
+    async def upsert(memory):
+        written.append(str(memory.id))
+
+    monkeypatch.setattr(outbox, "_prefetch_memory_embeddings", fail_prefetch)
+    monkeypatch.setattr(outbox, "upsert_memory", upsert)
+
+    memories = [_memory(owner, f"fallback-{index}") for index in range(2)]
+    for memory in memories:
+        db.add(memory)
+        outbox.bump_revision(memory)
+        await outbox.enqueue_upsert(db, memory)
+    await db.commit()
+
+    report = await outbox.drain_pending(priority_tenant=owner.hex)
+
+    assert prefetch_attempted
+    assert report["applied"] == 2
+    assert set(written) == {str(memory.id) for memory in memories}
+
+
+async def test_freshness_drain_retries_failed_prefetch_serially(db, owner, monkeypatch):
+    monkeypatch.setattr(settings, "USE_LOCAL_EMBEDDINGS", True)
+    monkeypatch.setattr(settings, "EMBED_EXECUTOR_WORKERS", 2)
+    attempts: dict[str, int] = {}
+    written: list[tuple[str, list[float] | None]] = []
+
+    async def embed(memory):
+        memory_id = str(memory.id)
+        attempts[memory_id] = attempts.get(memory_id, 0) + 1
+        if memory.content == "retry" and attempts[memory_id] == 1:
+            raise RuntimeError("transient local model failure")
+        return [float(memory.revision)]
+
+    async def upsert(memory, *, embedding=None):
+        if embedding is None:
+            embedding = await embed(memory)
+        written.append((str(memory.id), embedding))
+
+    monkeypatch.setattr(outbox, "embed_memory", embed)
+    monkeypatch.setattr(outbox, "upsert_memory", upsert)
+
+    memories = [_memory(owner, content) for content in ("retry", "fast-1", "fast-2")]
+    for memory in memories:
+        db.add(memory)
+        outbox.bump_revision(memory)
+        await outbox.enqueue_upsert(db, memory)
+    await db.commit()
+
+    report = await outbox.drain_pending(priority_tenant=owner.hex)
+
+    assert report["applied"] == 3
+    assert attempts == {
+        str(memory.id): (2 if memory.content == "retry" else 1) for memory in memories
+    }
+    assert {memory_id for memory_id, _ in written} == {str(memory.id) for memory in memories}
 
 
 async def test_drain_converts_upsert_to_delete_when_the_row_is_gone(db, owner, monkeypatch):

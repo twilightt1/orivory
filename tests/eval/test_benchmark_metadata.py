@@ -1,6 +1,29 @@
 from eval.run_system_benchmark import build_stack_metadata
 
 
+def test_benchmark_graph_build_switch_is_reversible(monkeypatch):
+    from app.retrieval.memory import write_back
+    from eval import run_system_benchmark
+
+    original = write_back.safe_enqueue_graph_build
+    calls = []
+    monkeypatch.setattr(run_system_benchmark, "GRAPH_BUILDS_ENABLED", False)
+    monkeypatch.setattr(run_system_benchmark, "_GRAPH_BUILD_ORIGINAL", original)
+    monkeypatch.setattr(
+        write_back,
+        "safe_enqueue_graph_build",
+        lambda *args, **kwargs: calls.append(args),
+    )
+
+    run_system_benchmark._apply_graph_build_switch(False)
+    write_back.safe_enqueue_graph_build("memory-id")
+    assert calls == []
+
+    run_system_benchmark._apply_graph_build_switch(True)
+    assert write_back.safe_enqueue_graph_build is original
+    assert run_system_benchmark.GRAPH_BUILDS_ENABLED is True
+
+
 def test_stack_metadata_reflects_actual_backend(monkeypatch):
     from app.retrieval import embedder
 
@@ -13,8 +36,14 @@ def test_stack_metadata_reflects_actual_backend(monkeypatch):
         concurrency=4,
     )
     assert meta["embeddings_actual"]["pooling"] == "cls"
-    assert "jina" not in meta["embeddings_actual"]["model_id"].lower()
+    assert meta["embedding_backend"] == "local-arctic"
+    assert "arctic" in meta["embeddings_actual"]["model_id"].lower()
     assert meta["recall_top_k"] == 10
+    assert meta["retrieval"] == {
+        "hybrid_enabled": embedder.settings.RETRIEVAL_HYBRID_ENABLED,
+        "rerank_pool_multiplier": embedder.settings.RETRIEVAL_RERANK_POOL_MULTIPLIER,
+        "rrf_k": embedder.settings.RETRIEVAL_RRF_K,
+    }
     assert meta["git_head"] and "git_dirty" in meta
     assert meta["dataset_sha256"] and meta["dataset_path"]
     assert meta["dataset_source"] in {"worktree", "external-checkout-fallback"}
@@ -23,5 +52,7 @@ def test_stack_metadata_reflects_actual_backend(monkeypatch):
     assert meta["runtime"]["python"]
     assert "onnxruntime" in meta["runtime"]["packages"]
     assert meta["rerank"]["top_n"] >= 1
+    assert meta["rerank"]["model"] == "gte-multilingual-reranker-base (local ONNX, int8)"
+    assert meta["graph_builds"] == "off (bench ingest)"
     assert meta["execution"]["requested_concurrency"] == 4
     assert meta["execution"]["actual_concurrency"] == 1

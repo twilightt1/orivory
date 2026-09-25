@@ -28,7 +28,6 @@ def _production_settings(**overrides):
         "DATABASE_URL": _SQLITE_URL,
         "OPENROUTER_API_KEY": "«redacted:sk-…»",
         "OPENAI_API_KEY": "«redacted:sk-…»",
-        "JINA_API_KEY": "jina-production",
         "CONFIG_ENCRYPTION_KEY": "production-config-encryption-key-32chars",
         "ALLOWED_ORIGINS": "https://app.orivory.example",
         "ENVIRONMENT": "production",
@@ -40,7 +39,14 @@ def _production_settings(**overrides):
 def test_zerokey_embeddings_default_to_the_local_model():
     """No embedding key means the bundled local ONNX model — the zero-cost
     path a fresh self-host boots with."""
-    settings = _base_settings(JINA_API_KEY="", OPENAI_API_KEY="")
+    settings = _base_settings(OPENAI_API_KEY="")
+
+    assert settings.USE_LOCAL_EMBEDDINGS is True
+
+
+def test_local_embeddings_stay_default_when_openai_key_is_present():
+    """An API key must not silently switch fresh stores onto a paid vector lane."""
+    settings = _base_settings(OPENAI_API_KEY="configured")
 
     assert settings.USE_LOCAL_EMBEDDINGS is True
 
@@ -58,8 +64,32 @@ def test_production_rejects_wildcard_cors():
 
 
 def test_production_rejects_missing_provider_keys():
+    with pytest.raises(ValidationError, match="OPENROUTER_API_KEY"):
+        _production_settings(OPENROUTER_API_KEY="")
+
+
+def test_production_local_embeddings_do_not_require_openai_key():
+    settings = _production_settings(OPENAI_API_KEY="")
+
+    assert settings.USE_LOCAL_EMBEDDINGS is True
+
+
+@pytest.mark.parametrize("api_key", ["", "   "])
+def test_production_remote_embeddings_without_nonblank_key_fall_back_to_local(api_key):
+    settings = _production_settings(USE_LOCAL_EMBEDDINGS=False, OPENAI_API_KEY=api_key)
+
+    assert settings.USE_LOCAL_EMBEDDINGS is True
+
+
+def test_production_remote_embeddings_require_explicit_nonblank_key():
+    settings = _production_settings(USE_LOCAL_EMBEDDINGS=False, OPENAI_API_KEY="configured")
+
+    assert settings.USE_LOCAL_EMBEDDINGS is False
+
+
+def test_production_compression_requires_openai_key():
     with pytest.raises(ValidationError, match="OPENAI_API_KEY"):
-        _production_settings(OPENAI_API_KEY="")
+        _production_settings(OPENAI_API_KEY="", COMPRESSION_ENABLED=True)
 
 
 def test_production_rejects_missing_config_encryption_key():
@@ -123,10 +153,10 @@ def test_accepts_ort_intra_op_boundary_values():
 
 @pytest.mark.parametrize("cap", [0, -1])
 def test_rejects_invalid_reranker_cap(cap):
-    """The cap is the per-call `min(top_k, cap)`: a 0 cap asks the transport
+    """The cap is the per-call `min(top_k, cap)`: a 0 cap asks the scorer
     for zero rows on every request — a typo, not a configuration."""
-    with pytest.raises(ValidationError, match="JINA_RERANKER_TOP_N"):
-        _base_settings(JINA_RERANKER_TOP_N=cap)
+    with pytest.raises(ValidationError, match="RERANK_TOP_N"):
+        _base_settings(RERANK_TOP_N=cap)
 
 
 @pytest.mark.parametrize("multiplier", [0, -1.0])
@@ -135,14 +165,6 @@ def test_rejects_invalid_rerank_pool_multiplier(multiplier):
     that silently collapses the fetch, and the invariant would hide it."""
     with pytest.raises(ValidationError, match="RETRIEVAL_RERANK_POOL_MULTIPLIER"):
         _base_settings(RETRIEVAL_RERANK_POOL_MULTIPLIER=multiplier)
-
-
-@pytest.mark.parametrize("timeout", [0, -0.5])
-def test_rejects_invalid_reranker_timeout(timeout):
-    """A non-positive timeout turns every rerank call into a failure the
-    moment it is attempted; R11(p2) made it a bound, not a suggestion."""
-    with pytest.raises(ValidationError, match="JINA_RERANKER_TIMEOUT_SECONDS"):
-        _base_settings(JINA_RERANKER_TIMEOUT_SECONDS=timeout)
 
 
 def test_environment_whitespace_is_normalized_before_the_production_gate():
@@ -168,7 +190,7 @@ def test_production_spellings_with_whitespace_still_validate(spelling):
     with pytest.raises(ValidationError, match="ALLOWED_ORIGINS"):
         _production_settings(ENVIRONMENT=spelling, ALLOWED_ORIGINS="")
     with pytest.raises(ValidationError, match="OPENAI_API_KEY"):
-        _production_settings(ENVIRONMENT=spelling, OPENAI_API_KEY="")
+        _production_settings(ENVIRONMENT=spelling, OPENAI_API_KEY="", COMPRESSION_ENABLED=True)
 
 
 def test_normalizes_evaluator_failure_mode():

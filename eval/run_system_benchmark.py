@@ -12,9 +12,9 @@ answer comes from:
                entity boosts + rerank), capped at RECALL_TOP_K memories.
 
 Honest protocol: every answer + verdict is a real LLM call through the
-gateway in .env. The stack's retrieval is real (embeddings via Jina,
-ranking via the retriever). Nothing fabricated. This is the FIRST
-system-vs-baseline comparison — same seed, same judge, same n.
+gateway in .env. Retrieval is real and local (embeddings + reranking); nothing
+is fabricated. This is the FIRST system-vs-baseline comparison — same seed,
+same judge, same n.
 
 Usage (from a checkout with .env, dataset under eval/benchmarks/data/):
     QDRANT_MODE=local python3 eval/run_system_benchmark.py \
@@ -66,11 +66,37 @@ if os.environ.get("OPENAI_BASE_URL"):
 # Qdrant local path: default /data/qdrant is a Docker volume; on a dev box
 # point it inside the results dir.
 os.environ["QDRANT_LOCAL_PATH"] = str(_RESULTS_DIR / "qdrant")
+# The benchmark is a reproducible self-host lane regardless of stale .env
+# provider flags/keys.
+os.environ["USE_LOCAL_EMBEDDINGS"] = "1"
 # Benchmark answers from top-15: the reranker's own top_n must not truncate
 # the pool below that — pin the cap here, independent of the shipped default
 # (20 since R13(p2)).
-os.environ["JINA_RERANKER_TOP_N"] = "15"
+os.environ["RERANK_TOP_N"] = "15"
 os.environ["RETRIEVAL_SEMANTIC_RERANK"] = "1"
+
+# The per-memory entity graph is best-effort derived data. During benchmark
+# ingest its LLM calls share the answer/rewrite gate and can starve the scored
+# queries; keep it off unless --with-graph is explicitly requested.
+GRAPH_BUILDS_ENABLED = False
+_GRAPH_BUILD_ORIGINAL = None
+
+
+def _skip_graph_build(*args, **kwargs) -> None:
+    return None
+
+
+def _apply_graph_build_switch(enabled: bool) -> None:
+    global GRAPH_BUILDS_ENABLED, _GRAPH_BUILD_ORIGINAL
+    from app.retrieval.memory import write_back
+
+    if _GRAPH_BUILD_ORIGINAL is None:
+        _GRAPH_BUILD_ORIGINAL = write_back.safe_enqueue_graph_build
+    write_back.safe_enqueue_graph_build = (
+        _GRAPH_BUILD_ORIGINAL if enabled else _skip_graph_build
+    )
+    GRAPH_BUILDS_ENABLED = enabled
+
 
 from eval.benchmarks.llm_judge import JUDGE_PROMPT_VERSION, build_judge_messages  # noqa: E402
 from eval.benchmarks.longmemeval_s import load_instances  # noqa: E402
@@ -163,7 +189,13 @@ def build_stack_metadata(
         "query_prefix": fingerprint["query_prefix"],
         "passage_prefix": fingerprint["passage_prefix"],
         "retriever": "MemoryRetriever (vector + salience + entity boost + rerank)",
+        "graph_builds": "on" if GRAPH_BUILDS_ENABLED else "off (bench ingest)",
         "recall_top_k": top_k,
+        "retrieval": {
+            "hybrid_enabled": bool(settings.RETRIEVAL_HYBRID_ENABLED),
+            "rerank_pool_multiplier": settings.RETRIEVAL_RERANK_POOL_MULTIPLIER,
+            "rrf_k": settings.RETRIEVAL_RRF_K,
+        },
         "git_head": git_head,
         "git_dirty": git_dirty,
         "dataset_path": str(dataset_path),
@@ -183,8 +215,8 @@ def build_stack_metadata(
         },
         "rerank": {
             "enabled": bool(settings.RETRIEVAL_SEMANTIC_RERANK),
-            "model": settings.JINA_RERANKER_MODEL,
-            "top_n": settings.JINA_RERANKER_TOP_N,
+            "model": "gte-multilingual-reranker-base (local ONNX, int8)",
+            "top_n": settings.RERANK_TOP_N,
         },
         "answer": {
             "model": MODEL,
@@ -198,9 +230,6 @@ def build_stack_metadata(
             "max_tokens": 8,
         },
         "timeouts_seconds": {
-            "embedding_jina": 60,
-            "embedding_openai": 30,
-            "rerank": 30,
             "answer_and_judge_client": 240,
         },
         "execution": {
@@ -499,9 +528,8 @@ async def answer_from_stack(
     """Answer the question from what the stack recalls (single pass).
 
     NOTE: a two-phase map-reduce variant was tried (PR #20) and LOST to
-    single-pass (0.486 vs 0.570 clean) — it lives on only as a frozen copy
-    inside eval/complete_mapreduce_run.py for reproducibility of the
-    recorded negative result. Do not re-add it here.
+    single-pass (0.486 vs 0.570 hosted). The historical output remains in the
+    results archive, but its retrieval lane is retired. Do not re-add it here.
     """
     from openai import AsyncOpenAI
 
@@ -882,12 +910,18 @@ def main() -> int:
                              "query, union by id) — 0.650 on the seed "
                              "sample vs 0.700 single-pass; multi-hop "
                              "experiments only")
+    parser.add_argument(
+        "--with-graph",
+        action="store_true",
+        help="keep per-memory entity-graph builds enabled during benchmark ingest",
+    )
     parser.add_argument("--chunk-chars", type=int, default=0,
                         help="split each session into turn-aligned chunks of "
                              "at most this many chars (session-level only; "
                              "0 = one memory per session, the diluting "
                              "extreme) — the RAG sweet spot is ~4000")
     args = parser.parse_args()
+    _apply_graph_build_switch(args.with_graph)
     return asyncio.run(main_async(args))
 
 

@@ -462,7 +462,5 @@ def test_fingerprint_represents_arctic_cls_and_configured_dimensions(monkeypatch
     assert arctic["artifact_digest"]
 
     monkeypatch.setattr(settings, "USE_LOCAL_EMBEDDINGS", False)
-    monkeypatch.setattr(settings, "USE_JINA_EMBEDDINGS", True)
-    monkeypatch.setattr(settings, "JINA_API_KEY", "test-key")
-    monkeypatch.setattr(settings, "JINA_EMBED_DIMENSIONS", 768)
+    monkeypatch.setattr(settings, "EMBED_DIMENSIONS", 768)
     assert fingerprint_module.current_fingerprint()["dim"] == 768

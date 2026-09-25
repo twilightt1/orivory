@@ -1,5 +1,4 @@
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -10,12 +9,10 @@ from app.retrieval.embedder import embed_query, embed_texts, embed_texts_sync
 
 @pytest.fixture(autouse=True)
 def _dummy_provider_keys(monkeypatch):
-    """Client construction requires keys but never touches the network:
-    every test below replaces the transport (embeddings/post) with fakes."""
+    """Client construction requires an API key but never touches the network:
+    tests below replace embeddings calls with fakes; local is disabled because
+    these tests cover only the legacy OpenAI-compatible fallback."""
     monkeypatch.setattr(settings, "OPENAI_API_KEY", "test-key")
-    monkeypatch.setattr(settings, "JINA_API_KEY", "test-key")
-    # Local backend takes precedence when on (the zero-key default); these
-    # tests target the keyed backends, so pin it off.
     monkeypatch.setattr(settings, "USE_LOCAL_EMBEDDINGS", False)
 
 
@@ -56,10 +53,27 @@ class _FakeSyncEmbeddings:
 
 
 @pytest.mark.asyncio
+async def test_embed_texts_stays_local_when_openai_key_exists(monkeypatch):
+    monkeypatch.setattr(settings, "USE_LOCAL_EMBEDDINGS", True)
+    monkeypatch.setattr(settings, "OPENAI_API_KEY", "test-key")
+    monkeypatch.setattr(
+        embedder,
+        "_embed_with_local",
+        lambda texts, *, query=False: [[0.1, 0.2, 0.3] for _ in texts],
+    )
+    monkeypatch.setattr(
+        embedder,
+        "_get_async_client",
+        lambda: pytest.fail("local default must not construct a remote client"),
+    )
+
+    assert await embed_texts(["hello"]) == [[0.1, 0.2, 0.3]]
+
+
+@pytest.mark.asyncio
 async def test_embed_texts_async(monkeypatch):
     fake_embeddings = _FakeAsyncEmbeddings()
     monkeypatch.setattr(embedder.async_client, "embeddings", fake_embeddings)
-    monkeypatch.setattr(settings, "USE_JINA_EMBEDDINGS", False)
 
     texts = ["hello", "world"]
     embeddings = await embed_texts(texts)
@@ -76,7 +90,6 @@ async def test_embed_texts_async(monkeypatch):
 async def test_embed_query_async(monkeypatch):
     fake_embeddings = _FakeAsyncEmbeddings()
     monkeypatch.setattr(embedder.async_client, "embeddings", fake_embeddings)
-    monkeypatch.setattr(settings, "USE_JINA_EMBEDDINGS", False)
 
     query = "search term"
     embedding = await embed_query(query)
@@ -89,7 +102,6 @@ async def test_embed_query_async(monkeypatch):
 def test_embed_texts_sync(monkeypatch):
     fake_embeddings = _FakeSyncEmbeddings()
     monkeypatch.setattr(embedder.sync_client, "embeddings", fake_embeddings)
-    monkeypatch.setattr(settings, "USE_JINA_EMBEDDINGS", False)
 
     texts = ["hello"]
     embeddings = embed_texts_sync(texts)
@@ -98,53 +110,3 @@ def test_embed_texts_sync(monkeypatch):
     assert embeddings[0] == [0.1, 0.2, 0.3]
     assert fake_embeddings.calls[0]["input"] == texts
     assert fake_embeddings.calls[0]["encoding_format"] == "float"
-
-
-@pytest.mark.asyncio
-async def test_embed_texts_jina(monkeypatch):
-    """Test that Jina embeddings are used when configured."""
-    # Mock the httpx async client
-    mock_response = MagicMock()
-    mock_response.json.return_value = {
-        "data": [
-            {"embedding": [0.1, 0.2, 0.3]},
-            {"embedding": [0.4, 0.5, 0.6]},
-        ]
-    }
-
-    mock_client = AsyncMock()
-    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-    mock_client.__aexit__ = AsyncMock(return_value=None)
-    mock_client.post = AsyncMock(return_value=mock_response)
-
-    monkeypatch.setattr("httpx.AsyncClient", lambda **kwargs: mock_client)
-
-    texts = ["hello", "world"]
-    embeddings = await embedder._embed_with_jina(texts)
-
-    assert len(embeddings) == 2
-    assert embeddings[0] == [0.1, 0.2, 0.3]
-    assert embeddings[1] == [0.4, 0.5, 0.6]
-
-
-def test_embed_texts_jina_sync(monkeypatch):
-    """Test that Jina embeddings work synchronously."""
-    mock_response = MagicMock()
-    mock_response.json.return_value = {
-        "data": [
-            {"embedding": [0.1, 0.2, 0.3]},
-        ]
-    }
-
-    mock_client = MagicMock()
-    mock_client.__enter__ = MagicMock(return_value=mock_client)
-    mock_client.__exit__ = MagicMock(return_value=None)
-    mock_client.post = MagicMock(return_value=mock_response)
-
-    monkeypatch.setattr("httpx.Client", lambda **kwargs: mock_client)
-
-    texts = ["hello"]
-    embeddings = embedder._embed_sync_with_jina(texts)
-
-    assert len(embeddings) == 1
-    assert embeddings[0] == [0.1, 0.2, 0.3]

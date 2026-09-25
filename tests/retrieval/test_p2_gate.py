@@ -127,9 +127,8 @@ GATE_MODULE = "tests/retrieval/test_p2_gate.py"
 # a commented-out line, a wrong value and a missing key all fail — a substring
 # match passes on the first two.
 ENV_EXAMPLE_KNOBS = (
-    "JINA_RERANKER_TOP_N",
+    "RERANK_TOP_N",
     "RETRIEVAL_RERANK_POOL_MULTIPLIER",
-    "JINA_RERANKER_TIMEOUT_SECONDS",
     "RETRIEVAL_HYBRID_ENABLED",
     "RETRIEVAL_RRF_K",
     "EMBED_EXECUTOR_WORKERS",
@@ -1100,7 +1099,7 @@ def test_the_ablation_artifact_carries_the_enable_and_hydration_verdicts():
     # The shipped state, not the measured one: the flag is OFF and the cap is
     # the R13 default. Nothing in this artifact may have moved either.
     assert _shipped_default("RETRIEVAL_HYBRID_ENABLED") is False
-    assert _shipped_default("JINA_RERANKER_TOP_N") == 20
+    assert _shipped_default("RERANK_TOP_N") == 20
 
 
 # ══ the pins the plan attached to this task (code, examples, CI) ═══════════

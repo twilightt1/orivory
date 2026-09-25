@@ -153,7 +153,7 @@ async def test_rerank_failure_falls_back(recall_env, monkeypatch):
     )
 
     async def _boom(query, chunks, *, top_n=None):
-        raise RuntimeError("jina down")
+        raise RuntimeError("local model unavailable")
 
     retr = MemoryRetriever(_FakeDB([m1, m2]), uid, semantic_rerank=True)
     monkeypatch.setattr("app.retrieval.reranker.rerank", _boom)

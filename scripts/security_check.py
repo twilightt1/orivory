@@ -42,7 +42,6 @@ def _base_production_settings(**overrides) -> dict[str, object]:
         "CONFIG_ENCRYPTION_KEY": "2CiSbMXhP2zwWOAk7nkEcGABAJSJnt7hl_SVcMBnlnk=",
         "OPENROUTER_API_KEY": "sk-or-production",
         "OPENAI_API_KEY": "sk-production",
-        "JINA_API_KEY": "jina-production",
         "ALLOWED_ORIGINS": "https://app.orivory.example",
         "FRONTEND_URL": "https://app.orivory.example",
         "ENVIRONMENT": "production",
@@ -73,7 +72,9 @@ def check_wildcard_cors_rejected() -> CheckResult:
 
 
 def check_provider_keys_required() -> CheckResult:
-    return _expect_validation_error("required provider keys", "OPENAI_API_KEY", OPENAI_API_KEY="")
+    return _expect_validation_error(
+        "required provider keys", "OPENROUTER_API_KEY", OPENROUTER_API_KEY=""
+    )
 
 
 def _service_block(compose_text: str, service_name: str) -> str:
@@ -196,7 +197,6 @@ def check_diagnostics_summary_safe() -> CheckResult:
         "JWT_SECRET_KEY",
         "OPENROUTER_API_KEY",
         "OPENAI_API_KEY",
-        "JINA_API_KEY",
         "SENDGRID_API_KEY",
         "GOOGLE_CLIENT_SECRET",
         "access_token",

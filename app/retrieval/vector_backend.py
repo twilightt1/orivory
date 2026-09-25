@@ -231,8 +231,8 @@ def ensure_collection(kind: str, generation: str, dim: int) -> None:
     payload index set the family filters on (server mode only — the embedded
     store ignores indexes; in server mode this costs one metadata read per
     call, which is what "ensure" means). ``dim`` is the ACTIVE embedding
-    dimension supplied by the caller from its fingerprint (384 local / 1024
-    Jina / 1536 OpenAI) — never a constant here. An existing collection is left
+    dimension supplied by the caller from its fingerprint (384 local / configured
+    API dimension) — never a constant here. An existing collection is left
     exactly as it is: its dim/metric belong to the contract guard, not to a
     silent overwrite.
     """

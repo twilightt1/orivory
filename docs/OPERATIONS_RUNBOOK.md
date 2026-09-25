@@ -457,17 +457,24 @@ sqlite3 data/orivory.db "SELECT status, kind, COUNT(*) FROM index_outbox GROUP B
   is on, the cross-encoder reorders the fetched pool and MERGES into dense
   order: the served count never shrinks because rerank ran — it is
   `min(top_k, eligible)`, always.
-  - `JINA_RERANKER_TOP_N` (default **20**) is the per-call CAP on the
-    reranker's own answer (`min(top_k, cap)`), **not** the rerank window. The
-    window is the retrieval pool: `top_k x RETRIEVAL_RERANK_POOL_MULTIPLIER`
-    (default 2.0, so 20 for the default `top_k=10`). A cap below the window
-    leaves the tail of every recall on the dense x boost x decay regime inside
-    the same sort (ruling R13) — keep them in step.
-  - `JINA_RERANKER_TIMEOUT_SECONDS` (default 10) bounds ONE call. A timeout, a
-    non-2xx or a malformed body is a typed failure: the answer continues in
-    dense order and the `retrieval.rerank_failed` counter increments. A rising
-    rate means the reranker is down (or slow) — alert on the rate, not on the
-    occurrence.
+  - `RERANK_TOP_N` (default **20**) is the per-call CAP on the reranker's own
+    answer (`min(top_k, cap)`), **not** the rerank window. The window is the
+    retrieval pool: `top_k x RETRIEVAL_RERANK_POOL_MULTIPLIER` (default 2.0, so
+    20 for the default `top_k=10`). A cap below the window leaves the tail of
+    every recall on the dense x boost x decay regime inside the same sort
+    (ruling R13) — keep them in step.
+  - The lane is the bundled ONNX cross-encoder
+    (`gte-multilingual-reranker-base` int8, Apache-2.0, ~341 MB downloaded once
+    into `LOCAL_E5_DIR`, the same directory as the embedding models): no API
+    key, no per-call cost, no outbound memory text. Nothing warms it at boot —
+    the first call pays the ONNX session build (~2 s, ~1.1 GB resident), so
+    enable it before the traffic, not under it. It scores the pool in CPU time
+    (~0.3 s per 1024-token pair): expect a recall in the seconds, not
+    milliseconds, while it is on.
+  - A scoring failure (missing or corrupt model files, a broken session, an
+    OOM) is typed: the answer continues in dense order and the
+    `retrieval.rerank_failed` counter increments. A rising rate means the model
+    cache or the box is broken — alert on the rate, not on the occurrence.
   - The diagnostics payload's `config.reranker_top_n` is that CAP: it is not a
     result count and not the rerank window.
 - **Hybrid recall ships OFF** (`RETRIEVAL_HYBRID_ENABLED=false`). With it on,
@@ -560,7 +567,7 @@ labels the current code emits — this table IS the alert surface:
 | label | means |
 |---|---|
 | `retrieval.vector_unavailable` | vector store down, the lexical leg answered (SQLite) or the typed 503 was served |
-| `retrieval.rerank_failed` | Jina/reranker error or timeout, dense order kept |
+| `retrieval.rerank_failed` | local reranker model failure, dense order kept |
 | `mcp.search_sql_fallback` | MCP search answered from the SQL ordering — barrier timeout, vector outage, or a degraded leg served empty (R23/R25) |
 | `index.outbox_drain_failed` | a drain round raised; intents stay pending for the retry |
 

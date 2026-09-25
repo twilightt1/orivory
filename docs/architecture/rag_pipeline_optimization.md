@@ -103,7 +103,7 @@ conversation-scoped query cache lookup
 → multi-query Qdrant child vector search
 → Reciprocal Rank Fusion
 → parent expansion from Redis or PostgreSQL fallback
-→ Jina reranking
+→ local ONNX cross-encoder reranking
 → final top context chunks
 ```
 

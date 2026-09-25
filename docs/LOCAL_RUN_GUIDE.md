@@ -47,8 +47,9 @@ pip install -r requirements-dev.txt
 cp .env.example .env
 ```
 
-Open `.env` and fill in the provider keys you use (OpenRouter, OpenAI, Jina —
-all optional; embeddings and storage run locally out of the box).
+Open `.env` and fill in the provider keys you use (OpenRouter for LLM calls;
+OpenAI is optional for legacy remote embeddings). Embeddings and storage run
+locally out of the box.
 
 > [!WARNING]
 > Do not commit `.env`. Keep API keys local.

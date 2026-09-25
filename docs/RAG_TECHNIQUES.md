@@ -133,20 +133,26 @@ Cheaper than re-embedding the whole corpus, and the signal is much stronger
 than cosine similarity alone.
 
 **Status: opt-in per deployment** (`RETRIEVAL_SEMANTIC_RERANK=false` by
-default). It is an outbound call carrying memory text, which is why the
-pipeline SQL-authorizes and re-reads every candidate BEFORE the transport sees
-it (spec §7.5/§14: no pre-ACL outbound text).
+default). Nothing leaves the box, and the pipeline still SQL-authorizes and
+re-reads every candidate BEFORE the scorer sees it (spec §7.5/§14: no
+pre-ACL text reaches even a local model).
 
-**Where.** [`app/retrieval/reranker.py`](../app/retrieval/reranker.py) — the
-Jina rerank API (`jina-reranker-v2-base-multilingual`), one HTTP call bounded by
-`JINA_RERANKER_TIMEOUT_SECONDS` (default 10).
+**Where.** [`app/retrieval/reranker.py`](../app/retrieval/reranker.py) is the
+entry point; the lane is the bundled ONNX cross-encoder
+(`gte-multilingual-reranker-base`, int8, Apache-2.0) via
+[`app/retrieval/local_reranker.py`](../app/retrieval/local_reranker.py):
+341 MB downloaded once into `LOCAL_E5_DIR`, scored on the embed executor like
+the local embeddings, no API key, no per-call cost, no outbound memory text.
+Measured on the dev Mac (int8, batch=1): 135 ms per pair at 512 tokens, 324 ms
+at 1024. One recall call scores the whole pool, so the rerank belongs to the
+opt-in regime, not the default path.
 
 **Semantics (P2).** The window is the retrieval pool
 `top_k x RETRIEVAL_RERANK_POOL_MULTIPLIER` (signed default 2.0);
-`JINA_RERANKER_TOP_N` (default 20) is only the per-call CAP on the transport's
+`RERANK_TOP_N` (default 20) is only the per-call CAP on the scorer's
 answer, and the reranked head is MERGED into dense order — the served count is
-`min(top_k, eligible)` and never shrinks because rerank ran. A timeout, a
-non-2xx or a malformed body is typed (`RerankUnavailable` /
+`min(top_k, eligible)` and never shrinks because rerank ran. A scoring failure
+or an answer with nothing usable in it is typed (`RerankUnavailable` /
 `RerankInvalidResponse`): the answer continues in dense order, counted as
 `retrieval.rerank_failed`. A `0.0` relevance is DATA, never absence.
 
@@ -154,7 +160,7 @@ non-2xx or a malformed body is typed (`RerankUnavailable` /
 (pool/top_k/merge/typed failures/zero score) and the §9 gate
 [`tests/retrieval/test_p2_gate.py`](../tests/retrieval/test_p2_gate.py)
 (over real stores). The ablation's rerank arm (`eval/ablation_retrieval_p2.py`)
-measures the STAGE with a local stand-in scorer, never Jina's quality.
+measures the STAGE with a local stand-in scorer, not the cross-encoder's semantic quality.
 
 ---
 

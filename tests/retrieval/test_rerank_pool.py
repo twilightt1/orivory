@@ -4,27 +4,27 @@ Pins the four rulings:
 
 - R4(p2): the dense fetch is ``max(top_k, ceil(top_k * RETRIEVAL_RERANK_POOL_MULTIPLIER))``
   (default 2.0) and the per-call ``top_n`` is the REQUEST's own top_k;
-  ``JINA_RERANKER_TOP_N`` is only the transport CAP over it.
+  ``RERANK_TOP_N`` is only the scorer's CAP over it.
 - R10(p2): rerank SUCCESS merges (``ranked + remainder``, deduped by memory id) —
   ``len(results) == min(top_k, eligible)`` and the count never depends on the
-  reranker. RED before this task: success REPLACED the pool with Jina's rows,
-  so ``top_k=10`` under the default cap returned 5.
-- R11(p2): ``RerankUnavailable`` (transport/status/timeout) and
-  ``RerankInvalidResponse`` (unusable body) both degrade to dense order with
-  ``retrieval.rerank_failed`` counted and ``stage_ms["rerank"]`` written; a
-  malformed ROW is skipped, never fatal.
+  reranker. RED before this task: success REPLACED the pool with the reranker's
+  rows, so ``top_k=10`` under the default cap returned 5.
+- R11(p2): ``RerankUnavailable`` (a scoring failure) and
+  ``RerankInvalidResponse`` (nothing usable came back) both degrade to dense
+  order with ``retrieval.rerank_failed`` counted and ``stage_ms["rerank"]``
+  written.
 - R12(p2): at most ONE refill search (hard cap ``top_k * 4``), only when
   filtering left fewer than top_k AND the first fetch filled its whole pool;
   the trace records it — rerank flag or not, it is not rerank-specific.
-- R13(p2): ``JINA_RERANKER_TOP_N`` (shipped default 20) stays a CAP and covers
-  the default ``top_k=10`` x pool-multiplier window. The count pins below hold
-  the cap at the pre-R13 5 on purpose, so they keep proving the served count
-  does not depend on the reranker's answer size.
-- R14(p2): an EMPTY ``results`` array is a ``RerankInvalidResponse`` — counted,
-  dense order served. A transport that answers nothing must not hide as
-  "nothing to rerank".
+- R13(p2): ``RERANK_TOP_N`` (shipped default 20) stays a CAP and covers the
+  default ``top_k=10`` x pool-multiplier window. The count pins below hold the
+  cap at the pre-R13 5 on purpose, so they keep proving the served count does
+  not depend on the reranker's answer size.
+- R14(p2): a scorer that answers with NOTHING is a ``RerankInvalidResponse`` —
+  counted, dense order served. An empty answer must not hide as "nothing to
+  rerank".
 
-Zero is data: a ``0.0`` relevance_score stays a score (read by key presence,
+Zero is data: a ``0.0`` relevance score stays a score (read by key presence,
 never truthiness) — the already-correct behaviour stays pinned.
 """
 from __future__ import annotations
@@ -34,11 +34,11 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock
 
-import httpx
 import pytest
 
 from app.config import settings
 from app.observability.fallbacks import fallback_counts, reset_fallback_counts
+from app.retrieval import local_reranker
 from app.retrieval import reranker as reranker_module
 from app.retrieval.memory import retriever as rmod
 from app.retrieval.memory.retriever import MemoryRetriever
@@ -119,16 +119,16 @@ class _Store:
 
 
 def _cap_rerank(seen_top_n=None, seen_chunks=None):
-    """The transport's own shape: at most ``min(top_n, JINA_RERANKER_TOP_N)``
-    rows come back, best first — never the whole pool."""
+    """The scorer's own shape: at most ``min(top_n, RERANK_TOP_N)`` rows come
+    back, best first — never the whole pool."""
 
     async def _rerank(_query, chunks, *, top_n=None):
         if seen_top_n is not None:
             seen_top_n.append(top_n)
         if seen_chunks is not None:
             seen_chunks.extend(chunks)
-        cap = settings.JINA_RERANKER_TOP_N if top_n is None else int(top_n)
-        cap = min(cap, settings.JINA_RERANKER_TOP_N)
+        cap = settings.RERANK_TOP_N if top_n is None else int(top_n)
+        cap = min(cap, settings.RERANK_TOP_N)
         return [
             dict(chunk, rerank_score=1.0 - index / 100.0)
             for index, chunk in enumerate(chunks[:cap])
@@ -178,7 +178,7 @@ async def test_returned_count_is_min_top_k_eligible_never_the_rerankers(
     which would happily track an under-fetch and stay green.
     """
     uid = recall_env
-    monkeypatch.setattr(settings, "JINA_RERANKER_TOP_N", 5)  # the pre-R13 cap
+    monkeypatch.setattr(settings, "RERANK_TOP_N", 5)  # the pre-R13 cap
 
     clean = [_mem(uid, content=f"clean{i}") for i in range(40)]
     stale = [_mem(uid, content=f"dirty{i}", dirty=True) for i in range(16)]
@@ -300,7 +300,7 @@ async def test_rerank_success_keeps_the_unranked_remainder_in_dense_order(
     """The reranked head decides the top of the answer; the rows the reranker
     did not return keep their dense order behind it (they are still scored)."""
     uid = recall_env
-    monkeypatch.setattr(settings, "JINA_RERANKER_TOP_N", 2)
+    monkeypatch.setattr(settings, "RERANK_TOP_N", 2)
     memories = [_mem(uid, content=f"m{i}") for i in range(6)]
     store = _Store([(m.id, 0.9 - i / 100) for i, m in enumerate(memories)])
     monkeypatch.setattr(rmod, "search_memories", store)
@@ -477,24 +477,22 @@ async def test_rerank_failure_degrades_to_dense_order_and_is_counted(
     assert response.trace.counts["returned"] == 10
 
 
-async def test_empty_results_body_degrades_to_dense_order_and_is_counted(
+async def test_an_empty_answer_degrades_to_dense_order_and_is_counted(
     recall_env, monkeypatch
 ):
-    """R14: a 2xx whose ``results`` is EMPTY answers nothing while the pool was
-    non-empty. Through the REAL transport under recall that is an invalid
-    response: dense order is served, the counter fires exactly once and nothing
-    escapes — it must not read as "nothing to rerank" (the uncounted path)."""
+    """R14: the scorer answers with NOTHING while the pool was non-empty. Through
+    recall that is an invalid response: dense order is served, the counter fires
+    exactly once and nothing escapes — it must not read as "nothing to rerank"
+    (the uncounted path)."""
     uid = recall_env
     memories = [_mem(uid, content=f"m{i}") for i in range(12)]
     store = _Store([(m.id, 0.9 - i / 100) for i, m in enumerate(memories)])
     monkeypatch.setattr(rmod, "search_memories", store)
 
-    def handler(_request):
-        return httpx.Response(200, json={"results": []})
+    async def _no_rows(_query, _docs):
+        return []
 
-    monkeypatch.setattr(
-        reranker_module, "get_jina_client", lambda: _client(httpx.MockTransport(handler))
-    )
+    monkeypatch.setattr(local_reranker, "score_pairs", _no_rows)
     reset_fallback_counts()
 
     retriever = MemoryRetriever(_FakeDB(memories), uid, semantic_rerank=True)
@@ -502,165 +500,28 @@ async def test_empty_results_body_degrades_to_dense_order_and_is_counted(
 
     assert [str(result.id) for result in response.results] == [
         str(m.id) for m in memories[:10]
-    ], "vector order continues when the transport answers with an empty pool"
+    ], "vector order continues when the scorer answers with nothing"
     assert fallback_counts()["retrieval.rerank_failed"] == 1
     assert response.trace.stage_ms["rerank"] > 0.0
     assert "reranked" not in response.trace.counts  # R14: no head came back
 
 
-# ── R11: the transport's own classification ─────────────────────────────────
-
-
-def _client(handler: httpx.MockTransport) -> httpx.AsyncClient:
-    return httpx.AsyncClient(transport=handler)
-
-
-_DOCS = [
-    {"memory_id": "a", "content": "doc a"},
-    {"memory_id": "b", "content": "doc b"},
-    {"memory_id": "c", "content": "doc c"},
-]
-
-
-async def test_transport_errors_are_rerank_unavailable(monkeypatch):
-    def handler(_request):
-        raise httpx.ConnectTimeout("took too long")
-
-    monkeypatch.setattr(
-        reranker_module, "get_jina_client", lambda: _client(httpx.MockTransport(handler))
-    )
-    with pytest.raises(RerankUnavailable):
-        await reranker_module.rerank("q", _DOCS, top_n=3)
-
-
-async def test_non_2xx_status_is_rerank_unavailable_not_a_partial_pool(monkeypatch):
-    def handler(_request):
-        return httpx.Response(503, json={"detail": "service unavailable"})
-
-    monkeypatch.setattr(
-        reranker_module, "get_jina_client", lambda: _client(httpx.MockTransport(handler))
-    )
-    with pytest.raises(RerankUnavailable):
-        await reranker_module.rerank("q", _DOCS, top_n=3)
-
-
-@pytest.mark.parametrize(
-    "body",
-    [
-        {"content": b"<html>gateway error</html>", "headers": {"content-type": "text/html"}},
-        {"json": {"results": "not-a-list"}},
-        {"json": {}},
-        {"json": {"results": []}},  # R14: an empty answer is a failure, not silence
-    ],
-)
-async def test_unusable_bodies_are_rerank_invalid_response(monkeypatch, body):
-    def handler(_request):
-        return httpx.Response(200, **body)
-
-    monkeypatch.setattr(
-        reranker_module, "get_jina_client", lambda: _client(httpx.MockTransport(handler))
-    )
-    with pytest.raises(RerankInvalidResponse):
-        await reranker_module.rerank("q", _DOCS, top_n=3)
-
-
-async def test_malformed_rows_are_skipped_never_fatal(monkeypatch):
-    """One bad row must not throw the whole pool away — including the index
-    that is out of range, which used to raise IndexError inside the loop."""
-    def handler(_request):
-        return httpx.Response(
-            200,
-            json={
-                "results": [
-                    {"index": 0, "relevance_score": 0.4},
-                    {"index": 99, "relevance_score": 0.9},  # out of range
-                    {"index": 1},  # no relevance_score
-                    "not-a-row",  # not a dict
-                    {"index": True, "relevance_score": 1.0},  # bool is not an index
-                    {"index": 2, "relevance_score": 0.0},  # a REAL zero
-                ]
-            },
-        )
-
-    monkeypatch.setattr(
-        reranker_module, "get_jina_client", lambda: _client(httpx.MockTransport(handler))
-    )
-    ranked = await reranker_module.rerank("q", _DOCS, top_n=3)
-    assert [(row["memory_id"], row["rerank_score"]) for row in ranked] == [
-        ("a", 0.4),
-        ("c", 0.0),
-    ]
-
-
-async def test_duplicate_rows_return_a_memory_once(monkeypatch):
-    """M1: two rows carrying the same ``index`` score the SAME memory. Keeping
-    both would return it twice and let the repeat occupy a head slot that a
-    distinct row should have had — the first (best) row for a memory wins."""
-    def handler(_request):
-        return httpx.Response(
-            200,
-            json={
-                "results": [
-                    {"index": 1, "relevance_score": 0.9},
-                    {"index": 1, "relevance_score": 0.8},  # the same memory again
-                    {"index": 0, "relevance_score": 0.5},
-                    {"index": 2, "relevance_score": 0.0},
-                    {"index": 2},  # a repeat with no score is not a second row
-                ]
-            },
-        )
-
-    monkeypatch.setattr(
-        reranker_module, "get_jina_client", lambda: _client(httpx.MockTransport(handler))
-    )
-    ranked = await reranker_module.rerank("q", _DOCS, top_n=3)
-    assert [(row["memory_id"], row["rerank_score"]) for row in ranked] == [
-        ("b", 0.9),
-        ("a", 0.5),
-        ("c", 0.0),
-    ]
-
-
-async def test_the_per_call_timeout_bounds_the_request(monkeypatch):
-    """R11/M5: the POST carries ``JINA_RERANKER_TIMEOUT_SECONDS`` as its own
-    timeout — a hung transport must not hold the recall path for the module
-    client's 30 s default."""
-    seen: list = []
-
-    def handler(request):
-        seen.append(request.extensions.get("timeout"))
-        return httpx.Response(200, json={"results": [{"index": 0, "relevance_score": 0.5}]})
-
-    monkeypatch.setattr(
-        reranker_module, "get_jina_client", lambda: _client(httpx.MockTransport(handler))
-    )
-    monkeypatch.setattr(settings, "JINA_RERANKER_TIMEOUT_SECONDS", 3.5)
-
-    await reranker_module.rerank("q", _DOCS, top_n=3)
-
-    # httpx normalizes the scalar into the per-phase timeout extension.
-    assert seen == [{"connect": 3.5, "read": 3.5, "write": 3.5, "pool": 3.5}]
+# ── R4: the per-call top_n and the cap over it ──────────────────────────────
 
 
 async def test_top_n_is_per_call_and_the_setting_only_caps_it(monkeypatch):
-    sent: list[int] = []
+    async def _scores(_query, docs):
+        return [0.9 - i / 100 for i in range(len(docs))]
 
-    def handler(request):
-        import json
-
-        sent.append(json.loads(request.content)["top_n"])
-        return httpx.Response(200, json={"results": [{"index": 0, "relevance_score": 0.5}]})
-
-    monkeypatch.setattr(
-        reranker_module, "get_jina_client", lambda: _client(httpx.MockTransport(handler))
-    )
-    monkeypatch.setattr(settings, "JINA_RERANKER_TOP_N", 7)
+    monkeypatch.setattr(local_reranker, "score_pairs", _scores)
+    monkeypatch.setattr(settings, "RERANK_TOP_N", 7)
     documents = [{"memory_id": str(i), "content": f"c{i}"} for i in range(12)]
 
-    await reranker_module.rerank("q", documents, top_n=10)  # capped by the setting
-    await reranker_module.rerank("q", documents, top_n=3)  # the request may be smaller
-    await reranker_module.rerank("q", documents)  # no per-call value → the cap
-    assert sent == [7, 3, 7]
+    # Capped by the setting, a smaller request honoured, and no per-call value
+    # at all falls back to the cap.
+    assert len(await reranker_module.rerank("q", documents, top_n=10)) == 7
+    assert len(await reranker_module.rerank("q", documents, top_n=3)) == 3
+    assert len(await reranker_module.rerank("q", documents)) == 7
 
 
 # ── T3: the trace contract — declared stage keys + real candidate counters ──

@@ -84,7 +84,6 @@
       "QDRANT_MODE": "local",
       "QDRANT_LOCAL_PATH": "/tmp/orivory-scale-10k-final/qdrant",
       "USE_LOCAL_EMBEDDINGS": true,
-      "USE_JINA_EMBEDDINGS": false,
       "LOCAL_EMBED_MODEL": "arctic",
       "EMBED_BATCH_SIZE": 64,
       "EMBED_EXECUTOR_WORKERS": 2,

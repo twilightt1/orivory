@@ -237,7 +237,7 @@ jobs:
         run: |
           python -m pytest --confcutdir=tests/retrieval tests/retrieval/test_p2_gate.py tests/retrieval/test_rerank_pool.py tests/retrieval/test_hybrid_recall.py -q
           python -m pytest --confcutdir=tests/retrieval tests/retrieval/test_event_loop_responsiveness.py tests/retrieval/test_p2_ablation_contract.py -q
-          python -m pytest --confcutdir=tests/retrieval tests/retrieval/test_semantic_rerank.py tests/retrieval/test_p0_final_safety.py tests/retrieval/test_retriever_filters.py tests/retrieval/test_e5_local.py tests/retrieval/test_embedding_fingerprint.py tests/retrieval/test_vector_degradation.py tests/retrieval/test_xs_parity.py tests/retrieval/test_graph_build_offload.py -q
+          python -m pytest --confcutdir=tests/retrieval tests/retrieval/test_semantic_rerank.py tests/retrieval/test_local_rerank.py tests/retrieval/test_p0_final_safety.py tests/retrieval/test_retriever_filters.py tests/retrieval/test_e5_local.py tests/retrieval/test_embedding_fingerprint.py tests/retrieval/test_vector_degradation.py tests/retrieval/test_xs_parity.py tests/retrieval/test_graph_build_offload.py -q
           python -m pytest --confcutdir=tests/lite tests/lite/test_sqlite_schema_v4.py -q
           python -m pytest --confcutdir=tests/observability tests/observability -q
 
@@ -360,12 +360,7 @@ jobs:
       EMBED_MODEL: text-embedding-3-small
       EMBED_DIMENSIONS: "1536"
       EMBED_BATCH_SIZE: "64"
-      JINA_API_KEY: test-jina-key
-      JINA_RERANKER_MODEL: jina-reranker-v2-base-multilingual
-      # R13: the per-call CAP, kept at the shipped default — CI is not a
-      # deployment, and a pre-R13 5 here is the same stale default the
-      # example files carried.
-      JINA_RERANKER_TOP_N: "20"
+      RERANK_TOP_N: "20"
       EVALUATOR_FAILURE_MODE: warn_only
       RATE_LIMIT_PER_MINUTE: "600"
       RATE_LIMIT_PER_DAY: "10000"

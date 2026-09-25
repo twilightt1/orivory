@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Resume a system benchmark run: re-run only failed questions and merge.
 
-A long n=100 run can hit transient embedding-provider rate limits near the
-end (measured: Jina 429s after ~180 min of sustained load; the key
-recovered once load stopped). Questions whose recall failed (recalled=0)
-say nothing about retrieval quality — recording them as wrong would
-misreport the system.
+A long n=100 run can hit transient embedding-provider failures near the end.
+Questions whose recall failed (recalled=0) say nothing about retrieval quality —
+recording them as wrong would misreport the system. This resume path pins the
+current local embedding/rerank lane and rejects result files from a different
+retrieval contract.
 
 This script:
 1. loads the run's results JSON,
@@ -53,15 +53,23 @@ os.environ.setdefault("OPENROUTER_API_KEY", os.environ.get("OPENAI_API_KEY", "")
 if os.environ.get("OPENAI_BASE_URL"):
     os.environ["OPENROUTER_BASE_URL"] = os.environ["OPENAI_BASE_URL"]
 os.environ["QDRANT_LOCAL_PATH"] = str(_RESULTS_DIR / "qdrant")
+# Resume only the current self-host retrieval lane, regardless of stale .env
+# flags left by a prior provider configuration.
+os.environ["USE_LOCAL_EMBEDDINGS"] = "1"
+os.environ["RETRIEVAL_SEMANTIC_RERANK"] = "1"
+os.environ["RERANK_TOP_N"] = "15"
 
 from uuid import uuid4  # noqa: E402
 
 # Import AFTER env so settings pick up the run's DATABASE_URL
 from app.database import bootstrap_sqlite  # noqa: E402
 from eval.benchmarks.longmemeval_s import load_instances  # noqa: E402
+from eval.retrieval_contract import retrieval_contract_matches  # noqa: E402
 from eval.run_system_benchmark import (  # noqa: E402
     DATASET,
+    _apply_graph_build_switch,
     answer_from_stack,
+    build_stack_metadata,
     ingest_instance,
     judge_one,
 )
@@ -89,10 +97,79 @@ async def main_async(args) -> int:
     from app.database import AsyncSessionLocal
     from app.models.user import User
 
-    await bootstrap_sqlite()
-
     results_path = args.results
     payload = json.loads(results_path.read_text())
+    recorded_stack = payload.get("stack")
+    if not isinstance(recorded_stack, dict):
+        print("refusing to resume: result has no retrieval contract", file=sys.stderr)
+        return 2
+    recorded_graph_builds = recorded_stack.get("graph_builds")
+    if not isinstance(recorded_graph_builds, str) or recorded_graph_builds not in {
+        "on",
+        "off (bench ingest)",
+    }:
+        print("refusing to resume: result lacks a valid graph-build policy", file=sys.stderr)
+        return 2
+    _apply_graph_build_switch(recorded_graph_builds == "on")
+    recorded_execution = recorded_stack.get("execution")
+    if not isinstance(recorded_execution, dict):
+        print("refusing to resume: result lacks execution metadata", file=sys.stderr)
+        return 2
+    recorded_policy = recorded_execution.get("context_policy")
+    if not isinstance(recorded_policy, dict):
+        print("refusing to resume: result lacks a complete context policy", file=sys.stderr)
+        return 2
+    session_level = recorded_policy.get("session_level")
+    chunk_chars = recorded_policy.get("chunk_chars")
+    fuse = recorded_policy.get("fuse")
+    if (
+        not isinstance(session_level, bool)
+        or not isinstance(chunk_chars, int)
+        or isinstance(chunk_chars, bool)
+        or not isinstance(fuse, bool)
+    ):
+        print("refusing to resume: result lacks a complete context policy", file=sys.stderr)
+        return 2
+    recorded_policy = {
+        "session_level": session_level,
+        "chunk_chars": chunk_chars,
+        "fuse": fuse,
+    }
+
+    for argument, key in (("session", "session_level"), ("chunk_chars", "chunk_chars"), ("fuse", "fuse")):
+        recorded_value = recorded_policy[key]
+        requested_value = getattr(args, argument)
+        if requested_value is not None and requested_value != recorded_value:
+            print("refusing to resume: requested context policy differs from the run", file=sys.stderr)
+            return 2
+        setattr(args, argument, recorded_value)
+
+    recorded_top_k = recorded_stack.get("recall_top_k")
+    if (
+        not isinstance(recorded_top_k, int)
+        or isinstance(recorded_top_k, bool)
+        or recorded_top_k < 1
+        or (args.top_k is not None and args.top_k != recorded_top_k)
+    ):
+        print("refusing to resume: requested top_k differs from the run", file=sys.stderr)
+        return 2
+    args.top_k = recorded_top_k
+
+    current_stack = build_stack_metadata(
+        top_k=args.top_k,
+        session_level=args.session,
+        chunk_chars=args.chunk_chars,
+        fuse=args.fuse,
+    )
+    if not retrieval_contract_matches(recorded_stack, current_stack):
+        print(
+            "refusing to resume: recorded retrieval contract differs from the "
+            "current local embedding/rerank lane; start a fresh run",
+            file=sys.stderr,
+        )
+        return 2
+
+    await bootstrap_sqlite()
     records = payload["per_question"]
 
     failed_idx = [
@@ -143,13 +220,15 @@ async def main_async(args) -> int:
             user_row = await db.get(User, user_id)
             await delete_instance_memories(db, user_id, qid)
             user_id_str = str(user_row.id)
-        # re-ingest under the resume user (fresh embeds with recovered API)
+        # Re-ingest under the resume user using the verified local model.
         user_uuid = uuid.UUID(user_id_str)
         ingested = await ingest_instance(
             user_uuid, instance, run_dir, session_level=args.session,
             chunk_chars=args.chunk_chars,
         )
-        response, recalled = await answer_from_stack(user_uuid, instance, args.top_k)
+        response, recalled = await answer_from_stack(
+            user_uuid, instance, args.top_k, fuse=args.fuse
+        )
         correct = await judge_one(client, instance, response)
         records[i] = {
             "question_id": qid,
@@ -188,9 +267,10 @@ async def main_async(args) -> int:
     payload["by_type"] = by_type
     payload["resumed"] = {
         "questions": len(failed_idx),
-        "reason": "transient embedding-provider rate limits near the end of "
-                  "the original run (recalled=0); re-ran with the same "
-                  "config once the provider recovered",
+        "reason": (
+            "re-ran zero-recall records under the matching "
+            "local retrieval contract"
+        ),
         "timestamp_utc": datetime.now(UTC).isoformat(),
     }
     results_path.write_text(json.dumps(payload, indent=2))
@@ -204,9 +284,26 @@ def main() -> int:
     parser.add_argument("--results", type=Path, required=True)
     parser.add_argument("--from-index", type=int, default=None,
                         help="re-run every record at/after this index (else: recalled=0)")
-    parser.add_argument("--session", action="store_true", default=True)
-    parser.add_argument("--chunk-chars", type=int, default=4000)
-    parser.add_argument("--top-k", type=int, default=15)
+    session = parser.add_mutually_exclusive_group()
+    session.add_argument("--session", dest="session", action="store_true")
+    session.add_argument("--no-session", dest="session", action="store_false")
+    parser.set_defaults(session=None)
+    parser.add_argument("--chunk-chars", type=int, default=None)
+    parser.add_argument("--top-k", type=int, default=None)
+    fuse = parser.add_mutually_exclusive_group()
+    fuse.add_argument(
+        "--fuse",
+        dest="fuse",
+        action="store_true",
+        help="also recall with the rewritten query and union results",
+    )
+    fuse.add_argument(
+        "--no-fuse",
+        dest="fuse",
+        action="store_false",
+        help="skip the second rewritten-query recall",
+    )
+    parser.set_defaults(fuse=None)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
     return asyncio.run(main_async(args))

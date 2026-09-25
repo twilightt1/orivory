@@ -34,6 +34,7 @@ the new generation never acks an old generation's obligation.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from collections.abc import Iterable
@@ -45,13 +46,20 @@ from sqlalchemy import case, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.database import AsyncSessionLocal, sync_session
 from app.models.conversation import Conversation
 from app.models.document_chunk import DocumentChunk
 from app.models.index_outbox import IndexGeneration, IndexOutbox
 from app.models.memory import Memory
 from app.retrieval.embedder import EmbeddingDimensionMismatch
-from app.retrieval.memory.vector_store import COLLECTION_NAME, claim_cache, delete_memory, upsert_memory
+from app.retrieval.memory.vector_store import (
+    COLLECTION_NAME,
+    claim_cache,
+    delete_memory,
+    embed_memory,
+    upsert_memory,
+)
 from app.retrieval.vector_retriever import delete_chunks, upsert_chunks
 
 log = logging.getLogger(__name__)
@@ -528,7 +536,11 @@ def _error_text(exc: Exception) -> str:
     return f"{type(exc).__name__}: {exc}"[:_ERROR_TEXT_LIMIT]
 
 
-async def drain_pending(*, batch_size: int = 50, priority_tenant: str | None = None) -> dict:
+async def drain_pending(
+    *,
+    batch_size: int = 50,
+    priority_tenant: str | None = None,
+) -> dict:
     """Apply pending intents in seq order against the latest SQL state.
 
     Success, a stale skip and a contract mismatch all ack the row (``done`` /
@@ -568,12 +580,96 @@ async def drain_pending(*, batch_size: int = 50, priority_tenant: str | None = N
         # is untouched (signed gates hook it), and it stops the fifty rows of a
         # batch from each re-asking the store the same question.
         async with claim_cache():
+            prepared = {}
+            if priority_tenant is not None:
+                try:
+                    prepared = await _prefetch_memory_embeddings(rows, priority_tenant=priority_tenant)
+                except Exception as exc:
+                    log.warning("Outbox embedding prefetch failed; using serial writes: %s", exc)
             for row in rows:
-                report[await _apply(db, row)] += 1
+                if prepared:
+                    outcome = await _apply(db, row, precomputed_embeddings=prepared)
+                else:
+                    outcome = await _apply(db, row)
+                report[outcome] += 1
     return report
 
 
-async def _apply(db: AsyncSession, row: IndexOutbox) -> str:
+async def _prefetch_memory_embeddings(
+    rows: Iterable[IndexOutbox],
+    *,
+    priority_tenant: str,
+) -> dict[tuple[str, int], list[float] | Exception]:
+    """Run independent local ONNX calls concurrently before settling a claim.
+
+    Keep each model call one document wide (batched ONNX starves the P2
+    heartbeat); use only the already-bounded embed executor's width. A single
+    row and remote-key backends keep the existing serial path.
+    """
+    workers = max(1, int(settings.EMBED_EXECUTOR_WORKERS))
+    if not settings.USE_LOCAL_EMBEDDINGS or workers < 2:
+        return {}
+
+    intents: dict[uuid.UUID, list[IndexOutbox]] = {}
+    for row in rows:
+        if row.tenant_id != priority_tenant or row.kind != KIND_MEMORY or row.operation != OPERATION_UPSERT:
+            continue
+        try:
+            entity_id = uuid.UUID(row.entity_id)
+        except (ValueError, TypeError, AttributeError):
+            continue
+        intents.setdefault(entity_id, []).append(row)
+    if len(intents) < 2:
+        return {}
+
+    async with AsyncSessionLocal() as snapshot_db:
+        active = await _target_generation(snapshot_db, KIND_MEMORY)
+        eligible_ids = [
+            entity_id
+            for entity_id, entity_rows in intents.items()
+            if any(row.target_generation == active for row in entity_rows)
+        ]
+        if len(eligible_ids) < 2:
+            return {}
+        memories = list((await snapshot_db.execute(select(Memory).where(Memory.id.in_(eligible_ids)))).scalars().all())
+
+    candidates: dict[tuple[str, int], Memory] = {}
+    for memory in memories:
+        try:
+            memory_tenant = _entity_id(memory.user_id)
+        except (ValueError, TypeError, AttributeError):
+            continue
+        if memory_tenant != priority_tenant:
+            continue
+        try:
+            revision = int(memory.revision)
+        except (TypeError, ValueError):
+            continue
+        if any(row.target_generation == active and row.revision >= revision for row in intents[memory.id]):
+            candidates[(str(memory.id), revision)] = memory
+    if len(candidates) < 2:
+        return {}
+
+    semaphore = asyncio.Semaphore(workers)
+
+    async def embed_one(memory: Memory) -> list[float] | Exception:
+        async with semaphore:
+            try:
+                return await embed_memory(memory)
+            except Exception as exc:
+                return exc
+
+    keys = list(candidates)
+    results = await asyncio.gather(*(embed_one(candidates[key]) for key in keys))
+    return dict(zip(keys, results, strict=True))
+
+
+async def _apply(
+    db: AsyncSession,
+    row: IndexOutbox,
+    *,
+    precomputed_embeddings: dict[tuple[str, int], list[float] | Exception] | None = None,
+) -> str:
     """Apply one intent, ack it in its own commit, and return its report bucket.
 
     Generation-aware (ruling R27): an intent whose ``target_generation`` is not
@@ -598,7 +694,7 @@ async def _apply(db: AsyncSession, row: IndexOutbox) -> str:
         else:
             try:
                 if row.kind == KIND_MEMORY:
-                    outcome = await _apply_memory_intent(db, row)
+                    outcome = await _apply_memory_intent(db, row, precomputed_embeddings=precomputed_embeddings)
                 else:
                     outcome = await _apply_chunk_intent(db, row)
                 row.status = "done"
@@ -620,7 +716,12 @@ async def _apply(db: AsyncSession, row: IndexOutbox) -> str:
     return outcome
 
 
-async def _apply_memory_intent(db: AsyncSession, row: IndexOutbox) -> str:
+async def _apply_memory_intent(
+    db: AsyncSession,
+    row: IndexOutbox,
+    *,
+    precomputed_embeddings: dict[tuple[str, int], list[float] | Exception] | None = None,
+) -> str:
     # Local import: ``correction`` imports this module by value (real cycle),
     # so the state label cannot be a module-level import here.
     from app.retrieval.memory.correction import state_of
@@ -660,7 +761,19 @@ async def _apply_memory_intent(db: AsyncSession, row: IndexOutbox) -> str:
                        "state": state_of(memory)},
             )
             return "skipped"
-    await upsert_memory(memory)
+    embedding = None
+    if precomputed_embeddings is not None:
+        embedding = precomputed_embeddings.get((str(memory.id), int(memory.revision)))
+    if isinstance(embedding, Exception):
+        log.info(
+            "Outbox embedding prefetch failed; retrying serially",
+            extra={"entity_id": str(entity_id), "error": str(embedding)},
+        )
+        embedding = None
+    if embedding is None:
+        await upsert_memory(memory)
+    else:
+        await upsert_memory(memory, embedding=embedding)
     return await _settle_written_snapshot(
         db, row, Memory, entity_id,
         rewrite=upsert_memory,

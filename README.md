@@ -69,7 +69,7 @@ or plain docker:
 
 ```bash
 docker run -d --name orivory -p 127.0.0.1:8000:8000 -v orivory-data:/data \
-  -e OPENAI_API_KEY=sk-... ghcr.io/twilightt1/orivory:lite
+  ghcr.io/twilightt1/orivory:lite
 ```
 
 The API binds **127.0.0.1 on the host** (loopback only) — put a reverse proxy

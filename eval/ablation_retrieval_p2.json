@@ -158,9 +158,9 @@
   },
   "substitutions": {
     "embedding": "REAL local arctic-embed-xs ONNX (384-dim, cached); no paid API",
-    "dense_store": "exact cosine top-k in numpy over those vectors (Qdrant HNSW approximates it) — an OPTIMISTIC dense baseline: exact top-k recall >= the ANN top-k it stands in for, so dense_only's numbers are a BEST CASE and the measured +0.1042 overall gain is conservative. The substitution is one of convenience at this scale, not an offline casualty — Qdrant runs embedded in this repo (lite mode); the only offline-unreachable seam here is Jina.",
+    "dense_store": "exact cosine top-k in numpy over those vectors (Qdrant HNSW approximates it) — an OPTIMISTIC dense baseline: exact top-k recall >= the ANN top-k it stands in for, so dense_only's numbers are a BEST CASE and the measured +0.1042 overall gain is conservative. The substitution is one of convenience at this scale, not an offline casualty — Qdrant runs embedded in this repo (lite mode).",
     "lexical": "REAL SQLite FTS5 (T4 DDL + triggers, real MATCH grammar)",
-    "rerank": "Jina cross-encoder is a paid remote API and unreachable offline: the stage runs a deterministic local IDF-weighted token-coverage scorer. Measures the STAGE (SQL-authorized content, merge, ordering effect), never Jina's semantic quality.",
+    "rerank": "A deterministic local IDF-weighted token-coverage scorer runs the stage. Measures SQL-authorized content, merge and ordering behavior, not cross-encoder semantic quality.",
     "rewrite": "identity (no LLM offline)",
     "modifiers": "uniform by construction: one captured_at, one salience, no pins"
   },

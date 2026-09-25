@@ -93,8 +93,6 @@ def active_backend_name() -> str:
         # No fallback: LOCAL_EMBED_MODEL is validated at config load, and the
         # removed MiniLM backend must never be named "local" again.
         return {"arctic": "local-arctic", "e5": "local-e5"}[settings.LOCAL_EMBED_MODEL]
-    if settings.USE_JINA_EMBEDDINGS and settings.JINA_API_KEY:
-        return "jina"
     return "openai"
 
 
@@ -461,15 +459,11 @@ def _batches(texts: list[str]) -> list[list[str]]:
 async def _embed_with_openai(texts: list[str]) -> list[list[float]]:
     """Embed texts using OpenAI-compatible API.
 
-    LEGACY / UNBENCHMARKED: no benchmark run covers this backend (the frozen
-    v1.1.0 baseline is Jina; lite mode uses local). It stays as a fallback
-    so existing deployments don't break, but issues about its recall
-    quality will not be acted on — switch to Jina or local instead.
+    LEGACY / UNBENCHMARKED: the shipped default is the bundled local ONNX
+    model. This OpenAI-compatible fallback stays available only when a
+    deployment explicitly disables local embeddings and supplies its API key;
+    recall quality is not covered by the local benchmark gate.
     """
-    log.warning(
-        "OpenAI embedding backend is unbenchmarked legacy — "
-        "prefer Jina (full-stack) or local (lite mode)",
-    )
     embeddings: list[list[float]] = []
     try:
         client = _get_async_client()
@@ -485,90 +479,6 @@ async def _embed_with_openai(texts: list[str]) -> list[list[float]]:
     except Exception as e:
         log.error("OpenAI embedding failed", exc_info=True)
         raise ValueError(f"Failed to get embeddings: {e}") from e
-
-
-async def _embed_with_jina(texts: list[str]) -> list[list[float]]:
-    """Embed texts using Jina AI API directly."""
-    import httpx
-
-    if not settings.JINA_API_KEY:
-        raise ValueError("JINA_API_KEY is not set. Please configure your Jina API key.")
-
-    embeddings: list[list[float]] = []
-
-    try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            for batch in _batches(texts):
-                response = await client.post(
-                    "https://api.jina.ai/v1/embeddings",
-                    headers={
-                        "Authorization": f"Bearer {settings.JINA_API_KEY}",
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "model": settings.JINA_EMBED_MODEL,
-                        "input": batch,
-                        "encoding_type": "float",
-                        "dimensions": settings.JINA_EMBED_DIMENSIONS,
-                    },
-                )
-                response.raise_for_status()
-                data = response.json()
-                embeddings.extend(item["embedding"] for item in data["data"])
-
-        return embeddings
-    except httpx.HTTPStatusError as e:
-        log.error(
-            "Jina API error status=%s detail=%s",
-            e.response.status_code,
-            e.response.text[:200],
-        )
-        raise ValueError(f"Jina API error: {e}") from e
-    except Exception as e:
-        log.error("Jina embedding failed", exc_info=True)
-        raise ValueError(f"Failed to get Jina embeddings: {e}") from e
-
-
-def _embed_sync_with_jina(texts: list[str]) -> list[list[float]]:
-    """Embed texts using Jina AI API synchronously."""
-    import httpx
-
-    if not settings.JINA_API_KEY:
-        raise ValueError("JINA_API_KEY is not set. Please configure your Jina API key.")
-
-    embeddings: list[list[float]] = []
-
-    try:
-        with httpx.Client(timeout=60.0) as client:
-            for batch in _batches(texts):
-                response = client.post(
-                    "https://api.jina.ai/v1/embeddings",
-                    headers={
-                        "Authorization": f"Bearer {settings.JINA_API_KEY}",
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "model": settings.JINA_EMBED_MODEL,
-                        "input": batch,
-                        "encoding_type": "float",
-                        "dimensions": settings.JINA_EMBED_DIMENSIONS,
-                    },
-                )
-                response.raise_for_status()
-                data = response.json()
-                embeddings.extend(item["embedding"] for item in data["data"])
-
-        return embeddings
-    except httpx.HTTPStatusError as e:
-        log.error(
-            "Jina API error status=%s detail=%s",
-            e.response.status_code,
-            e.response.text[:200],
-        )
-        raise ValueError(f"Jina API error: {e}") from e
-    except Exception as e:
-        log.error("Jina embedding failed (sync)", exc_info=True)
-        raise ValueError(f"Failed to get Jina embeddings: {e}") from e
 
 
 def _embed_with_local(texts: list[str], *, query: bool = False) -> list[list[float]]:
@@ -606,10 +516,7 @@ async def embed_texts(texts: list[str]) -> list[list[float]]:
     if settings.USE_LOCAL_EMBEDDINGS:
         # Off the loop: `_embed_with_local` is a synchronous ONNX call.
         return await _run_off_loop(_embed_with_local, texts)
-    if settings.USE_JINA_EMBEDDINGS and settings.JINA_API_KEY:
-        return await _embed_with_jina(texts)
-    else:
-        return await _embed_with_openai(texts)
+    return await _embed_with_openai(texts)
 
 
 async def embed_query(query: str) -> list[float]:
@@ -624,27 +531,21 @@ def embed_texts_sync(texts: list[str]) -> list[list[float]]:
 
     if settings.USE_LOCAL_EMBEDDINGS:
         return _embed_with_local(texts)
-    if settings.USE_JINA_EMBEDDINGS and settings.JINA_API_KEY:
-        return _embed_sync_with_jina(texts)
-    else:
-        # Fallback to OpenAI sync (LEGACY, unbenchmarked — see
-        # _embed_with_openai docstring and the config support matrix).
-        log.warning(
-            "OpenAI embedding backend is unbenchmarked legacy — "
-            "prefer Jina (full-stack) or local (lite mode)",
-        )
-        embeddings: list[list[float]] = []
-        try:
-            client = _get_sync_client()
-            for batch in _batches(texts):
-                response = client.embeddings.create(
-                    model=settings.EMBED_MODEL,
-                    input=batch,
-                    encoding_format="float",
-                    timeout=30.0,
-                )
-                embeddings.extend(item.embedding for item in response.data)
-            return embeddings
-        except Exception as e:
-            log.error("Failed to get embeddings (sync)", exc_info=True)
-            raise ValueError(f"Failed to get embeddings: {e}") from e
+
+    # Explicit OpenAI-compatible fallback (LEGACY, unbenchmarked — see
+    # _embed_with_openai docstring).
+    embeddings: list[list[float]] = []
+    try:
+        client = _get_sync_client()
+        for batch in _batches(texts):
+            response = client.embeddings.create(
+                model=settings.EMBED_MODEL,
+                input=batch,
+                encoding_format="float",
+                timeout=30.0,
+            )
+            embeddings.extend(item.embedding for item in response.data)
+        return embeddings
+    except Exception as e:
+        log.error("Failed to get embeddings (sync)", exc_info=True)
+        raise ValueError(f"Failed to get embeddings: {e}") from e
