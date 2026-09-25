@@ -284,7 +284,12 @@ async def _checked_collection_for_claim(embedding_dim: int) -> tuple[Any, str, i
 # ── public API ──────────────────────────────────────────────────────────────
 
 
-async def upsert_memory(memory: Memory) -> None:
+async def embed_memory(memory: Memory) -> list[float]:
+    """Embed one memory without writing it, for a freshness drain's prefetch."""
+    return (await embed_texts([_memory_to_document(memory)]))[0]
+
+
+async def upsert_memory(memory: Memory, *, embedding: list[float] | None = None) -> None:
     """Embed a memory and write it to the active generation.
 
     Best-effort: logs and re-raises. Callers should wrap in try/except so a
@@ -294,7 +299,8 @@ async def upsert_memory(memory: Memory) -> None:
     whose contract cannot be verified is an integrity failure.
     """
     document = _memory_to_document(memory)
-    embedding = (await embed_texts([document]))[0]
+    if embedding is None:
+        embedding = (await embed_texts([document]))[0]
     client, generation, _ = await _checked_collection_for_claim(len(embedding))
     await client.upsert(
         collection_name=generation, points=[_point(memory, embedding, document)]
