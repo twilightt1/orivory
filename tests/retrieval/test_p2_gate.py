@@ -1152,7 +1152,8 @@ def test_ci_runs_the_p2_gate_suites_and_the_ablation():
     the ablation script + its contract test — which appeared in no step before
     this task — have a step of their own.
     """
-    steps = yaml.safe_load(CI_YML.read_text())["jobs"]["test"]["steps"]
+    jobs = yaml.safe_load(CI_YML.read_text())["jobs"]
+    steps = [step for job in jobs.values() for step in job.get("steps", [])]
 
     matches = [step for step in steps if step.get("name") == CI_STEP_NAME]
     assert len(matches) == 1, [step.get("name") for step in steps]
@@ -1186,8 +1187,19 @@ def test_ci_runs_the_p2_gate_suites_and_the_ablation():
     ablation_steps = [s for s in steps if s.get("name") == CI_ABLATION_STEP_NAME]
     assert len(ablation_steps) == 1, [s.get("name") for s in steps]
     assert "eval/ablation_retrieval_p2.py" in ablation_steps[0]["run"]
+    schema_steps = [
+        s for s in jobs["gate-schema"]["steps"]
+        if s.get("name") == "Run SQLite schema-adoption + v2 ladder tests (DB-free)"
+    ]
+    assert len(schema_steps) == 1
+    assert "tests/lite/test_sqlite_schema_adoption.py" in schema_steps[0]["run"]
+    assert "tests/lite/test_sqlite_schema_v2.py" in schema_steps[0]["run"]
+    p2_steps = jobs["gate-p2"]["steps"]
+    seed_steps = [s for s in p2_steps if s.get("name") == "Seed test config for P2 settings"]
+    assert len(seed_steps) == 1 and seed_steps[0]["run"] == "cp .env.test.example .env"
+    assert p2_steps.index(ablation_steps[0]) < p2_steps.index(seed_steps[0]) < p2_steps.index(step)
 
-    # …and the gates that already existed are still wired where they were.
+    # …and the existing gates remain wired in this workflow.
     for name_prefix, module in (
         ("Run P1a durable-canonical gate", "tests/retrieval/test_p1a_gate.py"),
         ("Run P1b Qdrant + migration", "tests/retrieval/test_p1b_gate.py"),
@@ -1195,3 +1207,21 @@ def test_ci_runs_the_p2_gate_suites_and_the_ablation():
     ):
         found = [s for s in steps if s.get("name", "").startswith(name_prefix)]
         assert found and module in found[0]["run"], f"{module} left its CI step"
+
+
+def test_slow_gate_jobs_are_not_serialized():
+    """Keep the long independent suites on parallel runners."""
+    jobs = yaml.safe_load(CI_YML.read_text())["jobs"]
+    for name in ("gate-p1b", "gate-p3", "gate-p4a", "gate-p4b", "gate-schema", "gate-p2"):
+        assert "needs" not in jobs[name], f"{name} is serialized behind another job"
+
+
+def test_p2_timing_probes_are_the_last_ci_command():
+    jobs = yaml.safe_load(CI_YML.read_text())["jobs"]
+    step = next(s for s in jobs["gate-p2"]["steps"] if s.get("name") == CI_STEP_NAME)
+    commands = [line.strip() for line in step["run"].splitlines() if line.strip().startswith("python -m pytest")]
+    assert "not test_the_loop_beats_while_ingest_and_recall_run_concurrently" in commands[0]
+    assert "not test_the_signed_rss_budget_holds_on_the_real_stack" in commands[0]
+    assert "tests/retrieval/test_event_loop_responsiveness.py" in commands[-1]
+    assert "test_the_loop_beats_while_ingest_and_recall_run_concurrently" in commands[-1]
+    assert "test_the_signed_rss_budget_holds_on_the_real_stack" in commands[-1]

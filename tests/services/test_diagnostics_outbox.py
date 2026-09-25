@@ -160,7 +160,8 @@ async def test_a_failing_drain_round_counts_the_fallback_each_round(monkeypatch)
 
 
 def _ci_step() -> dict:
-    steps = yaml.safe_load(CI_YML.read_text())["jobs"]["test"]["steps"]
+    jobs = yaml.safe_load(CI_YML.read_text())["jobs"]
+    steps = [step for job in jobs.values() for step in job.get("steps", [])]
     matches = [step for step in steps if step.get("name") == CI_STEP_NAME]
     assert len(matches) == 1, [step.get("name") for step in steps]
     return matches[0]
