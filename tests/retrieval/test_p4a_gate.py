@@ -742,11 +742,11 @@ def _workflow() -> dict:
     return yaml.safe_load(CI_YML.read_text())
 
 
-def _step(job: dict, name: str) -> dict:
-    for step in job["steps"]:
-        if step.get("name") == name:
-            return step
-    raise AssertionError(f"CI step {name!r} is gone: {[s.get('name') for s in job['steps']]}")
+def _step(jobs: dict, name: str) -> dict:
+    steps = [step for job in jobs.values() for step in job.get("steps", [])]
+    matches = [step for step in steps if step.get("name") == name]
+    assert len(matches) == 1, [step.get("name") for step in steps]
+    return matches[0]
 
 
 def test_the_workflow_runs_this_gate_and_names_only_paths_that_exist():
@@ -757,7 +757,7 @@ def test_the_workflow_runs_this_gate_and_names_only_paths_that_exist():
     the workflow, the Makefile or the four P4a docs name is checked to exist.
     """
     workflow = _workflow()
-    step = _step(workflow["jobs"]["test"], CI_STEP_NAME)
+    step = _step(workflow["jobs"], CI_STEP_NAME)
     run = step["run"]
 
     assert step["env"]["DATABASE_URL"].startswith("sqlite+aiosqlite:////tmp/"), (

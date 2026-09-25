@@ -80,75 +80,6 @@ jobs:
           python -m pytest --confcutdir=tests/retrieval tests/retrieval/test_p1a_gate.py tests/retrieval/test_index_outbox.py tests/retrieval/test_visibility.py tests/retrieval/test_contract_errors.py -q
           python -m pytest --confcutdir=tests/services tests/services/test_durable_erasure.py -q
 
-      - name: Run P1b Qdrant + migration suites (temp SQLite, no services)
-        env:
-          # Lite semantics, same as the P1a gate step: every module here opens
-          # its own private SQLite file + private embedded-Qdrant folder, so no
-          # compose service is involved.
-          DATABASE_URL: sqlite+aiosqlite:////tmp/p1b_ci.db
-        run: |
-          python -m pytest --confcutdir=tests/retrieval tests/retrieval/test_qdrant_backend.py tests/retrieval/test_qdrant_parity.py tests/retrieval/test_chunk_index.py tests/retrieval/test_cls_cutover.py tests/retrieval/test_p1b_gate.py -q
-          python -m pytest --confcutdir=tests/lite tests/lite/test_readiness_lite.py -q
-
-      - name: Run P3 background-indexing suites (temp SQLite, no services)
-        env:
-          # Same discipline as the P1a/P1b steps above: every module opens its
-          # own private SQLite file and its own embedded-Qdrant folder, so no
-          # compose service is involved. These are the P3 suites that had no CI
-          # step of their own — the drain loop, the recall freshness barrier,
-          # the drain races, the erasure service and its receipt reconcile, the
-          # lite schema/parity/bootstrap ladder, the correction roundtrip and
-          # the purge fence.
-          DATABASE_URL: sqlite+aiosqlite:////tmp/p3_ci.db
-        run: |
-          python -m pytest --confcutdir=tests/services tests/services/test_erasure_service.py tests/services/test_diagnostics_outbox.py tests/services/test_erasure_reconcile.py -q
-          python -m pytest --confcutdir=tests/lite tests/lite/test_sqlite_schema_v3.py tests/lite/test_sqlite_sync_parity.py tests/lite/test_correction_roundtrip.py tests/lite/test_sqlite_bootstrap.py -q
-          python -m pytest --confcutdir=tests/retrieval tests/retrieval/test_drain_loop.py tests/retrieval/test_freshness_barrier.py tests/retrieval/test_drain_races.py tests/retrieval/test_p3_gate.py -q
-          python -m pytest --confcutdir=tests/rag tests/rag/test_pipeline_purge_fence.py -q
-
-      - name: Run P4a namespace/ACL gate suites (temp SQLite, no services)
-        env:
-          # Same discipline as the P1a/P1b/P2/P3 steps above: every module here
-          # opens its own private SQLite file + private embedded-Qdrant folder
-          # (the P1b gate's store, reused as a plugin by the P4a acceptance
-          # gate), so no compose service is involved. Explicit paths on purpose —
-          # a new suite never runs unless it is listed. The erasure suites
-          # (test_erasure_service / test_durable_erasure / test_erasure_reconcile)
-          # stay wired in the P1a/P3 steps; the gate's CI pin checks they are
-          # still wired somewhere, not re-runs them here. The server-mode half of
-          # the Qdrant parity run — the IsEmptyCondition branch and the namespace
-          # payload index against a REAL server — is the integration job's
-          # "Run P1b Qdrant parity against the live server" step.
-          DATABASE_URL: sqlite+aiosqlite:////tmp/p4a_ci.db
-        run: |
-          python -m pytest --confcutdir=tests/retrieval tests/retrieval/test_p4a_gate.py tests/retrieval/test_namespace_acl.py tests/retrieval/test_correction.py -q
-          python -m pytest --confcutdir=tests/lite tests/lite/test_sqlite_schema_v5.py -q
-          python -m pytest --confcutdir=tests/api tests/api/test_erasure_router.py tests/api/test_memories_router.py -q
-          python -m pytest --confcutdir=tests/services tests/services/test_compression_service.py tests/services/test_import_service.py -q
-
-      - name: Run P4b lifecycle gate suites (temp SQLite, no services)
-        env:
-          # Same discipline as the P1a/P1b/P2/P3/P4a steps above: every module
-          # here opens its own private SQLite file + private embedded-Qdrant
-          # folder (the P1b gate's store, reused as a plugin by the P4b
-          # acceptance gate), so no compose service is involved. Explicit paths
-          # on purpose — a new suite never runs unless it is listed, and until
-          # this step named them, EVERY P4b suite (T1-T6: closure, CAS,
-          # consolidation, soft forget, suppression guards, retention, the v6
-          # and v7 ladder modules) was wired into no CI step at all. The mcp_hub
-          # forget-tool units, the v5 ladder and the AST fence stay wired in
-          # their own steps; the gate's CI pin checks they are still wired
-          # somewhere, not re-runs them here. The last command is the DB-free
-          # imports shape pin (T4's `suppressed_skipped`): it sat in a
-          # PG-probed module before, so it skipped in exactly this step's
-          # no-service conditions — here it runs for real.
-          DATABASE_URL: sqlite+aiosqlite:////tmp/p4b_ci.db
-        run: |
-          python -m pytest --confcutdir=tests/retrieval tests/retrieval/test_p4b_gate.py tests/retrieval/test_lifecycle_closure.py tests/retrieval/test_correction_concurrency.py tests/retrieval/test_consolidation.py -q
-          python -m pytest --confcutdir=tests/services tests/services/test_soft_forget.py tests/services/test_suppression_guards.py tests/services/test_retention.py -q
-          python -m pytest --confcutdir=tests/lite tests/lite/test_sqlite_schema_v6.py tests/lite/test_sqlite_schema_v7.py -q
-          python -m pytest --confcutdir=tests/api tests/api/test_import_summary_shape.py -q
-
       - name: Run P1b mean-vs-CLS ablation (evidence artifact, never a gate)
         env:
           # An empty model dir on purpose: the script SKIPs (exit 0) instead of
@@ -158,43 +89,11 @@ jobs:
           LOCAL_E5_DIR: /tmp/orivory-ablation-models
         run: python eval/ablation_mean_vs_cls.py
 
-      - name: Run P2 retrieval ablation + its contract test
-        # Never a gate: the artifact is the evidence, the contract test pins its
-        # SHAPE (arms/slices/verdicts), and the script itself refuses to
-        # download the ~90MB arctic ONNX on a cold runner — so the step runs it
-        # when the cache is warm and says why it skipped when it is not. Only an
-        # explicit verdict acts: a failing probe (missing dependency, broken
-        # import) FAILS the step, only 'cold' prints the skip line, and any
-        # other output FAILS it too — nothing is reported as a cold cache that
-        # did not say 'cold'. Before P2 this script and its contract test
-        # appeared in no CI step at all.
-        run: |
-          python -m pytest --confcutdir=tests/retrieval tests/retrieval/test_p2_ablation_contract.py -q
-          if ! cache="$(python -c "from app.retrieval import e5_local; print('cached' if e5_local.arctic_files_cached() else 'cold')")"; then
-            echo "the arctic cache probe itself failed — not a cold cache" >&2
-            exit 1
-          fi
-          case "$cache" in
-            cached)
-              python eval/ablation_retrieval_p2.py
-              ;;
-            cold)
-              echo "arctic artifacts not cached → the ablation SKIPS; eval/ablation_retrieval_p2.json is the committed evidence"
-              ;;
-            *)
-              echo "the arctic cache probe printed an unexpected verdict '$cache' — only 'cold' may skip" >&2
-              exit 1
-              ;;
-          esac
-
       - name: Run benchmark unit tests (DB-free)
         run: python -m pytest --confcutdir=tests/benchmarks tests/benchmarks -q
 
       - name: Run config tests
         run: python -m pytest --confcutdir=tests/config tests/config/test_settings_validation.py -q
-
-      - name: Run SQLite schema-adoption + v2 ladder tests (DB-free)
-        run: python -m pytest --confcutdir=tests/lite tests/lite/test_sqlite_schema_adoption.py tests/lite/test_sqlite_schema_v2.py -q
 
       - name: Run Hub unit tests (DB-free)
         run: |
@@ -214,33 +113,173 @@ jobs:
 
       - name: Validate production Docker Compose config
         run: docker compose -f docker-compose.yml -f docker-compose.prod.yml config --quiet
-      - name: Run P2 retrieval/hybrid suites (temp SQLite, no services)
-        # Ordered LAST in this job on purpose: these are the only tests here
-        # that measure wall clock, and this step is the one that fails on a
-        # busy runner. A failure here must not skip the deterministic steps
-        # above it — that masking is how a stale ladder pin rode through
-        # several merged PRs looking green.
+
+  gate-p1b:
+    name: P1b Qdrant + migration suites
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: "pip"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt -r requirements-dev.txt
+      - name: Run P1b Qdrant + migration suites (temp SQLite, no services)
         env:
-          # Same discipline as the P1a/P1b/P3 steps above: every module here
-          # opens its own private SQLite file + private embedded-Qdrant folder
-          # (the P1b gate's store, reused as a plugin), so no compose service is
-          # involved. Explicit paths on purpose — a new suite never runs unless
-          # it is listed. The P2 gate itself is tests/retrieval/test_p2_gate.py
-          # (§9 acceptance row); the last line is the batch of retrieval /
-          # observability suites that had no CI step of their own before P2,
-          # and the event-loop heartbeat + ablation-contract modules carry
-          # their own cold-cache guards (arctic onnx cache missing → skip).
-          # tests/lite/test_sqlite_schema_v4.py — the v4 ladder/FTS5 module —
-          # is wired here because v4 IS the P2 schema step; the P3 step covers
-          # the v3 ladder, not this one.
+          # Every module owns its temporary database and embedded-Qdrant folder.
+          DATABASE_URL: sqlite+aiosqlite:////tmp/p1b_ci.db
+        run: |
+          python -m pytest --confcutdir=tests/retrieval tests/retrieval/test_qdrant_backend.py tests/retrieval/test_qdrant_parity.py tests/retrieval/test_chunk_index.py tests/retrieval/test_cls_cutover.py tests/retrieval/test_p1b_gate.py -q
+          python -m pytest --confcutdir=tests/lite tests/lite/test_readiness_lite.py -q
+
+  gate-p3:
+    name: P3 background-indexing suites
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: "pip"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt -r requirements-dev.txt
+      - name: Run P3 background-indexing suites (temp SQLite, no services)
+        env:
+          # Every module owns its temporary database and embedded-Qdrant folder.
+          DATABASE_URL: sqlite+aiosqlite:////tmp/p3_ci.db
+        run: |
+          python -m pytest --confcutdir=tests/services tests/services/test_erasure_service.py tests/services/test_diagnostics_outbox.py tests/services/test_erasure_reconcile.py -q
+          python -m pytest --confcutdir=tests/lite tests/lite/test_sqlite_schema_v3.py tests/lite/test_sqlite_sync_parity.py tests/lite/test_correction_roundtrip.py tests/lite/test_sqlite_bootstrap.py -q
+          python -m pytest --confcutdir=tests/retrieval tests/retrieval/test_drain_loop.py tests/retrieval/test_freshness_barrier.py tests/retrieval/test_drain_races.py tests/retrieval/test_p3_gate.py -q
+          python -m pytest --confcutdir=tests/rag tests/rag/test_pipeline_purge_fence.py -q
+
+  gate-p4a:
+    name: P4a namespace/ACL gate suites
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: "pip"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt -r requirements-dev.txt
+      - name: Run P4a namespace/ACL gate suites (temp SQLite, no services)
+        env:
+          # Plugin fixtures create a separate embedded-Qdrant store per test.
+          DATABASE_URL: sqlite+aiosqlite:////tmp/p4a_ci.db
+        run: |
+          python -m pytest --confcutdir=tests/retrieval tests/retrieval/test_p4a_gate.py tests/retrieval/test_namespace_acl.py tests/retrieval/test_correction.py -q
+          python -m pytest --confcutdir=tests/lite tests/lite/test_sqlite_schema_v5.py -q
+          python -m pytest --confcutdir=tests/api tests/api/test_erasure_router.py tests/api/test_memories_router.py -q
+          python -m pytest --confcutdir=tests/services tests/services/test_compression_service.py tests/services/test_import_service.py -q
+
+  gate-p4b:
+    name: P4b lifecycle gate suites
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: "pip"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt -r requirements-dev.txt
+      - name: Run P4b lifecycle gate suites (temp SQLite, no services)
+        env:
+          # Plugin fixtures create a separate embedded-Qdrant store per test.
+          DATABASE_URL: sqlite+aiosqlite:////tmp/p4b_ci.db
+        run: |
+          python -m pytest --confcutdir=tests/retrieval tests/retrieval/test_p4b_gate.py tests/retrieval/test_lifecycle_closure.py tests/retrieval/test_correction_concurrency.py tests/retrieval/test_consolidation.py -q
+          python -m pytest --confcutdir=tests/services tests/services/test_soft_forget.py tests/services/test_suppression_guards.py tests/services/test_retention.py -q
+          python -m pytest --confcutdir=tests/lite tests/lite/test_sqlite_schema_v6.py tests/lite/test_sqlite_schema_v7.py -q
+          python -m pytest --confcutdir=tests/api tests/api/test_import_summary_shape.py -q
+
+  gate-schema:
+    name: SQLite schema-adoption + v2 ladder tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: "pip"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt -r requirements-dev.txt
+      - name: Run SQLite schema-adoption + v2 ladder tests (DB-free)
+        run: python -m pytest --confcutdir=tests/lite tests/lite/test_sqlite_schema_adoption.py tests/lite/test_sqlite_schema_v2.py -q
+
+  gate-p2:
+    name: P2 retrieval/hybrid suites
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: "pip"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt -r requirements-dev.txt
+      - name: Run P2 retrieval ablation + its contract test
+        # The contract always runs; the artifact script refuses to download the
+        # ~90MB model on a cold runner and reports that skip explicitly.
+        run: |
+          python -m pytest --confcutdir=tests/retrieval tests/retrieval/test_p2_ablation_contract.py -q
+          if ! cache="$(python -c "from app.retrieval import e5_local; print('cached' if e5_local.arctic_files_cached() else 'cold')")"; then
+            echo "the arctic cache probe itself failed — not a cold cache" >&2
+            exit 1
+          fi
+          case "$cache" in
+            cached)
+              python eval/ablation_retrieval_p2.py
+              ;;
+            cold)
+              echo "arctic artifacts not cached → the ablation SKIPS; eval/ablation_retrieval_p2.json is the committed evidence"
+              ;;
+            *)
+              echo "the arctic cache probe printed an unexpected verdict '$cache' — only 'cold' may skip" >&2
+              exit 1
+              ;;
+          esac
+      - name: Seed test config for P2 settings
+        run: cp .env.test.example .env
+      - name: Run P2 retrieval/hybrid suites (temp SQLite, no services)
+        # Run deterministic coverage first; wall-clock probes are the final command.
+        env:
           DATABASE_URL: sqlite+aiosqlite:////tmp/p2_ci.db
         run: |
-          python -m pytest --confcutdir=tests/retrieval tests/retrieval/test_p2_gate.py tests/retrieval/test_rerank_pool.py tests/retrieval/test_hybrid_recall.py -q
-          python -m pytest --confcutdir=tests/retrieval tests/retrieval/test_event_loop_responsiveness.py tests/retrieval/test_p2_ablation_contract.py -q
+          python -m pytest --confcutdir=tests/retrieval tests/retrieval/test_p2_gate.py -q -k 'not test_the_loop_beats_while_ingest_and_recall_run_concurrently and not test_the_signed_rss_budget_holds_on_the_real_stack'
+          python -m pytest --confcutdir=tests/retrieval tests/retrieval/test_p2_ablation_contract.py -q
+          python -m pytest --confcutdir=tests/retrieval tests/retrieval/test_rerank_pool.py tests/retrieval/test_hybrid_recall.py -q
           python -m pytest --confcutdir=tests/retrieval tests/retrieval/test_semantic_rerank.py tests/retrieval/test_local_rerank.py tests/retrieval/test_p0_final_safety.py tests/retrieval/test_retriever_filters.py tests/retrieval/test_e5_local.py tests/retrieval/test_embedding_fingerprint.py tests/retrieval/test_vector_degradation.py tests/retrieval/test_xs_parity.py tests/retrieval/test_graph_build_offload.py -q
           python -m pytest --confcutdir=tests/lite tests/lite/test_sqlite_schema_v4.py -q
           python -m pytest --confcutdir=tests/observability tests/observability -q
-
+          python -m pytest --confcutdir=tests/retrieval tests/retrieval/test_p2_gate.py::test_the_loop_beats_while_ingest_and_recall_run_concurrently tests/retrieval/test_p2_gate.py::test_the_signed_rss_budget_holds_on_the_real_stack tests/retrieval/test_event_loop_responsiveness.py -q
 
   lint-full:
     name: Full-repo ruff

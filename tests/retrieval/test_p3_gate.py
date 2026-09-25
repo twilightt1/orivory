@@ -1031,14 +1031,14 @@ async def test_the_signed_recall_latency_budget_holds_on_the_frozen_fixture(live
 
 def test_ci_runs_the_p3_gate_with_the_same_env_discipline():
     """The workflow is parsed, so narrowing CI fails here instead of silently."""
-    steps = yaml.safe_load(CI_YML.read_text())["jobs"]["test"]["steps"]
+    jobs = yaml.safe_load(CI_YML.read_text())["jobs"]
+    steps = [step for job in jobs.values() for step in job.get("steps", [])]
     matches = [step for step in steps if step.get("name") == CI_STEP_NAME]
     assert len(matches) == 1, [step.get("name") for step in steps]
     step = matches[0]
 
     assert GATE_MODULE in step["run"]
     assert step["env"]["DATABASE_URL"].startswith("sqlite+aiosqlite:///")
-    # …and the P1b gate this harness comes from runs in the same job, so the
-    # fixtures this file reuses are exercised in CI too.
+    # …and the P1b gate this harness comes from remains independently wired.
     p1b = [step for step in steps if step.get("name", "").startswith("Run P1b Qdrant")]
     assert p1b and "tests/retrieval/test_p1b_gate.py" in p1b[0]["run"]
