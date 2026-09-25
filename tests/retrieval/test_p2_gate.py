@@ -1227,7 +1227,7 @@ def test_p2_timing_probes_are_the_last_ci_command():
     commands = [line for line in shell_commands if line.startswith("python -m pytest")]
     assert shell_commands[-1] == commands[-1]
     tokens = list(shlex.shlex(shell_commands[-1], posix=True, punctuation_chars=";&|"))
-    assert not any(token in {";", "&&", "||", "&", "|"} for token in tokens)
+    assert not any(token in {";", "&&", "||", "&", "|", "|&"} for token in tokens)
     assert "not test_the_loop_beats_while_ingest_and_recall_run_concurrently" in commands[0]
     assert "not test_the_signed_rss_budget_holds_on_the_real_stack" in commands[0]
     assert "tests/retrieval/test_event_loop_responsiveness.py" in commands[-1]
