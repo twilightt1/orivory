@@ -1218,8 +1218,12 @@ def test_slow_gate_jobs_are_not_serialized():
 
 def test_p2_timing_probes_are_the_last_ci_command():
     jobs = yaml.safe_load(CI_YML.read_text())["jobs"]
-    step = next(s for s in jobs["gate-p2"]["steps"] if s.get("name") == CI_STEP_NAME)
+    steps = jobs["gate-p2"]["steps"]
+    step = steps[-1]
+    assert step.get("name") == CI_STEP_NAME
+    shell_commands = [line.strip() for line in step["run"].splitlines() if line.strip()]
     commands = [line.strip() for line in step["run"].splitlines() if line.strip().startswith("python -m pytest")]
+    assert shell_commands[-1] == commands[-1]
     assert "not test_the_loop_beats_while_ingest_and_recall_run_concurrently" in commands[0]
     assert "not test_the_signed_rss_budget_holds_on_the_real_stack" in commands[0]
     assert "tests/retrieval/test_event_loop_responsiveness.py" in commands[-1]
