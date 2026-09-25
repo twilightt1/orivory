@@ -60,6 +60,7 @@ import asyncio
 import json
 import math
 import os
+import shlex
 import sqlite3
 import subprocess
 import sys
@@ -1221,9 +1222,12 @@ def test_p2_timing_probes_are_the_last_ci_command():
     steps = jobs["gate-p2"]["steps"]
     step = steps[-1]
     assert step.get("name") == CI_STEP_NAME
-    shell_commands = [line.strip() for line in step["run"].splitlines() if line.strip()]
-    commands = [line.strip() for line in step["run"].splitlines() if line.strip().startswith("python -m pytest")]
+    script = step["run"].replace("\\\n", " ")
+    shell_commands = [line.strip() for line in script.splitlines() if line.strip()]
+    commands = [line for line in shell_commands if line.startswith("python -m pytest")]
     assert shell_commands[-1] == commands[-1]
+    tokens = list(shlex.shlex(shell_commands[-1], posix=True, punctuation_chars=";&|"))
+    assert not any(token in {";", "&&", "||", "&", "|"} for token in tokens)
     assert "not test_the_loop_beats_while_ingest_and_recall_run_concurrently" in commands[0]
     assert "not test_the_signed_rss_budget_holds_on_the_real_stack" in commands[0]
     assert "tests/retrieval/test_event_loop_responsiveness.py" in commands[-1]
