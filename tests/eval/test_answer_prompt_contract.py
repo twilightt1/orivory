@@ -19,10 +19,32 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-# The harness resolves model config at import time; CI has no LLM_MODEL.
+# The harness resolves model config at import time and reads the key when it
+# builds its client; CI has neither. The stub client below means these are
+# placeholders, never a live call.
 os.environ.setdefault("LLM_MODEL", "test-model")
+os.environ.setdefault("OPENAI_API_KEY", "test-key")
 
 from eval import run_system_benchmark as run  # noqa: E402
+
+
+# eval/benchmarks/data/ is gitignored, so CI has no dataset at all. The checks
+# that read it assert properties of the real question distribution, so they run
+# where a loadable dataset exists and skip where one does not. Existence alone
+# is not enough — an empty or placeholder file loads to zero instances, which
+# would fail the assertions instead of skipping them.
+def _dataset_is_loadable() -> bool:
+    try:
+        from eval.benchmarks.longmemeval_s import load_instances
+
+        return bool(load_instances(run.DATASET))
+    except Exception:
+        return False
+
+
+needs_dataset = pytest.mark.skipif(
+    not _dataset_is_loadable(), reason="benchmark dataset not loadable"
+)
 
 
 def _instance(question: str, question_date: str = "2023/08/25 (Fri) 12:00"):
@@ -96,6 +118,7 @@ def test_plain_question_gets_no_reference_date(answering, question):
     assert "TODAY'S DATE" not in answering(question)["messages"][1]["content"]
 
 
+@needs_dataset
 def test_date_cue_matches_every_question_the_probe_showed_it_helping():
     """5 of the 6 date-hint wins were 'how many days/weeks ago' questions.
 
@@ -120,6 +143,7 @@ def test_date_cue_skips_ordering_questions_that_need_no_reference_date():
     )
 
 
+@needs_dataset
 def test_stack_metadata_reports_the_answerer_it_actually_used():
     """A run must not record max_tokens=300 while calling with 2048."""
     meta = run.build_stack_metadata(top_k=15, sample_seed=20260906)
