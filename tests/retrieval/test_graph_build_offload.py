@@ -253,9 +253,11 @@ async def test_concurrent_writes_never_exceed_the_llm_concurrency_limit(store, m
     (the write no longer awaits it, R27(p2)) and extraction used to call
     ``chat.completions.create`` outside ``LLM_MAX_CONCURRENCY`` entirely
     (P2/T9 fix round 1, I1: the gate only wrapped ``complete()`` /
-    ``complete_stream()``). The write path is exercised for real; the only fake
-    is the provider, and its counting create must never see more calls in
-    flight than the gate allows — background scheduling must not burst it.
+    ``complete_stream()``). The gate now lives on the shared client's wrapper,
+    so the fake provider is wrapped the way the app builds its real client —
+    an unwrapped fake would bypass the very policy under test. The write path
+    is exercised for real, and the counting create must never see more calls
+    in flight than the gate allows.
     """
     limit = 2
     monkeypatch.setattr(settings, "LLM_MAX_CONCURRENCY", limit)
@@ -290,7 +292,10 @@ async def test_concurrent_writes_never_exceed_the_llm_concurrency_limit(store, m
     fake_client = SimpleNamespace(
         chat=SimpleNamespace(completions=SimpleNamespace(create=_create))
     )
-    monkeypatch.setattr("app.graph.extraction._get_client", lambda: fake_client)
+    monkeypatch.setattr(
+        "app.graph.extraction._get_client",
+        lambda: llm_client.ResilientAsyncOpenAI(fake_client),
+    )
 
     seeds = [await _seed_memory(store) for _ in range(limit * 3)]
 

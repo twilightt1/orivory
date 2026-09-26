@@ -44,15 +44,18 @@ def _is_unsupported_feature_error(exc: Exception) -> bool:
 
 
 class _ResilientCompletions:
-    """Wrapper around ``chat.completions`` adding provider-error fallbacks.
+    """Wrapper around ``chat.completions`` owning the whole provider policy.
 
     Every agent shares one AsyncOpenAI client, so wrapping here fixes all
     ~20 call sites at once. Handles:
+      * the app-wide concurrency gate (``LLM_MAX_CONCURRENCY``) — query
+        rewrite and HyDE call the client directly and used to burst the
+        provider outside the budget
       * structured-outputs 400s → retry without ``response_format`` (with an
         app-default token budget, since reasoning-style models would truncate
         mid-CoT under a small per-agent cap)
       * 200 responses with ``choices=None`` → one identical retry
-    Concurrency gating and 429 retries live in the SDK + semaphore below.
+    429 retries live in the SDK.
     """
 
     def __init__(self, inner: Any) -> None:
@@ -66,23 +69,31 @@ class _ResilientCompletions:
         return kwargs
 
     async def create(self, **kwargs: Any) -> Any:
-        try:
-            response = await self._inner.create(**kwargs)
-        except Exception as exc:
-            if kwargs.get("response_format") and _is_unsupported_feature_error(exc):
-                kwargs = self._strip_rf_kwargs(kwargs)
+        # Every retry below runs INSIDE the one permit this call takes: a
+        # second acquisition deadlocks at LLM_MAX_CONCURRENCY=1 (the task that
+        # would release the permit is the one waiting) and leaks a slot per
+        # retry at any higher limit.
+        # Resolved per call, not cached on the client: the gate is a module
+        # singleton that a config change (or a test) can rebuild, and a
+        # long-lived client must not keep a stale permit count.
+        async with _get_llm_semaphore():
+            try:
                 response = await self._inner.create(**kwargs)
-            else:
-                raise
-        if hasattr(response, "choices") and response.choices is None:
-            # The gateway intermittently returns HTTP 200 with choices=None
-            # (once per ~200 calls in the n=100 benchmark run; replaying the
-            # identical request immediately returned a normal completion).
-            # One retry here covers every agent on the shared client — the
-            # reason this class exists. A persistent null still reaches the
-            # caller, which fails that agent rather than silently returning
-            # empty text.
-            response = await self._inner.create(**kwargs)
+            except Exception as exc:
+                if kwargs.get("response_format") and _is_unsupported_feature_error(exc):
+                    kwargs = self._strip_rf_kwargs(kwargs)
+                    response = await self._inner.create(**kwargs)
+                else:
+                    raise
+            if hasattr(response, "choices") and response.choices is None:
+                # The gateway intermittently returns HTTP 200 with
+                # choices=None (once per ~200 calls in the n=100 benchmark
+                # run; replaying the identical request immediately returned a
+                # normal completion). One retry here covers every agent on the
+                # shared client — the reason this class exists. A persistent
+                # null still reaches the caller, which fails that agent rather
+                # than silently returning empty text.
+                response = await self._inner.create(**kwargs)
         return response
 
     def __getattr__(self, name: str) -> Any:
@@ -95,7 +106,6 @@ class ResilientAsyncOpenAI:
     def __init__(self, inner: AsyncOpenAI) -> None:
         self._inner = inner
         self.chat = type("Chat", (), {"completions": _ResilientCompletions(inner.chat.completions)})()
-        self._llm_gate = _get_llm_semaphore()
 
     async def __aenter__(self) -> ResilientAsyncOpenAI:
         return self
@@ -213,18 +223,6 @@ def _get_llm_semaphore() -> _SharedSemaphore:
     return _llm_semaphore
 
 
-def _is_unsupported_feature_error(exc: Exception) -> bool:
-    """Detect provider 400s that mean 'this model lacks structured outputs'."""
-    text = str(exc).lower()
-    markers = (
-        "does not support feature",
-        "structured-outputs",
-        "response_format",
-        "invalid_request_body",
-    )
-    return any(m in text for m in markers) and "400" in text
-
-
 async def complete(
     *,
     agent: str,
@@ -250,30 +248,7 @@ async def complete(
         extra_headers=extra_headers,
         timeout=timeout or DEFAULT_LLM_TIMEOUT_SECONDS,
     )
-    async with _get_llm_semaphore():
-        try:
-            response = await client.chat.completions.create(**kwargs)
-        except Exception as exc:
-            # Some providers/models (e.g. ling, deepseek-reasoner variants)
-            # reject `response_format` with a 400 "does not support feature:
-            # structured-outputs". Fall back to a plain call — the agents'
-            # prompts already demand JSON, and parse_llm_json_object is
-            # tolerant of fenced/messy output.
-            if response_format and _is_unsupported_feature_error(exc):
-                kwargs["response_format"] = None
-                # Reasoning-style models burn the token budget on CoT before
-                # emitting content; a small per-agent cap (e.g. 500 for the
-                # grader) would truncate mid-reasoning and yield empty text.
-                # Give the fallback the app-default budget instead.
-                kwargs["max_tokens"] = max(
-                    int(kwargs["max_tokens"] or 0), settings.LLM_MAX_TOKENS
-                )
-                # NO second acquisition here: this branch already runs inside
-                # the permit taken above. Re-entering the shared semaphore is a
-                # deadlock at LLM_MAX_CONCURRENCY=1 (the task that would
-                # release it is the one waiting) and leaks a slot per retry at
-                # any higher limit (review finding, pinned by test).
-                response = await client.chat.completions.create(**kwargs)
-            else:
-                raise
-    return response
+    # The gate and the structured-outputs fallback both live on the shared
+    # client's wrapper (see _ResilientCompletions): taking a permit here too
+    # would be a second acquisition, a deadlock at LLM_MAX_CONCURRENCY=1.
+    return await client.chat.completions.create(**kwargs)
