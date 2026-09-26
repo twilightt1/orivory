@@ -557,6 +557,22 @@ async def stack_recall(user_id, query: str, top_k: int,
         return fused[: top_k * 2]
 
 
+async def create_checked(client, **kwargs):
+    """chat.completions.create with one retry on a provider quirk.
+
+    The gateway sometimes returns a completion with choices=None: observed once
+    in the 0.737 partial run (question 4baee567 crashed the run, and the resume
+    crashed the same way), and reproduced as transient — an immediate identical
+    request returned a normal completion. Without the retry the harness records
+    a TypeError error record instead of an answer; with it, only a PERSISTENT
+    null-choices outage still surfaces (as an error record, resume-able).
+    """
+    completion = await client.chat.completions.create(**kwargs)
+    if not completion.choices:
+        completion = await client.chat.completions.create(**kwargs)
+    return completion
+
+
 async def answer_from_stack(
     user_id, instance, top_k: int, fuse: bool = False
 ) -> tuple[str, int]:
@@ -589,7 +605,8 @@ async def answer_from_stack(
     preamble = ""
     if instance.question_date and RELATIVE_TIME_CUE.search(instance.question):
         preamble = f"TODAY'S DATE: {instance.question_date}\n\n"
-    completion = await client.chat.completions.create(
+    completion = await create_checked(
+        client,
         model=MODEL,
         messages=[
             {"role": "system", "content": ANSWER_SYSTEM},
@@ -607,7 +624,8 @@ async def answer_from_stack(
 
 
 async def judge_one(client, instance, response: str) -> bool:
-    completion = await client.chat.completions.create(
+    completion = await create_checked(
+        client,
         model=MODEL,
         messages=build_judge_messages(instance.question, instance.answer, response),
         temperature=0.0,
