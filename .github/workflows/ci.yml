@@ -53,7 +53,7 @@ jobs:
         run: python -m pytest --confcutdir=tests/rag tests/rag -q
 
       - name: Run evaluation tests
-        run: python -m pytest --confcutdir=tests/eval tests/eval/test_eval_metrics.py tests/eval/test_llm_judge_provenance.py tests/eval/test_resume_system_run.py -q
+        run: python -m pytest --confcutdir=tests/eval tests/eval/test_eval_metrics.py tests/eval/test_llm_judge_provenance.py tests/eval/test_resume_system_run.py tests/eval/test_answer_prompt_contract.py -q
 
       - name: Run middleware unit tests (DB-free)
         run: python -m pytest --confcutdir=tests/middleware tests/middleware -q

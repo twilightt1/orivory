@@ -28,6 +28,7 @@ import hashlib
 import json
 import os
 import random
+import re
 import sys
 import time
 from datetime import UTC, datetime
@@ -109,10 +110,42 @@ BASELINE = ROOT / "eval/benchmarks/results/longmemeval_s_baseline.json"
 if not BASELINE.exists():  # worktree: committed baseline lives on main checkout
     BASELINE = ROOT.parent.parent / "eval/benchmarks/results/longmemeval_s_baseline.json"
 
+# Measured on the 38 wrong questions of the 0.62 run (wrong-only probe,
+# artifact eval/benchmarks/results/longmemeval_s_system_n100_20260925T174857.json):
+# of 21 with the gold already inside the served top-15, 5 returned an EMPTY
+# answer and 16 hit the refusal branch. Both prompt and token cap changed
+# here; the pair is the measured effect, not either half alone.
 ANSWER_SYSTEM = (
-    "You are answering questions using ONLY the memory excerpts provided. "
-    "Answer in at most two sentences. If the memories do not contain the "
-    "answer, reply exactly: I have no information about that."
+    "You are answering questions about a user from their stored memories. "
+    "Use ONLY the numbered MEMORIES below, but ALWAYS give your best specific "
+    "answer from them — never reply that you have no information. "
+    "Rules: quote numbers, dates, names and durations exactly as they appear; "
+    "if a memory is dated, use those dates to compute durations and 'how long "
+    "ago' questions; when memories disagree, prefer the most recent one; "
+    "for preference questions, answer with the concrete choice the user made. "
+    "Reply with the answer only, no preamble, in one short sentence."
+)
+
+# ponytail: 300 was a guess. Reasoning-channel models burn the whole budget
+# before emitting `content`, and the completion then returns content=None
+# (finish_reason=length) — 5 empty answers in that run. Raise when a probe
+# shows a truncation again; there is no upper pressure from the prompt, which
+# asks for one sentence.
+ANSWER_MAX_TOKENS = 2048
+ANSWER_PROMPT_VERSION = "no-refusal-v1+date-hint"
+
+# 'How long ago' / 'since when' questions are unanswerable without a reference
+# date: the model anchors them to the transcript instead. Measured on the 9
+# temporal questions of that same probe: 1/9 correct without it, 6/9 with it
+# (discordant 5-0, exact binomial p=0.0625). The date rides on the user turn
+# only where the question asks for it — passing it unconditionally measured
+# 9/21 vs 12/21 on non-temporal questions.
+RELATIVE_TIME_CUE = re.compile(
+    r"\b(how long|how many (?:days|weeks|months|years|hours|minutes)"
+    r"|ago|since|before|after|last (?:week|month|year|night)"
+    r"|this (?:week|month|year)|yesterday|tomorrow|recently|earlier"
+    r"|when did|what date|what day)\b",
+    re.IGNORECASE,
 )
 
 
@@ -221,7 +254,9 @@ def build_stack_metadata(
         "answer": {
             "model": MODEL,
             "temperature": 0.0,
-            "max_tokens": 300,
+            "max_tokens": ANSWER_MAX_TOKENS,
+            "prompt_version": ANSWER_PROMPT_VERSION,
+            "passes_reference_date": True,
         },
         "judge": {
             "model": MODEL,
@@ -527,9 +562,12 @@ async def answer_from_stack(
 ) -> tuple[str, int]:
     """Answer the question from what the stack recalls (single pass).
 
-    NOTE: a two-phase map-reduce variant was tried (PR #20) and LOST to
-    single-pass (0.486 vs 0.570 hosted). The historical output remains in the
-    results archive, but its retrieval lane is retired. Do not re-add it here.
+    NOTE: a two-phase map-reduce variant was tried twice and LOST both times.
+    PR #20: 0.486 vs 0.570 hosted. Re-measured on the 30 recoverable questions
+    of the 0.62 run (wrong-only probe, same recall window, same judge): 15/30
+    with per-memory MAP vs 13/30 here — discordant 3-4, exact binomial p=1.0,
+    for 15 extra LLM calls per question. A single-call MAP was worse still: it
+    truncated to content=None at both 2048 and 8192 tokens. Do not re-add it.
     """
     from openai import AsyncOpenAI
 
@@ -546,6 +584,11 @@ async def answer_from_stack(
         f"[{i + 1}] ({r['captured_at'] or 'undated'}) {r['content']}"
         for i, r in enumerate(recalled)
     )
+    # The reference date goes on the user turn, and only when the question is
+    # about relative time — unconditional measured worse (see RELATIVE_TIME_CUE).
+    preamble = ""
+    if instance.question_date and RELATIVE_TIME_CUE.search(instance.question):
+        preamble = f"TODAY'S DATE: {instance.question_date}\n\n"
     completion = await client.chat.completions.create(
         model=MODEL,
         messages=[
@@ -553,12 +596,12 @@ async def answer_from_stack(
             {
                 "role": "user",
                 "content": (
-                    f"MEMORIES:\n{excerpts}\n\nQUESTION: {instance.question}"
+                    f"{preamble}MEMORIES:\n{excerpts}\n\nQUESTION: {instance.question}"
                 ),
             },
         ],
         temperature=0.0,
-        max_tokens=300,
+        max_tokens=ANSWER_MAX_TOKENS,
     )
     return (completion.choices[0].message.content or "").strip(), len(recalled)
 
