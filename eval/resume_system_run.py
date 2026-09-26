@@ -63,7 +63,7 @@ from uuid import UUID, uuid4  # noqa: E402
 # Import AFTER env so settings pick up the run's DATABASE_URL
 from app.database import bootstrap_sqlite  # noqa: E402
 from eval.benchmarks.longmemeval_s import load_instances  # noqa: E402
-from eval.retrieval_contract import retrieval_contract_matches  # noqa: E402
+from eval.run_contract import run_contracts_match  # noqa: E402
 from eval.run_system_benchmark import (  # noqa: E402
     DATASET,
     _apply_graph_build_switch,
@@ -145,10 +145,10 @@ async def main_async(args) -> int:
         chunk_chars=args.chunk_chars,
         fuse=args.fuse,
     )
-    if not retrieval_contract_matches(recorded_stack, current_stack):
+    if not run_contracts_match(recorded_stack, current_stack):
         print(
-            "refusing to resume: recorded retrieval contract differs from the "
-            "current local embedding/rerank lane; start a fresh run",
+            "refusing to resume: the recorded run contract differs from the current "
+            "config (embedding/rerank lane, context policy, or answer/judge); start a fresh run",
             file=sys.stderr,
         )
         return 2

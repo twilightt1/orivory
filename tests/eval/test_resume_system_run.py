@@ -3,13 +3,26 @@ from types import SimpleNamespace
 
 import pytest
 
-from eval.retrieval_contract import retrieval_contract_matches
+from eval.run_contract import run_contracts_match
 
 _CONTEXT_POLICY = {"session_level": True, "chunk_chars": 4000, "fuse": False}
 _RETRIEVAL_POLICY = {
     "hybrid_enabled": False,
     "rerank_pool_multiplier": 2.0,
     "rrf_k": 60,
+}
+_ANSWER = {
+    "model": "test-model",
+    "temperature": 0.0,
+    "max_tokens": 2048,
+    "prompt_version": "no-refusal-v1+date-hint",
+    "passes_reference_date": True,
+}
+_JUDGE = {
+    "model": "test-model",
+    "prompt_version": "longmemeval-official-v1",
+    "temperature": 0.0,
+    "max_tokens": 8,
 }
 
 
@@ -23,6 +36,8 @@ def _stack(context_policy, retrieval_policy=None):
         "recall_top_k": 15,
         "graph_builds": "off (bench ingest)",
         "retrieval": dict(_RETRIEVAL_POLICY if retrieval_policy is None else retrieval_policy),
+        "answer": dict(_ANSWER),
+        "judge": dict(_JUDGE),
         "execution": {"context_policy": context_policy},
     }
 
@@ -32,10 +47,10 @@ def _set_test_benchmark_model(monkeypatch):
     monkeypatch.setenv("LLM_MODEL", "test-model")
 
 
-def test_resume_accepts_an_identical_retrieval_contract():
+def test_resume_accepts_an_identical_run_contract():
     stack = _stack(dict(_CONTEXT_POLICY))
 
-    assert retrieval_contract_matches(stack, stack)
+    assert run_contracts_match(stack, stack)
 
 
 @pytest.mark.parametrize(
@@ -46,14 +61,14 @@ def test_resume_rejects_a_changed_execution_policy(key, value):
     recorded_policy = dict(_CONTEXT_POLICY)
     recorded_policy[key] = value
 
-    assert not retrieval_contract_matches(_stack(recorded_policy), _stack(_CONTEXT_POLICY))
+    assert not run_contracts_match(_stack(recorded_policy), _stack(_CONTEXT_POLICY))
 
 
 def test_resume_rejects_a_missing_execution_policy():
     recorded = _stack(dict(_CONTEXT_POLICY))
     recorded["execution"].pop("context_policy")
 
-    assert not retrieval_contract_matches(recorded, _stack(_CONTEXT_POLICY))
+    assert not run_contracts_match(recorded, _stack(_CONTEXT_POLICY))
 
 
 @pytest.mark.parametrize(
@@ -64,7 +79,7 @@ def test_resume_rejects_changed_retrieval_settings(key, value):
     recorded_policy = dict(_RETRIEVAL_POLICY)
     recorded_policy[key] = value
 
-    assert not retrieval_contract_matches(_stack(dict(_CONTEXT_POLICY), recorded_policy), _stack(_CONTEXT_POLICY))
+    assert not run_contracts_match(_stack(dict(_CONTEXT_POLICY), recorded_policy), _stack(_CONTEXT_POLICY))
 
 
 def test_resume_rejects_missing_retrieval_policy():
@@ -73,7 +88,7 @@ def test_resume_rejects_missing_retrieval_policy():
     recorded.pop("retrieval")
     current.pop("retrieval")
 
-    assert not retrieval_contract_matches(recorded, current)
+    assert not run_contracts_match(recorded, current)
 
 
 def test_resume_rejects_changed_graph_build_policy():
@@ -81,7 +96,7 @@ def test_resume_rejects_changed_graph_build_policy():
     current = _stack(dict(_CONTEXT_POLICY))
     current["graph_builds"] = "on"
 
-    assert not retrieval_contract_matches(recorded, current)
+    assert not run_contracts_match(recorded, current)
 
 
 def test_resume_rejects_missing_graph_build_policy():
@@ -90,7 +105,7 @@ def test_resume_rejects_missing_graph_build_policy():
     recorded.pop("graph_builds")
     current.pop("graph_builds")
 
-    assert not retrieval_contract_matches(recorded, current)
+    assert not run_contracts_match(recorded, current)
 
 
 @pytest.mark.parametrize("policy", [None, [], {}])
@@ -99,7 +114,7 @@ def test_resume_rejects_malformed_graph_build_policy(policy):
     current = _stack(dict(_CONTEXT_POLICY))
     current["graph_builds"] = policy
 
-    assert not retrieval_contract_matches(recorded, current)
+    assert not run_contracts_match(recorded, current)
 
 
 @pytest.mark.asyncio
