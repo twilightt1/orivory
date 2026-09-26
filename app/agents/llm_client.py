@@ -51,6 +51,7 @@ class _ResilientCompletions:
       * structured-outputs 400s → retry without ``response_format`` (with an
         app-default token budget, since reasoning-style models would truncate
         mid-CoT under a small per-agent cap)
+      * 200 responses with ``choices=None`` → one identical retry
     Concurrency gating and 429 retries live in the SDK + semaphore below.
     """
 
@@ -66,12 +67,23 @@ class _ResilientCompletions:
 
     async def create(self, **kwargs: Any) -> Any:
         try:
-            return await self._inner.create(**kwargs)
+            response = await self._inner.create(**kwargs)
         except Exception as exc:
             if kwargs.get("response_format") and _is_unsupported_feature_error(exc):
                 kwargs = self._strip_rf_kwargs(kwargs)
-                return await self._inner.create(**kwargs)
-            raise
+                response = await self._inner.create(**kwargs)
+            else:
+                raise
+        if hasattr(response, "choices") and response.choices is None:
+            # The gateway intermittently returns HTTP 200 with choices=None
+            # (once per ~200 calls in the n=100 benchmark run; replaying the
+            # identical request immediately returned a normal completion).
+            # One retry here covers every agent on the shared client — the
+            # reason this class exists. A persistent null still reaches the
+            # caller, which fails that agent rather than silently returning
+            # empty text.
+            response = await self._inner.create(**kwargs)
+        return response
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._inner, name)
