@@ -65,7 +65,7 @@ jobs:
         run: python -m pytest --confcutdir=tests/smoke tests/smoke/test_services_unit.py -q
 
       - name: Run agent unit tests (DB-free)
-        run: python -m pytest --confcutdir=tests/agents tests/agents/test_llm_client_loop.py -q
+        run: python -m pytest --confcutdir=tests/agents tests/agents/test_llm_client_loop.py tests/agents/test_llm_client_gate.py -q
 
       - name: Run retrieval unit tests (DB-free)
         run: python -m pytest --confcutdir=tests/retrieval tests/retrieval/test_embedding_dim_guard.py tests/retrieval/test_vector_store.py tests/retrieval/test_scoring.py -q

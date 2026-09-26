@@ -13,9 +13,9 @@ from typing import Any
 
 # Shared client seam: tests patch <module>._get_client, which rebinds
 # this module attribute and is picked up by all call sites below.
-# The provider calls below sit behind the same app-wide gate as complete()
-# (P2/T9 fix round 1): raw extraction used to bypass LLM_MAX_CONCURRENCY.
-from app.agents.llm_client import _get_llm_semaphore
+# No gate here: the shared client's wrapper owns LLM_MAX_CONCURRENCY for
+# every call site (P2/T9 fix round 1 stopped extraction bypassing it; the
+# wrapper closed the rest of the holes). A second acquisition deadlocks.
 from app.agents.llm_client import get_llm_client as _get_client
 from app.agents.llm_parsing import (
     coerce_float,
@@ -340,17 +340,16 @@ async def extract_entities(memory: Memory, *, model: str | None = None) -> Entit
         return EntityExtractionResult(entities=[])
 
     try:
-        async with _get_llm_semaphore():
-            resp = await _get_client().chat.completions.create(
-                model=model or settings.LLM_MODEL,
-                messages=[{"role": "user", "content": ENTITY_EXTRACTION_PROMPT.format(**text)}],
-                temperature=0.0,
-                response_format={"type": "json_object"},
-                extra_headers={
-                    "HTTP-Referer": settings.FRONTEND_URL,
-                    "X-Title": "Orivory Graph Extraction",
-                },
-            )
+        resp = await _get_client().chat.completions.create(
+            model=model or settings.LLM_MODEL,
+            messages=[{"role": "user", "content": ENTITY_EXTRACTION_PROMPT.format(**text)}],
+            temperature=0.0,
+            response_format={"type": "json_object"},
+            extra_headers={
+                "HTTP-Referer": settings.FRONTEND_URL,
+                "X-Title": "Orivory Graph Extraction",
+            },
+        )
         parsed = parse_llm_json_object(resp.choices[0].message.content)
         if not parsed.ok or parsed.data is None:
             fallback = _fallback_entities(memory)
@@ -404,20 +403,19 @@ async def extract_relations(
     entity_lines = "\n".join(f"- {e.name} ({e.entity_type})" for e in entities)
 
     try:
-        async with _get_llm_semaphore():
-            resp = await _get_client().chat.completions.create(
-                model=model or settings.LLM_MODEL,
-                messages=[{
-                    "role": "user",
-                    "content": RELATION_EXTRACTION_PROMPT.format(**text, entities=entity_lines),
-                }],
-                temperature=0.0,
-                response_format={"type": "json_object"},
-                extra_headers={
-                    "HTTP-Referer": settings.FRONTEND_URL,
-                    "X-Title": "Orivory Relation Extraction",
-                },
-            )
+        resp = await _get_client().chat.completions.create(
+            model=model or settings.LLM_MODEL,
+            messages=[{
+                "role": "user",
+                "content": RELATION_EXTRACTION_PROMPT.format(**text, entities=entity_lines),
+            }],
+            temperature=0.0,
+            response_format={"type": "json_object"},
+            extra_headers={
+                "HTTP-Referer": settings.FRONTEND_URL,
+                "X-Title": "Orivory Relation Extraction",
+            },
+        )
         parsed = parse_llm_json_object(resp.choices[0].message.content)
         if not parsed.ok or parsed.data is None:
             fallback = _fallback_relations(entities)

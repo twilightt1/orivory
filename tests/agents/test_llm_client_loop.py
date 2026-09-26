@@ -145,6 +145,10 @@ async def test_the_unsupported_feature_retry_does_not_re_enter_the_gate(monkeypa
     LLM_MAX_CONCURRENCY=1 the first model that rejects `response_format` parks
     the only task that could ever release the permit — a permanent hang, and
     one permit leaked per occurrence for any higher limit.
+
+    The gate and the fallback now both live on the shared client's wrapper, so
+    the fake has to be wrapped too — an unwrapped fake would test a path the
+    app no longer takes.
     """
     monkeypatch.setattr(llm_client.settings, "LLM_MAX_CONCURRENCY", 1)
     monkeypatch.setattr(llm_client, "_llm_semaphore", None, raising=False)
@@ -161,7 +165,11 @@ async def test_the_unsupported_feature_retry_does_not_re_enter_the_gate(monkeypa
             return "second-response"
 
     fake = SimpleNamespace(chat=SimpleNamespace(completions=_Completions()))
-    monkeypatch.setattr(llm_client, "get_llm_client", lambda: fake)
+    monkeypatch.setattr(
+        llm_client,
+        "get_llm_client",
+        lambda: llm_client.ResilientAsyncOpenAI(fake),
+    )
 
     response = await asyncio.wait_for(
         llm_client.complete(
