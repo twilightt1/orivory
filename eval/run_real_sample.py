@@ -43,6 +43,7 @@ for line in ENV_FILE.open():
 
 from eval.benchmarks.llm_judge import JUDGE_PROMPT_VERSION, build_judge_messages  # noqa: E402
 from eval.benchmarks.longmemeval_s import load_instances  # noqa: E402
+from eval.run_system_benchmark import ANSWER_MAX_TOKENS  # noqa: E402
 
 DATASET = ROOT / "eval/benchmarks/data/longmemeval_s_cleaned.json"
 MODEL = os.environ.get("BENCHMARK_JUDGE_MODEL", os.environ["LLM_MODEL"])
@@ -79,7 +80,9 @@ async def answer_one(client, instance) -> str:
             },
         ],
         temperature=0.0,
-        max_tokens=300,
+        # Same reason as the system lane: 300 lets a reasoning model finish
+        # the budget before emitting `content` and return content=None.
+        max_tokens=ANSWER_MAX_TOKENS,
     )
     return (completion.choices[0].message.content or "").strip()
 
