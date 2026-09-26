@@ -8,6 +8,7 @@ The evidence is the wrong-only probe over the 38 failed questions of the
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 import types
 from pathlib import Path
@@ -17,6 +18,9 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+# The harness resolves model config at import time; CI has no LLM_MODEL.
+os.environ.setdefault("LLM_MODEL", "test-model")
 
 from eval import run_system_benchmark as run  # noqa: E402
 
