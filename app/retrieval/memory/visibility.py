@@ -98,7 +98,7 @@ def state_expression():
 def suppressed_source_predicate(user_id):
     """The suppression ledger as a predicate: this row's source was forgotten.
 
-    The SQL twin of ``document_memory.is_suppressed`` (R38/T4, ruling R28 in the
+    The SQL twin of ``suppression.is_suppressed`` (R38/T4, ruling R28 in the
     migration CLI): a source identity the user forgot must never be
     (re-)embedded, so a backfill composes this with the lifecycle predicate
     instead of probing the ledger per row — the same "one statement, before the

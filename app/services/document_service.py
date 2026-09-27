@@ -67,7 +67,7 @@ async def upload_document(db: AsyncSession, conversation: Conversation, file: Up
     db.add(doc)
     conversation.document_count += 1
 
-    from app.ingestion.document_memory import (
+    from app.ingestion.suppression import (
         is_content_suppressed_async,
         suppress_source_async,
     )

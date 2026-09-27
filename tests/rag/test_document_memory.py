@@ -24,6 +24,8 @@ from app.ingestion.document_memory import (
     build_document_memories_sync,
     delete_document_memories_async,
     delete_document_memories_sync,
+)
+from app.ingestion.suppression import (
     is_suppressed,
     is_suppressed_async,
     suppress_source,
