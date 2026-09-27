@@ -145,6 +145,19 @@ def test_execution_provenance_alone_never_blocks_a_resume(key):
     assert run_contracts_match(_stack(), changed)
 
 
+def test_a_different_dataset_blocks_a_resume_though_its_path_does_not():
+    """The dataset's PATH is provenance — the same bytes at another checkout
+    resume fine. Its CONTENT is the measurement: scoring questions from a
+    different file is not the run being resumed."""
+    moved = _stack()
+    moved["dataset_path"] = "/somewhere/else/longmemeval_s_cleaned.json"
+    assert run_contracts_match(_stack(), moved)
+
+    edited = _stack()
+    edited["dataset_sha256"] = "0" * 64
+    assert not run_contracts_match(_stack(), edited)
+
+
 def test_a_context_policy_change_blocks_a_resume_and_a_missing_one_does_not_hide():
     changed = _stack()
     changed["execution"]["context_policy"] = dict(_CONTEXT_POLICY, chunk_chars=0)
@@ -285,6 +298,16 @@ def test_forced_and_from_index_re_runs_narrow_the_same_failed_set():
     assert run_verdict(records, recorded_partial=True, from_index=1)["failed"] == [1]
     assert run_verdict(records, recorded_partial=True, forced=[0])["failed"] == [0]
     assert run_verdict(records, recorded_partial=True, from_index=0)["failed"] == [0, 1]
+
+
+def test_a_from_index_cursor_does_not_excuse_a_dropped_row_before_it():
+    """--from-index means "from here on is unverified", not "everything before
+    here is fine". A row that recalled nothing before the cursor still owes a
+    re-run: quoting it would score a question the system could not answer."""
+    records = [_record("q0", recalled=0), *(_record(f"q{i}") for i in range(1, 4))]
+
+    assert run_verdict(records, recorded_partial=False)["failed"] == [0]
+    assert run_verdict(records, recorded_partial=False, from_index=2)["failed"] == [0, 2, 3]
 
 
 def test_the_baseline_delta_is_computed_once_from_the_verdict():

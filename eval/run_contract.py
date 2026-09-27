@@ -26,12 +26,17 @@ from typing import Any
 #: OTHER key must match before a resume is allowed, so a new score-affecting
 #: key fails closed without anyone remembering to list it.
 #:
-#: ``git_*``/``runtime``/``dataset_*``/``sample_seed``/``write_index_costs`` say
-#: where and when the run happened; ``timeouts_seconds`` and the non-policy
-#: ``execution`` fields describe the harness, not the retrieval result. The
-#: score-bearing fields deliberately are NOT here: ``recall_top_k``,
-#: ``rerank``, ``retrieval``, ``answer``, ``judge``, ``graph_builds``,
-#: ``execution.context_policy``, ``embedding*``, ``query/passage_prefix``.
+#: ``git_*``/``runtime``/``dataset_path``/``dataset_source``/``sample_seed``/
+#: ``write_index_costs`` say where and when the run happened; ``timeouts_seconds``
+#: and the non-policy ``execution`` fields describe the harness, not the
+#: retrieval result. The score-bearing fields deliberately are NOT here:
+#: ``recall_top_k``, ``rerank``, ``retrieval``, ``answer``, ``judge``,
+#: ``graph_builds``, ``execution.context_policy``, ``embedding*``,
+#: ``query/passage_prefix``.
+#:
+#: ``dataset_sha256`` is also absent on purpose: a DIFFERENT dataset is a
+#: different measurement, so it must block a resume even though the path it
+#: came from is provenance.
 PROVENANCE_KEYS = frozenset({
     "git_head",
     "git_dirty",
@@ -201,15 +206,17 @@ def run_verdict(
     computes from the same records.
     """
     total = len(records)
-    failed: list[int] = []
+    failed: list[int] = [
+        i
+        for i, record in enumerate(records)
+        if isinstance(record, dict)
+        and (record.get("memories_recalled") == 0 or bool(record.get("error")))
+    ]
     if from_index is not None:
-        failed = [i for i in range(total) if i >= from_index]
-    else:
-        for i, record in enumerate(records):
-            if not isinstance(record, dict):
-                continue
-            if record.get("memories_recalled") == 0 or bool(record.get("error")):
-                failed.append(i)
+        # ``--from-index`` is "everything from here on is unverified", so it
+        # ADDS to the records that already look broken — never replaces it. A
+        # dropped row before the cursor still owes a re-run.
+        failed = sorted({*failed, *(i for i in range(total) if i >= from_index)})
     for index in forced or ():
         if index not in failed:
             failed.append(index)
