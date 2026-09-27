@@ -20,8 +20,9 @@
 - OpenClaw auto-capture, one-command installer, compression.
 - Tuning ladder with Wilson CIs: 0.490 official n=100 → 0.570 hosted rerank;
   two NEGATIVE results recorded honestly (session chunking, map-reduce).
-  The hosted lane is retired; this historical score is not reproducible from the
-  shipped default retrieval config.
+  The hosted lane is retired; those historical scores are not reproducible
+  from the shipped default retrieval config. The current local lane measures
+  **0.730** (n=100, Wilson [0.636, 0.807]) — see `eval/README.md`.
 - Judge hardening (exact-token match, judged pilot).
 
 ### Review + remediation batch (2026-09-10)
