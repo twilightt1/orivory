@@ -60,6 +60,9 @@ jobs:
         run: >-
           python -m pytest --confcutdir=tests/eval tests/eval
           --ignore=tests/eval/test_benchmark_metadata.py -q
+        # test_benchmark_metadata.py needs the 277MB dataset, which this job
+        # does not download. The graph-switch scope it also covers is pinned by
+        # tests/eval/test_graph_build_switch_scope.py, which needs no dataset.
 
       - name: Run middleware unit tests (DB-free)
         run: python -m pytest --confcutdir=tests/middleware tests/middleware -q

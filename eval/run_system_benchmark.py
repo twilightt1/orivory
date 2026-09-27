@@ -31,6 +31,8 @@ import random
 import re
 import sys
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -80,23 +82,35 @@ os.environ["RETRIEVAL_SEMANTIC_RERANK"] = "1"
 # ingest its LLM calls share the answer/rewrite gate and can starve the scored
 # queries; keep it off unless --with-graph is explicitly requested.
 GRAPH_BUILDS_ENABLED = False
-_GRAPH_BUILD_ORIGINAL = None
 
 
 def _skip_graph_build(*args, **kwargs) -> None:
     return None
 
 
-def _apply_graph_build_switch(enabled: bool) -> None:
-    global GRAPH_BUILDS_ENABLED, _GRAPH_BUILD_ORIGINAL
+@contextmanager
+def graph_builds(enabled: bool) -> Iterator[bool]:
+    """Install the graph-build policy for the duration of one run, then restore.
+
+    The rebind touches a module the whole process shares, so it must be scoped
+    to the run: a plain setter left the no-op installed after the run exited,
+    and every later test in the same process saw a write path that silently
+    never built a graph (`pytest tests/eval tests/retrieval/test_graph_build_offload.py`
+    failed 5 that way).
+    """
+    global GRAPH_BUILDS_ENABLED
     from app.retrieval.memory import write_back
 
-    if _GRAPH_BUILD_ORIGINAL is None:
-        _GRAPH_BUILD_ORIGINAL = write_back.safe_enqueue_graph_build
+    original = write_back.safe_enqueue_graph_build
     write_back.safe_enqueue_graph_build = (
-        _GRAPH_BUILD_ORIGINAL if enabled else _skip_graph_build
+        original if enabled else _skip_graph_build
     )
     GRAPH_BUILDS_ENABLED = enabled
+    try:
+        yield enabled
+    finally:
+        write_back.safe_enqueue_graph_build = original
+        GRAPH_BUILDS_ENABLED = False
 
 
 from eval.benchmarks.llm_judge import JUDGE_PROMPT_VERSION, build_judge_messages  # noqa: E402
@@ -997,8 +1011,8 @@ def main() -> int:
                              "0 = one memory per session, the diluting "
                              "extreme) — the RAG sweet spot is ~4000")
     args = parser.parse_args()
-    _apply_graph_build_switch(args.with_graph)
-    return asyncio.run(main_async(args))
+    with graph_builds(args.with_graph):
+        return asyncio.run(main_async(args))
 
 
 if __name__ == "__main__":

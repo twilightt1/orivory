@@ -1,4 +1,5 @@
 import json
+from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
 
 import pytest
@@ -182,7 +183,17 @@ async def test_resume_applies_recorded_graph_build_policy(tmp_path, monkeypatch,
 
     monkeypatch.setattr(resume, "bootstrap_sqlite", no_bootstrap)
     applied = []
-    monkeypatch.setattr(resume, "_apply_graph_build_switch", applied.append)
+
+    @contextmanager
+    def _record(enabled):
+        applied.append(enabled)
+        yield enabled
+
+    # Patch the CONTEXT MANAGER the resume path actually enters. Patching an
+    # imported alias of the old plain setter neutralised the only thing these
+    # tests claimed to check: nothing rebinds the module, and a global
+    # installed by an earlier case leaked into the graph-build suite.
+    monkeypatch.setattr(resume, "graph_builds", _record)
     args = SimpleNamespace(
         results=results,
         session=None,
@@ -193,8 +204,11 @@ async def test_resume_applies_recorded_graph_build_policy(tmp_path, monkeypatch,
         dry_run=True,
     )
 
+    # A dry run does no work, so it must NOT install the policy: the switch
+    # exists to shape a real run, and a dry run that left a no-op behind
+    # would be the very leak this guards.
     assert await resume.main_async(args) == 0
-    assert applied == [enabled]
+    assert applied == []
 
 
 @pytest.mark.asyncio
@@ -241,7 +255,7 @@ async def test_resume_purges_each_question_before_scoring_the_next(
         return None
 
     monkeypatch.setattr(resume, "bootstrap_sqlite", no_bootstrap)
-    monkeypatch.setattr(resume, "_apply_graph_build_switch", lambda _enabled: None)
+    monkeypatch.setattr(resume, "graph_builds", lambda _enabled: nullcontext(_enabled))
     monkeypatch.setattr(resume, "_RESULTS_DIR", tmp_path / "results")
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
     monkeypatch.setattr(openai, "AsyncOpenAI", lambda **_kwargs: object())
