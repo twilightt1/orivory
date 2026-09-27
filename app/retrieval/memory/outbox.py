@@ -752,7 +752,7 @@ async def _apply_memory_intent(
         # CONSTRUCTION and whose source is suppressed by construction too.
         # Blocking it would leave the point serving `visibility_state=current`
         # — exactly the state contract that refresh exists to land.
-        from app.ingestion.document_memory import is_suppressed_async
+        from app.ingestion.suppression import is_suppressed_async
 
         if await is_suppressed_async(db, user_id=memory.user_id, source_ref=memory.source_ref):
             log.info(

@@ -69,11 +69,8 @@ from typing import Any
 from sqlalchemy import delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.ingestion.document_memory import (
-    DOC_MEMORY_SOURCE_TYPE,
-    projection_content_hash,
-    suppress_source_async,
-)
+from app.ingestion.document_memory import DOC_MEMORY_SOURCE_TYPE
+from app.ingestion.suppression import projection_content_hash, suppress_source_async
 from app.models.document import Document
 from app.models.entity import Entity, MemoryEntity, Relation
 from app.models.erasure_receipt import ErasureReceipt

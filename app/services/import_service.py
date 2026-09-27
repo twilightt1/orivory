@@ -23,13 +23,13 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.ingestion.document_memory import suppressed_refs_async
 from app.ingestion.import_formats import (
     SOURCE_TYPE_FOR_FORMAT,
     ImportFormatError,
     detect_format,
     parse_import,
 )
+from app.ingestion.suppression import suppressed_refs_async
 from app.models.memory import Memory
 from app.retrieval.embedder import EmbeddingDimensionMismatch
 from app.retrieval.memory.correction import client_metadata

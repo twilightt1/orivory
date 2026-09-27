@@ -39,7 +39,7 @@ from sqlalchemy import select
 
 from app import database
 from app.ingestion import pipeline
-from app.ingestion.document_memory import suppress_source_async
+from app.ingestion.suppression import suppress_source_async
 from app.models.conversation import Conversation
 from app.models.document import Document
 from app.models.index_outbox import IndexOutbox
