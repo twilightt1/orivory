@@ -105,5 +105,7 @@ async def test_build_diagnostics_degrades_when_dependency_fails(monkeypatch):
     assert result["status"] == "degraded"
     assert result["checks"]["redis"]["status"] == "failed"
     assert result["checks"]["celery"]["status"] == "dormant"
-    assert result["config"]["celery_queues"] == ["default", "ingestion", "email"]
+    # No broker on the slim branch, so the summary must not name queues: an
+    # operator reading /admin/diagnostics was shown a topology that did not exist.
+    assert "celery_queues" not in result["config"]
     assert result["index_outbox"]["by_status"]["blocked"] == 0  # C2: the class is in the payload
