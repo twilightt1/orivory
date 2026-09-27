@@ -71,9 +71,9 @@ from eval.run_contract import (  # noqa: E402
 )
 from eval.run_system_benchmark import (  # noqa: E402
     DATASET,
-    _apply_graph_build_switch,
     answer_from_stack,
     build_stack_metadata,
+    graph_builds,
     ingest_instance,
     judge_one,
     purge_instance_memories,
@@ -81,11 +81,6 @@ from eval.run_system_benchmark import (  # noqa: E402
 
 
 async def main_async(args) -> int:
-    from openai import AsyncOpenAI
-
-    from app.database import AsyncSessionLocal
-    from app.models.user import User
-
     results_path = args.results
     payload = json.loads(results_path.read_text())
     recorded_stack = payload.get("stack")
@@ -99,7 +94,6 @@ async def main_async(args) -> int:
     if recorded_graph_builds_policy is None:
         print("refusing to resume: result lacks a valid graph-build policy", file=sys.stderr)
         return 2
-    _apply_graph_build_switch(recorded_graph_builds_policy == "on")
     recorded_policy = recorded_context_policy(recorded_stack)
     if recorded_policy is None:
         print("refusing to resume: result lacks a complete context policy", file=sys.stderr)
@@ -247,6 +241,38 @@ async def main_async(args) -> int:
     if not failed_idx:
         print("nothing to resume — no failed records")
         return 0
+
+    with graph_builds(recorded_graph_builds_policy == "on"):
+        return await _resume_work(
+            args=args,
+            payload=payload,
+            records=records,
+            sample_ids=sample_ids,
+            failed_idx=failed_idx,
+            purge_failed_id=purge_failed_id,
+            purge_failed_user_id=purge_failed_user_id,
+            all_instances=all_instances,
+            results_path=results_path,
+        )
+
+
+async def _resume_work(
+    *,
+    args,
+    payload,
+    records,
+    sample_ids,
+    failed_idx,
+    purge_failed_id,
+    purge_failed_user_id,
+    all_instances,
+    results_path,
+) -> int:
+    """The ingest/answer/judge loop, run under the recorded graph-build policy."""
+    from openai import AsyncOpenAI
+
+    from app.database import AsyncSessionLocal
+    from app.models.user import User
 
     await bootstrap_sqlite()
     if purge_failed_user_id is not None:
