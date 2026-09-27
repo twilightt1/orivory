@@ -136,10 +136,15 @@ When a real query fails or produces weak citations, add it to the dataset with:
 Stack, read from the artifact's own `stack` block: Arctic-embed-xs 384-dim
 ONNX, `gte-multilingual-reranker-base` int8 (top_n 15), hybrid off, graph builds
 off during bench ingest, answerer and judge `stealth/space-bunny-alpha`, seed
-`20260906`, 73/100 correct, 0 errors. This is the lane `run_system_benchmark.py`
-runs unconditionally — it pins `RETRIEVAL_SEMANTIC_RERANK=1` and
-`RERANK_TOP_N=15` at import so a stale `.env` cannot change what is measured
-(`eval/run_system_benchmark.py:70-77`).
+`20260906`, 73/100 correct, 0 errors. Retrieval is `recall_top_k 10` with
+per-turn chunking (`session_level: false`, `chunk_chars: 0`) — the harness
+DEFAULTS (`eval/run_system_benchmark.py:988,995,1008`). The reranker is pinned
+at import so a stale `.env` cannot change it (`RERANK_TOP_N=15`,
+`RETRIEVAL_SEMANTIC_RERANK=1`), but `top_k` and chunking are CLI flags: a run
+with `--top-k 15 --session --chunk-chars 4000` is a DIFFERENT measurement
+(0.740, not committed) and the two must not be compared. Read the artifact's
+`stack.execution.context_policy` and `stack.recall_top_k` before comparing
+runs, never the filename.
 
 ### Historical — hosted models, not reproducible from this tree
 
