@@ -25,9 +25,6 @@ OUTBOX_STATUSES = ("pending", "done", "blocked")
 OUTBOX_KINDS = ("memory", "chunk")
 
 
-_check_celery = None  # type: ignore[assignment]  # dormant on the slim branch: no broker, see build_diagnostics.
-
-
 def build_config_summary() -> dict[str, Any]:
     origins = [origin.strip() for origin in settings.ALLOWED_ORIGINS.split(",") if origin.strip()]
     fingerprint = current_fingerprint()
@@ -48,7 +45,6 @@ def build_config_summary() -> dict[str, Any]:
         "reranker_top_n": settings.RERANK_TOP_N,
         "rate_limit_per_minute": settings.RATE_LIMIT_PER_MINUTE,
         "rate_limit_per_day": settings.RATE_LIMIT_PER_DAY,
-        "celery_queues": ["default", "ingestion", "email"],
     }
 
 

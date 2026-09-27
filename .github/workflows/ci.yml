@@ -67,6 +67,14 @@ jobs:
       - name: Run middleware unit tests (DB-free)
         run: python -m pytest --confcutdir=tests/middleware tests/middleware -q
 
+      # These three directories are reached by `make test` (pytest tests) but
+      # by no step here, so a break in graph building, import formats, or the
+      # memory-rows migration could not turn this job red. 41 tests, ~1s.
+      - name: Run graph, ingestion and migration unit tests
+        run: >-
+          python -m pytest --confcutdir=tests
+          tests/graph tests/ingestion tests/migration -q
+
       - name: Run script unit tests (DB-free)
         run: python -m pytest --confcutdir=tests/scripts tests/scripts -q
 
