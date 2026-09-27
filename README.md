@@ -33,10 +33,13 @@ Three ideas make it different from a chat-with-docs app:
 3. **Provable, not marketed.** The eval harness ships with the repo
    (LongMemEval-S + MemoryAgentBench adapters) so quality claims can be
    checked, not just claimed — including two **negative** results we
-   published anyway. Current best: **0.570** LongMemEval-S (n=100, single
-   pass + semantic rerank) vs 0.490 baseline; results with Wilson 95% CIs
-   in [`eval/benchmarks/results/`](eval/benchmarks/results/), history in
-   [CHANGELOG](CHANGELOG.md).
+   published anyway. The headline number, **0.570** LongMemEval-S (n=100,
+   single pass + *hosted* rerank), is a **historical measurement**: embeddings
+   and rerank are local ONNX now, so it is provenance, not a current claim.
+   Results with Wilson 95% CIs in
+   [`eval/benchmarks/results/`](eval/benchmarks/results/), history in
+   [CHANGELOG](CHANGELOG.md), and the reproducibility rule in
+   [eval/README.md](eval/README.md#historical-baselines-v110-preserve-artifacts-not-current-regression-gates).
 
 Your data stays on your infrastructure. MIT-licensed, self-hosted, plain
 SQLite + embedded Qdrant under the hood — one container, no external services.
@@ -51,7 +54,7 @@ SQLite + embedded Qdrant under the hood — one container, no external services.
 | **📜 Access ledger** | Append-only audit log: which agent read or wrote which memory, when |
 | **🗑️ Erasure receipts** | Right-to-be-forgotten with verification: cascade deletion across rows, links and vectors, re-checked and receipted |
 | **📥 Import paths** | One-shot upload of ChatGPT / Claude / PAM / generic-JSON exports with dedup |
-| **📊 Benchmarks** | LongMemEval-S + MemoryAgentBench harness, 0.570 (n=100) with CIs — [results](eval/benchmarks/results/), [how to run](eval/README.md) |
+| **📊 Benchmarks** | LongMemEval-S + MemoryAgentBench harness. Headline 0.570 (n=100) is a historical hosted-rerank artifact, not reproducible from the local default lane — [results](eval/benchmarks/results/), [how to run](eval/README.md) |
 | **💰 Cost ledger** | Every LLM call's usage is recorded per request, so spend is observable without a second service |
 
 ## Quick start
