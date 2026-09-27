@@ -35,6 +35,17 @@ FIXTURE = (
 pytestmark = pytest.mark.eval
 
 
+@pytest.fixture(autouse=True)
+async def _app_schema():
+    """The script talks to ``app.database``'s own engine, whose schema nothing
+    else creates here: ``--confcutdir=tests/eval`` keeps the suite's schema
+    fixture out, so these tests would otherwise run against an empty database.
+    """
+    from app.database import bootstrap_sqlite
+
+    await bootstrap_sqlite()
+
+
 async def _make_user(user_id: uuid.UUID, prefix: str) -> None:
     from app.database import AsyncSessionLocal
     from app.models.user import User
