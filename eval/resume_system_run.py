@@ -3,9 +3,10 @@
 
 A long n=100 run can hit transient embedding-provider failures near the end.
 Questions whose recall failed (recalled=0) say nothing about retrieval quality —
-recording them as wrong would misreport the system. This resume path pins the
-current local embedding/rerank lane and rejects result files from a different
-retrieval contract.
+recording them as wrong would misreport the system. This resume path rejects a
+result file whose recorded run contract (embedding/rerank lane, context
+policy, answer and judge config) differs from the current one — resuming would
+re-answer and re-judge with today's config and merge two measurements.
 
 This script:
 1. loads the run's results JSON,
@@ -90,7 +91,7 @@ async def main_async(args) -> int:
     payload = json.loads(results_path.read_text())
     recorded_stack = payload.get("stack")
     if not isinstance(recorded_stack, dict):
-        print("refusing to resume: result has no retrieval contract", file=sys.stderr)
+        print("refusing to resume: result has no run contract", file=sys.stderr)
         return 2
     # Every policy the resume path RE-APPLIES is read through the artifact seam,
     # so the "is this recorded value one I can honour?" rule lives in one place
@@ -341,8 +342,7 @@ async def main_async(args) -> int:
         "purge_failed_question_id": purge_failed,
         "purge_failed_user_id": str(user_id) if purge_failed is not None else None,
         "reason": (
-            "re-ran selected records under the matching "
-            "local retrieval contract"
+            "re-ran selected records under the matching run contract"
         ),
         "timestamp_utc": datetime.now(UTC).isoformat(),
     }

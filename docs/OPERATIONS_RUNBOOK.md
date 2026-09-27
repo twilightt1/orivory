@@ -522,10 +522,12 @@ sqlite3 data/orivory.db "SELECT status, kind, COUNT(*) FROM index_outbox GROUP B
   waits (pool size minus the permits in flight) before unrelated `to_thread`
   work queues behind them. A dedicated wait-executor is the upgrade if that
   ceiling is ever reached; today the budget (`LLM_MAX_CONCURRENCY`, default 3)
-  stays far below it. Known latent issue, deliberately NOT fixed here:
-  `llm_client.complete()` re-acquires the same gate for its
-  structured-outputs retry while still holding it (line 286 -> 304), so a
-  saturated budget can deadlock the callers that all need the second permit.
+  stays far below it. The gate is acquired once, on the shared client's
+  `chat.completions` wrapper, and every retry (structured-outputs fallback,
+  the `choices=None` retry) runs inside that one permit — a second
+  acquisition would deadlock a saturated budget at `LLM_MAX_CONCURRENCY=1`.
+  Pinned by `tests/agents/test_llm_client_gate.py` and
+  `tests/agents/test_llm_client_loop.py::test_the_unsupported_feature_retry_does_not_re_enter_the_gate`.
 
 ### The lexical index, erasure and disk
 
