@@ -187,6 +187,9 @@ async def test_a_purge_failure_makes_the_run_partial(tmp_path, monkeypatch, caps
     assert exit_code != 0  # a contaminated run is not a success
     assert scored == [instances[0].question_id]  # and nothing after it was scored
     assert "PURGE FAILED for" in capsys.readouterr().out
+    # The verdict is what says "partial", and the artifact now RECORDS it, so
+    # the resume path never has to infer the state from the filename.
+    assert json.loads((tmp_path / "results.json").read_text())["partial"] is True
 
 
 # --- finding 2: partial runs never masquerade as the clean artifact ------
@@ -212,6 +215,121 @@ def test_errored_run_does_not_exit_clean():
     assert run_exit_code([{"error": None}, {"error": "RateLimitError: slow down"}]) != 0
     # A quota-aborted run keeps the caller's own code.
     assert run_exit_code([{"error": None}], base_code=3) == 3
+
+
+async def test_a_clean_run_records_a_quotable_artifact(tmp_path, monkeypatch):
+    """The artifact says what it is: totals, and ``partial: false`` in the file.
+
+    Both come from the shared ``run_verdict`` seam, so the resume path reading
+    this file later reads the SAME numbers this run reported.
+    """
+    import argparse
+
+    import eval.run_system_benchmark as rsb
+
+    instances = load_instances(FIXTURE)[:2]
+    monkeypatch.setattr(rsb, "load_instances", lambda _path: instances)
+    monkeypatch.setattr(rsb, "result_artifact_path", lambda **_kw: tmp_path / "results.json")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+
+    async def fake_run_instance(client, user_id, instance, top_k, run_dir, **_kw):
+        return {
+            "question_id": instance.question_id,
+            "question_type": instance.question_type,
+            "correct": instance.question_id == instances[0].question_id,
+            "response": "a",
+            "memories_ingested": 1,
+            "memories_recalled": 1,
+            "ingest_seconds": 0.0,
+            "recall_seconds": 0.0,
+            "seconds": 0.0,
+            "error": None,
+        }
+
+    async def ok_purge(_user_id, _question_id):
+        return 1
+
+    monkeypatch.setattr(rsb, "run_instance", fake_run_instance)
+    monkeypatch.setattr(rsb, "purge_instance_memories", ok_purge)
+
+    args = argparse.Namespace(
+        n=2, seed=1, top_k=5, session=True, chunk_chars=0, fuse=False, concurrency=1
+    )
+    assert await rsb.main_async(args) == 0
+
+    payload = json.loads((tmp_path / "results.json").read_text())
+    assert payload["partial"] is False
+    assert payload["questions"] == 2
+    assert payload["correct"] == 1
+    assert payload["mean"] == 0.5
+    assert payload["wilson_95"] == [0.095, 0.905]
+    assert payload["by_type"] == {
+        instance.question_type: {
+            "n": 1,
+            "correct": 1 if instance.question_id == instances[0].question_id else 0,
+        }
+        for instance in instances
+    }
+
+
+async def test_a_run_that_recalled_nothing_is_not_a_completed_measurement(
+    tmp_path, monkeypatch
+):
+    """recalled==0 with no error is a question the stack did not answer.
+
+    Nothing errored and nothing went unpurged, so the run's own bookkeeping
+    called it clean — but the resume path re-runs exactly these records, so an
+    artifact claiming to be complete would disagree with its own resume. The
+    verdict is the one place that decides, and it says partial.
+    """
+    import argparse
+
+    import eval.run_system_benchmark as rsb
+    from eval.run_contract import run_verdict
+
+    instances = load_instances(FIXTURE)[:2]
+    monkeypatch.setattr(rsb, "load_instances", lambda _path: instances)
+    monkeypatch.setattr(
+        rsb,
+        "result_artifact_path",
+        lambda **kw: tmp_path / ("results_partial.json" if kw["partial"] else "results.json"),
+    )
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+
+    async def fake_run_instance(client, user_id, instance, top_k, run_dir, **_kw):
+        return {
+            "question_id": instance.question_id,
+            "question_type": instance.question_type,
+            "correct": False,
+            "response": "I have no information about that.",
+            "memories_ingested": 1,
+            "memories_recalled": 0,
+            "ingest_seconds": 0.0,
+            "recall_seconds": 0.0,
+            "seconds": 0.0,
+            "error": None,
+        }
+
+    async def ok_purge(_user_id, _question_id):
+        return 1
+
+    monkeypatch.setattr(rsb, "run_instance", fake_run_instance)
+    monkeypatch.setattr(rsb, "purge_instance_memories", ok_purge)
+
+    args = argparse.Namespace(
+        n=2, seed=1, top_k=5, session=True, chunk_chars=0, fuse=False, concurrency=1
+    )
+    assert await rsb.main_async(args) == 0  # nothing errored: not a failure exit
+
+    payload = json.loads((tmp_path / "results_partial.json").read_text())
+    assert payload["partial"] is True
+    assert payload["errors"] == 0
+    # …and the resume path agrees these records owe a re-run.
+    assert run_verdict(
+        payload["per_question"],
+        expected_count=2,
+        recorded_partial=payload["partial"],
+    )["failed"] == [0, 1]
 
 
 # --- finding 3: per-instance cleanup keeps recall order-independent ------

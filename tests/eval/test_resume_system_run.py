@@ -82,13 +82,21 @@ def test_resume_rejects_changed_retrieval_settings(key, value):
     assert not run_contracts_match(_stack(dict(_CONTEXT_POLICY), recorded_policy), _stack(_CONTEXT_POLICY))
 
 
-def test_resume_rejects_missing_retrieval_policy():
+def test_resume_rejects_a_retrieval_policy_only_one_side_records():
+    """One side missing a measured key is a different measurement.
+
+    BOTH sides missing it is not: an artifact older than the field it lacks and
+    a config that never had it are the same measurement, so that resume stands.
+    """
     recorded = _stack(dict(_CONTEXT_POLICY))
     current = _stack(dict(_CONTEXT_POLICY))
-    recorded.pop("retrieval")
     current.pop("retrieval")
 
     assert not run_contracts_match(recorded, current)
+
+    both = _stack(dict(_CONTEXT_POLICY))
+    both.pop("retrieval")
+    assert run_contracts_match(both, both)
 
 
 def test_resume_rejects_changed_graph_build_policy():
