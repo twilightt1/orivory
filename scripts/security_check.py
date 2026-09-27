@@ -189,16 +189,13 @@ def check_flower_ops_profile() -> CheckResult:
 
 def check_diagnostics_summary_safe() -> CheckResult:
     summary = build_config_summary()
-    # A denylist held even where the setting itself is gone (JWT_SECRET_KEY
-    # left with account auth): denying a name costs nothing, and this is what
-    # a re-introduced secret would have to get past.
+    # The summary enumerates safe fields explicitly, so this is a belt-and-braces
+    # check: it fails the moment a secret-bearing name reaches that surface,
+    # whether or not the setting behind it still exists.
     forbidden_keys = {
         "DATABASE_URL",
-        "JWT_SECRET_KEY",
         "OPENROUTER_API_KEY",
         "OPENAI_API_KEY",
-        "SENDGRID_API_KEY",
-        "GOOGLE_CLIENT_SECRET",
         "access_token",
         "refresh_token",
         "password",

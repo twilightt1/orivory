@@ -35,7 +35,7 @@ sys.path.insert(0, str(ROOT))
 ENV_FILE = ROOT / ".env"
 if not ENV_FILE.exists():  # worktree: fall back to the main checkout's env
     ENV_FILE = ROOT.parent.parent / ".env"
-for line in ENV_FILE.open():
+for line in ENV_FILE.read_text().splitlines() if ENV_FILE.exists() else []:
     line = line.strip()
     if line and not line.startswith("#") and "=" in line:
         key, _, value = line.partition("=")
@@ -46,7 +46,7 @@ from eval.benchmarks.longmemeval_s import load_instances  # noqa: E402
 from eval.run_system_benchmark import ANSWER_MAX_TOKENS, create_checked  # noqa: E402
 
 DATASET = ROOT / "eval/benchmarks/data/longmemeval_s_cleaned.json"
-MODEL = os.environ.get("BENCHMARK_JUDGE_MODEL", os.environ["LLM_MODEL"])
+MODEL = os.environ.get("BENCHMARK_JUDGE_MODEL") or os.environ.get("LLM_MODEL") or "openai/gpt-4o-mini"
 
 ANSWER_SYSTEM = (
     "You are answering questions about a user's conversation history. "

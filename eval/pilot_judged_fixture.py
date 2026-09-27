@@ -26,8 +26,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-# Load .env (OPENAI_API_KEY / OPENAI_BASE_URL / LLM_MODEL)
-for line in (ROOT / ".env").open():
+# Load .env (OPENAI_API_KEY / OPENAI_BASE_URL / LLM_MODEL). Absent is fine:
+# fall through to the ambient environment rather than dying on a
+# FileNotFoundError the caller cannot act on.
+ENV_FILE = ROOT / ".env"
+if not ENV_FILE.exists():  # worktree: fall back to the main checkout's env
+    ENV_FILE = ROOT.parent.parent / ".env"
+for line in ENV_FILE.read_text().splitlines() if ENV_FILE.exists() else []:
     line = line.strip()
     if line and not line.startswith("#") and "=" in line:
         key, _, value = line.partition("=")
@@ -37,7 +42,7 @@ from eval.benchmarks.llm_judge import JUDGE_PROMPT_VERSION, build_judge_messages
 
 FIXTURE = ROOT / "eval/benchmarks/fixtures/longmemeval_s_fixture.json"
 RESULTS = ROOT / "eval/benchmarks/results/pilot_judged_fixture.json"
-MODEL = os.environ["LLM_MODEL"]
+MODEL = os.environ.get("LLM_MODEL") or "openai/gpt-4o-mini"
 
 
 def answer_from_haystack(instance: dict) -> str:

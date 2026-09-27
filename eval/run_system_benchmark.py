@@ -106,7 +106,11 @@ from eval.run_contract import run_verdict  # noqa: E402
 DATASET = ROOT / "eval/benchmarks/data/longmemeval_s_cleaned.json"
 if not DATASET.exists():  # worktree: ignored benchmark data lives on main checkout
     DATASET = ROOT.parent.parent / "eval/benchmarks/data/longmemeval_s_cleaned.json"
-MODEL = os.environ.get("BENCHMARK_JUDGE_MODEL", os.environ["LLM_MODEL"])
+# The judge/answerer model. `settings` cannot be read here — it is imported
+# inside the functions that need it, because DATABASE_URL above must land in
+# os.environ first — so the default is spelled out, matching app/config.py.
+# A missing value must name itself, not raise KeyError at import.
+MODEL = os.environ.get("BENCHMARK_JUDGE_MODEL") or os.environ.get("LLM_MODEL") or "openai/gpt-4o-mini"
 BASELINE = ROOT / "eval/benchmarks/results/longmemeval_s_baseline.json"
 if not BASELINE.exists():  # worktree: committed baseline lives on main checkout
     BASELINE = ROOT.parent.parent / "eval/benchmarks/results/longmemeval_s_baseline.json"

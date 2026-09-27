@@ -61,3 +61,12 @@ These rules exist because the LoCoMo controversy showed vendor memory scores swi
 3. **Dataset SHA-256 in results** — every result file records the SHA-256 of the exact dataset file it ran against, so a dataset revision can never silently change a score.
 4. **Full-context baseline noted** — results note whether the full-context (no-memory-system) baseline was run alongside; where it was not, that absence is stated.
 5. **Deviations stated** — any deviation from the benchmark's official protocol (subset of questions, modified prompts, excluded categories, different judge) is written into the results file explicitly. No silent deviations.
+
+### `run_comparison` is written by hand
+
+Rule 4's comparison lives in a `run_comparison` key that the harness does **not**
+generate — it is written into the results file by whoever read the runs, with a
+`conclusion` sentence stating what the numbers do and do not show. Only the
+committed `longmemeval_s_system_n100*.json` files carry one; a fresh run will
+not, and that is expected. Do not delete the existing ones: they are the record
+of a claim that cannot be recomputed from the artifact alone.
