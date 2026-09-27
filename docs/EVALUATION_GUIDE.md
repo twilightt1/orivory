@@ -171,6 +171,24 @@ the dataset sha256 recorded. The LLM judge for non-exact-match answers is a
 pinned follow-up; until then, aggregate numbers read artificially low by
 design.
 
+### What a run artifact is allowed to mean
+
+`eval/run_contract.py` is the one place that decides what a system-run
+results file means, for both the run and the resume command:
+
+- **Compatibility is default-deny.** Every `stack` key is compared against the
+  current config except an explicit `PROVENANCE_KEYS` list (git head, runtime,
+  dataset path, timings). A newly added score-affecting key therefore blocks a
+  resume on its own — nobody has to remember to teach two commands about it.
+  Answer and judge config (model, prompt version, token cap) is part of that
+  comparison: resuming re-answers with the *current* answerer, so a changed
+  prompt would otherwise merge two different measurements into one score.
+- **Totals** (mean, Wilson 95%, per-type counts, baseline delta) come from one
+  function, so a resumed artifact cannot disagree with a fresh run.
+- **Completeness is a verdict, not a filename.** The payload carries it; a
+  `_partial` suffix is not a signal. Quote a score only when `complete` is
+  true — a partial run's mean is over fewer questions than the sample.
+
 ## Cost & latency analysis
 
 ```bash
