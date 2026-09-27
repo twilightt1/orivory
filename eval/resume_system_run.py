@@ -22,7 +22,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-import math
 import os
 import sys
 from datetime import UTC, datetime
@@ -63,7 +62,13 @@ from uuid import UUID, uuid4  # noqa: E402
 # Import AFTER env so settings pick up the run's DATABASE_URL
 from app.database import bootstrap_sqlite  # noqa: E402
 from eval.benchmarks.longmemeval_s import load_instances  # noqa: E402
-from eval.run_contract import run_contracts_match  # noqa: E402
+from eval.run_contract import (  # noqa: E402
+    recorded_context_policy,
+    recorded_graph_builds,
+    recorded_recall_top_k,
+    run_contracts_match,
+    run_verdict,
+)
 from eval.run_system_benchmark import (  # noqa: E402
     DATASET,
     _apply_graph_build_switch,
@@ -87,38 +92,18 @@ async def main_async(args) -> int:
     if not isinstance(recorded_stack, dict):
         print("refusing to resume: result has no retrieval contract", file=sys.stderr)
         return 2
-    recorded_graph_builds = recorded_stack.get("graph_builds")
-    if not isinstance(recorded_graph_builds, str) or recorded_graph_builds not in {
-        "on",
-        "off (bench ingest)",
-    }:
+    # Every policy the resume path RE-APPLIES is read through the artifact seam,
+    # so the "is this recorded value one I can honour?" rule lives in one place
+    # instead of being re-derived here.
+    recorded_graph_builds_policy = recorded_graph_builds(recorded_stack)
+    if recorded_graph_builds_policy is None:
         print("refusing to resume: result lacks a valid graph-build policy", file=sys.stderr)
         return 2
-    _apply_graph_build_switch(recorded_graph_builds == "on")
-    recorded_execution = recorded_stack.get("execution")
-    if not isinstance(recorded_execution, dict):
-        print("refusing to resume: result lacks execution metadata", file=sys.stderr)
-        return 2
-    recorded_policy = recorded_execution.get("context_policy")
-    if not isinstance(recorded_policy, dict):
+    _apply_graph_build_switch(recorded_graph_builds_policy == "on")
+    recorded_policy = recorded_context_policy(recorded_stack)
+    if recorded_policy is None:
         print("refusing to resume: result lacks a complete context policy", file=sys.stderr)
         return 2
-    session_level = recorded_policy.get("session_level")
-    chunk_chars = recorded_policy.get("chunk_chars")
-    fuse = recorded_policy.get("fuse")
-    if (
-        not isinstance(session_level, bool)
-        or not isinstance(chunk_chars, int)
-        or isinstance(chunk_chars, bool)
-        or not isinstance(fuse, bool)
-    ):
-        print("refusing to resume: result lacks a complete context policy", file=sys.stderr)
-        return 2
-    recorded_policy = {
-        "session_level": session_level,
-        "chunk_chars": chunk_chars,
-        "fuse": fuse,
-    }
 
     for argument, key in (("session", "session_level"), ("chunk_chars", "chunk_chars"), ("fuse", "fuse")):
         recorded_value = recorded_policy[key]
@@ -128,13 +113,8 @@ async def main_async(args) -> int:
             return 2
         setattr(args, argument, recorded_value)
 
-    recorded_top_k = recorded_stack.get("recall_top_k")
-    if (
-        not isinstance(recorded_top_k, int)
-        or isinstance(recorded_top_k, bool)
-        or recorded_top_k < 1
-        or (args.top_k is not None and args.top_k != recorded_top_k)
-    ):
+    recorded_top_k = recorded_recall_top_k(recorded_stack)
+    if recorded_top_k is None or (args.top_k is not None and args.top_k != recorded_top_k):
         print("refusing to resume: requested top_k differs from the run", file=sys.stderr)
         return 2
     args.top_k = recorded_top_k
@@ -209,6 +189,15 @@ async def main_async(args) -> int:
         return 2
 
     resumed = payload.get("resumed")
+    # Which records owe a re-run, and whether this artifact is a complete
+    # measurement, is ONE decision (``run_verdict``) shared with the run
+    # command. ``recorded_partial is None`` means the artifact predates the
+    # flag: where the run died is unknowable, so its last record is re-run
+    # rather than quoted.
+    recorded_partial = payload.get("partial")
+    if recorded_partial is not None and not isinstance(recorded_partial, bool):
+        print("refusing to resume: partial status is not a boolean", file=sys.stderr)
+        return 2
     purge_failed_id = (
         resumed.get("purge_failed_question_id") if isinstance(resumed, dict) else None
     )
@@ -232,23 +221,21 @@ async def main_async(args) -> int:
     elif purge_failed_user_raw is not None:
         print("refusing to resume: purge owner is present without a failed question", file=sys.stderr)
         return 2
-    legacy_partial = "partial" not in payload and "_partial" in results_path.stem
-    failed_idx = [
-        i
-        for i, r in enumerate(records)
-        if (args.from_index is not None and i >= args.from_index)
-        or r.get("memories_recalled") == 0
-        or bool(r.get("error"))
-        or r.get("question_id") == purge_failed_id
-    ]
-    if legacy_partial and records and len(records) - 1 not in failed_idx:
-        failed_idx.append(len(records) - 1)
-    partial_artifact = (
-        payload.get("partial") is not False
-        if "partial" in payload
-        else legacy_partial
+    forced = (
+        [i for i, r in enumerate(records) if r["question_id"] == purge_failed_id]
+        if purge_failed_id is not None
+        else []
     )
-    if not failed_idx and partial_artifact:
+    pending = run_verdict(
+        records,
+        expected_count=len(sample_ids),
+        recorded_partial=recorded_partial,
+        purge_failed=purge_failed_id is not None,
+        from_index=args.from_index,
+        forced=forced,
+    )
+    failed_idx = pending["failed"]
+    if not failed_idx and not pending["complete"]:
         print("refusing to accept an incomplete artifact as a successful no-op", file=sys.stderr)
         return 2
     if args.dry_run:
@@ -324,44 +311,29 @@ async def main_async(args) -> int:
             purge_failed = qid
             break
 
-    # Recompute aggregates
-    scored = [r for r in records if not r.get("error")]
-    errors = sum(bool(r.get("error")) for r in records)
-    correct = sum(1 for r in scored if r["correct"])
-    mean = round(correct / len(scored), 3) if scored else 0.0
-    wilson = None
-    if scored:
-        n_s, p = len(scored), correct / len(scored)
-        z = 1.96
-        denom = 1 + z * z / n_s
-        center = (p + z * z / (2 * n_s)) / denom
-        half = z * math.sqrt(p * (1 - p) / n_s + z * z / (4 * n_s * n_s)) / denom
-        wilson = [round(center - half, 3), round(center + half, 3)]
-
-    by_type: dict[str, dict] = {}
-    for r in scored:
-        slot = by_type.setdefault(r["question_type"], {"n": 0, "correct": 0})
-        slot["n"] += 1
-        slot["correct"] += 1 if r["correct"] else 0
+    # Recompute aggregates with the SAME seam the run command uses, over the
+    # records as they now stand: a resumed artifact and a fresh run cannot
+    # disagree about the same records.
+    comparison = payload.get("comparison_to_baseline")
+    final = run_verdict(
+        records,
+        expected_count=len(sample_ids),
+        recorded_partial=False,
+        purge_failed=purge_failed is not None,
+        baseline_mean=comparison.get("baseline_mean") if isinstance(comparison, dict) else None,
+    )
+    totals = final["totals"]
+    mean, correct = totals["mean"], totals["correct"]
 
     payload["mean"] = mean
     payload["correct"] = correct
-    payload["questions"] = len(scored)
-    payload["errors"] = errors
-    payload["wilson_95"] = wilson
-    payload["by_type"] = by_type
-    comparison = payload.get("comparison_to_baseline")
+    payload["questions"] = totals["questions"]
+    payload["errors"] = totals["errors"]
+    payload["wilson_95"] = totals["wilson_95"]
+    payload["by_type"] = totals["by_type"]
     if isinstance(comparison, dict):
-        baseline_mean = comparison.get("baseline_mean")
-        comparison["delta"] = (
-            round(mean - baseline_mean, 3)
-            if isinstance(baseline_mean, (int, float))
-            and not isinstance(baseline_mean, bool)
-            and math.isfinite(baseline_mean)
-            and scored
-            else None
-        )
-    complete = purge_failed is None and errors == 0
+        comparison["delta"] = final["comparison_delta"]
+    complete = final["complete"]
     payload["partial"] = not complete
     payload["resumed"] = {
         "questions": resumed_count,
@@ -375,7 +347,7 @@ async def main_async(args) -> int:
         "timestamp_utc": datetime.now(UTC).isoformat(),
     }
     results_path.write_text(json.dumps(payload, indent=2))
-    print(f"\nresumed mean: {mean:.3f} ({correct}/{len(scored)}) → {results_path}")
+    print(f"\nresumed mean: {mean:.3f} ({correct}/{totals['questions']}) → {results_path}")
     print(f"wilson95: {payload['wilson_95']}")
     return 0 if complete else 2
 

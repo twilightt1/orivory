@@ -101,6 +101,7 @@ def _apply_graph_build_switch(enabled: bool) -> None:
 
 from eval.benchmarks.llm_judge import JUDGE_PROMPT_VERSION, build_judge_messages  # noqa: E402
 from eval.benchmarks.longmemeval_s import load_instances  # noqa: E402
+from eval.run_contract import run_verdict  # noqa: E402
 
 DATASET = ROOT / "eval/benchmarks/data/longmemeval_s_cleaned.json"
 if not DATASET.exists():  # worktree: ignored benchmark data lives on main checkout
@@ -147,6 +148,22 @@ RELATIVE_TIME_CUE = re.compile(
     r"|when did|what date|what day)\b",
     re.IGNORECASE,
 )
+
+
+def file_sha256(path: Path) -> str | None:
+    """Hash a file without reading it all into memory.
+
+    The dataset is 277MB: ``read_bytes()`` made writing one metadata field
+    cost a full copy of it. Returns None when the file is absent, so a
+    metadata build reports a missing dataset instead of raising.
+    """
+    if not path.exists():
+        return None
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def build_stack_metadata(
@@ -233,7 +250,7 @@ def build_stack_metadata(
         "git_dirty": git_dirty,
         "dataset_path": str(dataset_path),
         "dataset_source": dataset_source,
-        "dataset_sha256": hashlib.sha256(dataset_path.read_bytes()).hexdigest(),
+        "dataset_sha256": file_sha256(dataset_path),
         "selected_question_ids": selected_question_ids,
         "sample_seed": sample_seed,
         "runtime": {
@@ -838,18 +855,21 @@ async def main_async(args) -> int:
               f"below cover {len(records)}/{len(selected)}; rerun after reset.")
     total = round(time.time() - t0, 1)
 
-    errors = [r for r in records if r["error"]]
-    scored = [r for r in records if not r["error"]]
-    correct = sum(1 for r in scored if r["correct"])
-    mean = round(correct / len(scored), 3) if scored else 0.0
-
-    by_type: dict[str, dict] = {}
-    for r in scored:
-        slot = by_type.setdefault(r["question_type"], {"n": 0, "correct": 0})
-        slot["n"] += 1
-        slot["correct"] += 1 if r["correct"] else 0
-
     baseline = json.loads(BASELINE.read_text()) if BASELINE.exists() else {}
+    # One verdict for the whole artifact: the run and the resume path ask the
+    # same questions of the same records, so they cannot report different
+    # means, different Wilson intervals or different completeness.
+    verdict = run_verdict(
+        records,
+        expected_count=len(selected),
+        recorded_partial=False,
+        purge_failed=bool(purge_failed),
+        baseline_mean=baseline.get("mean"),
+    )
+    totals = verdict["totals"]
+    mean, correct = totals["mean"], totals["correct"]
+    errors = list(r for r in records if r["error"])
+
     comparison = None
     if baseline.get("mean") is not None:
         comparison = {
@@ -857,20 +877,8 @@ async def main_async(args) -> int:
             "baseline_mean": baseline.get("mean"),
             "baseline_sample": baseline.get("sample"),
             "same_seed": baseline.get("sample", {}).get("seed") == args.seed,
-            "delta": round(mean - baseline["mean"], 3) if scored else None,
+            "delta": verdict["comparison_delta"],
         }
-
-    # Wilson 95% score interval — the statistics-grade run reports it
-    wilson = None
-    if scored:
-        import math as _math
-
-        n_s, p = len(scored), correct / len(scored)
-        z = 1.96
-        denom = 1 + z * z / n_s
-        center = (p + z * z / (2 * n_s)) / denom
-        half = z * _math.sqrt(p * (1 - p) / n_s + z * z / (4 * n_s * n_s)) / denom
-        wilson = [round(center - half, 3), round(center + half, 3)]
 
     write_index_costs = {
         "memories_ingested": sum(r["memories_ingested"] for r in records),
@@ -888,6 +896,11 @@ async def main_async(args) -> int:
         fuse=args.fuse,
         write_index_costs=write_index_costs,
     )
+    # A partial run is one that errored instances or quit early: its mean
+    # covers fewer questions than the sample. The verdict owns that question,
+    # and the flag is WRITTEN so the resume path reads the state instead of
+    # guessing it from the filename.
+    partial = not verdict["complete"]
     payload = {
         "benchmark": "longmemeval_s",
         "run_kind": "orivory_stack",
@@ -912,20 +925,18 @@ async def main_async(args) -> int:
         "judge_prompt_version": JUDGE_PROMPT_VERSION,
         "stack": stack,
         "mean": mean,
-        "questions": len(scored),
+        "questions": totals["questions"],
         "correct": correct,
         "errors": len(errors),
-        "wilson_95": wilson,
-        "by_type": by_type,
+        "wilson_95": totals["wilson_95"],
+        "by_type": totals["by_type"],
         "comparison_to_baseline": comparison,
+        "partial": partial,
         "total_seconds": total,
         "timestamp_utc": datetime.now(UTC).isoformat(),
         "per_question": records,
     }
     chunking = "session_level" if args.session else "per_turn"
-    # A partial run is one that errored instances or quit early: its mean
-    # covers fewer questions than the sample.
-    partial = bool(errors) or bool(purge_failed) or len(records) < len(selected)
     out = result_artifact_path(n=args.n, chunking=chunking, partial=partial)
     if out.exists():
         # Never overwrite a committed/frozen results file: new runs get a
@@ -934,19 +945,19 @@ async def main_async(args) -> int:
         stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
         out = out.with_name(f"{out.stem}_{stamp}{out.suffix}")
     out.write_text(json.dumps(payload, indent=2))
-    print(f"\nSYSTEM mean: {mean:.3f} ({correct}/{len(scored)}, errors={len(errors)})")
+    print(f"\nSYSTEM mean: {mean:.3f} ({correct}/{totals['questions']}, errors={len(errors)})")
     if partial:
         print(
             f"PARTIAL RUN — {len(errors)} instance(s) errored, {len(purge_failed)} "
             f"unpurged, {len(records)}/"
-            f"{len(selected)} completed: the mean covers {len(scored)} question(s) "
+            f"{len(selected)} completed: the mean covers {totals['questions']} question(s) "
             f"and this run did NOT write the committed result artifact. "
             f"Output: {out}"
         )
     if comparison:
         print(f"baseline {comparison['baseline_mean']} → system {mean} "
               f"(delta {comparison['delta']:+.3f}, same_seed={comparison['same_seed']})")
-    type_summary = {k: "{}/{}".format(v["correct"], v["n"]) for k, v in by_type.items()}
+    type_summary = {k: "{}/{}".format(v["correct"], v["n"]) for k, v in totals["by_type"].items()}
     print(f"by type: {type_summary}")
     print(f"total: {total}s → {out}")
     return run_exit_code(records, base_code=exit_code)

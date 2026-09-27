@@ -53,7 +53,13 @@ jobs:
         run: python -m pytest --confcutdir=tests/rag tests/rag -q
 
       - name: Run evaluation tests
-        run: python -m pytest --confcutdir=tests/eval tests/eval/test_eval_metrics.py tests/eval/test_llm_judge_provenance.py tests/eval/test_resume_system_run.py tests/eval/test_answer_prompt_contract.py tests/eval/test_null_choices_retry.py tests/eval/test_run_contract_answer_judge.py -q
+        # The whole directory, not a hand-picked list: the run/resume verdict
+        # seam's tests were silently unselected. The one excluded file asserts
+        # a real dataset hash and needs the 277MB dataset, which this job does
+        # not download.
+        run: >-
+          python -m pytest --confcutdir=tests/eval tests/eval
+          --ignore=tests/eval/test_benchmark_metadata.py -q
 
       - name: Run middleware unit tests (DB-free)
         run: python -m pytest --confcutdir=tests/middleware tests/middleware -q
