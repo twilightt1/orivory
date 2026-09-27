@@ -380,22 +380,9 @@ class MemoryRetriever:
         # with the current SQL-owned document before rerank.
         t_eligibility = time.perf_counter()
         try:
-            visible = []
-            for cand in candidates:
-                mid = str(cand.get("memory_id", ""))
-                mem = hydrated.get(mid)
-                if mem is None:
-                    continue
-                if _hidden(mem, include_superseded=include_superseded,
-                           namespace=self.namespace):
-                    continue
-                authorized = dict(cand)
-                authorized["memory_id"] = mid
-                authorized["content"] = (
-                    f"Title: {mem.title}\n{mem.content}" if mem.title else mem.content
-                )
-                visible.append(authorized)
-            candidates = visible
+            candidates = self._authorize(
+                candidates, hydrated, include_superseded=include_superseded
+            )
         finally:
             stage_ms["eligibility"] = (time.perf_counter() - t_eligibility) * 1000.0
 
@@ -437,24 +424,10 @@ class MemoryRetriever:
                         except (AttributeError, TypeError, ValueError):
                             log.debug("Skipping malformed refill candidate")
                     refetched = await self._hydrate(refill_ids)
-                    visible: list[dict] = []
-                    for cand in widened:
-                        mid = str(cand.get("memory_id", ""))
-                        mem = refetched.get(mid)
-                        if mem is None or _hidden(
-                            mem, include_superseded=include_superseded,
-                            namespace=self.namespace,
-                        ):
-                            continue
-                        authorized = dict(cand)
-                        authorized["memory_id"] = mid
-                        authorized["content"] = (
-                            f"Title: {mem.title}\n{mem.content}"
-                            if mem.title
-                            else mem.content
-                        )
-                        visible.append(authorized)
-                        hydrated[mid] = mem
+                    visible = self._authorize(
+                        widened, refetched, include_superseded=include_superseded
+                    )
+                    hydrated.update(refetched)
                     # Assigned only once the re-authorized pool is complete: a
                     # failure above leaves the old pool (already SQL-authorized)
                     # in place, never a raw fused page carrying vector copies.
@@ -486,24 +459,14 @@ class MemoryRetriever:
                         fresh.append(cand)
                     if fresh:
                         hydrated_refill = await self._hydrate(refill_ids)
-                        for cand in fresh:
-                            mid = str(cand["memory_id"])
-                            mem = hydrated_refill.get(mid)
-                            if mem is None or _hidden(
-                                mem, include_superseded=include_superseded,
-                                namespace=self.namespace,
-                            ):
-                                continue
-                            authorized = dict(cand)
-                            authorized["memory_id"] = mid
-                            authorized["content"] = (
-                                f"Title: {mem.title}\n{mem.content}"
-                                if mem.title
-                                else mem.content
-                            )
-                            candidates.append(authorized)
-                            hydrated[mid] = mem
-                            added += 1
+                        authorized_refill = self._authorize(
+                            fresh,
+                            hydrated_refill,
+                            include_superseded=include_superseded,
+                        )
+                        candidates.extend(authorized_refill)
+                        added += len(authorized_refill)
+                        hydrated.update(hydrated_refill)
             except (EmbeddingDimensionMismatch, VectorUnavailableError):
                 # The same contract as the first search: a store outage is a
                 # readiness signal, never a short result list.
@@ -576,22 +539,9 @@ class MemoryRetriever:
                     time.perf_counter() - t_revalidate
                 ) * 1000.0
                 t_reeligibility = time.perf_counter()
-                current = []
-                for cand in candidates:
-                    mid = str(cand.get("memory_id", ""))
-                    mem = refreshed.get(mid)
-                    if mem is None or _hidden(
-                        mem, include_superseded=include_superseded,
-                        namespace=self.namespace,
-                    ):
-                        continue
-                    current_cand = dict(cand)
-                    current_cand["memory_id"] = mid
-                    current_cand["content"] = (
-                        f"Title: {mem.title}\n{mem.content}" if mem.title else mem.content
-                    )
-                    current.append(current_cand)
-                candidates = current
+                candidates = self._authorize(
+                    candidates, refreshed, include_superseded=include_superseded
+                )
                 hydrated = refreshed
                 stage_ms["eligibility"] += (
                     time.perf_counter() - t_reeligibility
@@ -780,12 +730,63 @@ class MemoryRetriever:
 
         return await self.db.run_sync(_search)
 
+    def _authorize(
+        self,
+        candidates: list[dict],
+        hydrated: dict[str, Memory],
+        *,
+        include_superseded: bool,
+    ) -> list[dict]:
+        """The one authorization rule a recall candidate has to clear.
+
+        A candidate is a row the index proposed; ``hydrated`` is the SQL truth
+        for it. This is the checkpoint — tenant, namespace and lifecycle state
+        are all re-read here, and the text that leaves is rebuilt from the
+        document SQL owns, never the copy the vector payload shipped.
+
+        Recall runs this at every place a pool can change — the first page,
+        both branches of the bounded refill, and once more after the
+        reranker's network round — because a pool assembled from an index is
+        untrusted until SQL says otherwise, and every one of those places was
+        a chance to get it wrong.
+
+        Returns the surviving candidates with ``content`` and ``memory_id``
+        replaced by the authorized row's. ``hydrated`` is left as the caller
+        passed it: ``counts["hydrated"]`` is a count of rows SQL resolved, and
+        a row that was resolved and then hidden is still a row SQL resolved.
+        """
+        authorized_candidates: list[dict] = []
+        for cand in candidates:
+            mid = str(cand.get("memory_id", ""))
+            memory = hydrated.get(mid)
+            if memory is None or _hidden(
+                memory,
+                include_superseded=include_superseded,
+                namespace=self.namespace,
+            ):
+                continue
+            authorized = dict(cand)
+            authorized["memory_id"] = mid
+            authorized["content"] = (
+                f"Title: {memory.title}\n{memory.content}"
+                if memory.title
+                else memory.content
+            )
+            authorized_candidates.append(authorized)
+        return authorized_candidates
+
     async def _hydrate(self, memory_ids: list[UUID]) -> dict[str, Memory]:
         """Fetch Memory rows + entity_links in one query, keyed by id (str).
 
         The tenant AND namespace are enforced in this statement: the pool
         comes from the vector/FTS indexes, and SQL is what authorizes a byte
         of text before any candidate reaches scoring or a remote reranker.
+
+        ``populate_existing`` because recall holds ONE session across its whole
+        run: the first pool is already in this session's identity map, so a
+        plain re-SELECT at the post-rerank checkpoint answers with the
+        attributes loaded seconds ago — exactly the snapshot that checkpoint
+        exists to re-check. Refreshing from the DB is what makes it a read.
         """
         if not memory_ids:
             return {}
@@ -795,6 +796,7 @@ class MemoryRetriever:
                    Memory.user_id == self.user_id,
                    namespace_predicate(self.namespace))
             .options(selectinload(Memory.entity_links).selectinload(MemoryEntity.entity))
+            .execution_options(populate_existing=True)
         )
         rows = (await self.db.execute(stmt)).scalars().all()
         return {str(m.id): m for m in rows}
