@@ -125,23 +125,42 @@ When a real query fails or produces weak citations, add it to the dataset with:
 - the category impacted
 ---
 
-## Historical baselines (v1.1.0; preserve artifacts, not current regression gates)
+## Current baseline (v1.1.0+ local lane) and historical baselines
+
+### Current — local embeddings + local rerank, n=100
+
+| Run | File | Score |
+|---|---|---|
+| Single-pass + local ONNX rerank, n=100 | `benchmarks/results/longmemeval_s_system_n100_20260927T200310.json` | **0.730**, Wilson 95% CI [0.636, 0.807] |
+
+Stack, read from the artifact's own `stack` block: Arctic-embed-xs 384-dim
+ONNX, `gte-multilingual-reranker-base` int8 (top_n 15), hybrid off, graph builds
+off during bench ingest, answerer and judge `stealth/space-bunny-alpha`, seed
+`20260906`, 73/100 correct, 0 errors. This is the lane `run_system_benchmark.py`
+runs unconditionally — it pins `RETRIEVAL_SEMANTIC_RERANK=1` and
+`RERANK_TOP_N=15` at import so a stale `.env` cannot change what is measured
+(`eval/run_system_benchmark.py:70-77`).
+
+### Historical — hosted models, not reproducible from this tree
 
 Config `orivory_stack`, seed `20260906`, judge `longmemeval-official-v1`:
 
 | Run | File | Score |
 |---|---|---|
-| Single-pass + hosted rerank (historical), n=100 | `benchmarks/results/longmemeval_s_system_n100.json` | **0.570**, Wilson 95% CI [0.472, 0.663] |
+| Single-pass + hosted rerank (historical), n=100 | `benchmarks/results/longmemeval_s_system_n100.json` | 0.570, Wilson 95% CI [0.472, 0.663] |
 | No-rerank baseline, n=100 | (PR #18) | 0.490, CI [0.394, 0.587] |
 | Map-reduce answering, n=70 clean | `benchmarks/results/longmemeval_s_system_n100_mapreduce.json` | 0.486 — NEGATIVE, single-pass stays default |
 
-The 0.570 result is a historical hosted-model measurement. The shipped default
-retrieval lane is local, so that score cannot be reproduced by the current
-benchmark config; keep the committed artifact as provenance, not as a current
-regression target.
+Both hosted rows used a reranker and embeddings this tree no longer has. They
+are kept as provenance, not as regression targets. Note that the frozen
+`n100.frozen-0.570.json` artifact predates the provenance keys entirely — it
+records no `rerank`, `embeddings_actual` or `answer` block, so a comparison
+against it cannot be checked from the file alone.
 
 Rule: for retrieval-code changes, re-run the n=100 single-pass lane and compare
-only against a baseline with the same local embedding/rerank configuration; the
-historical hosted score above is not a regression gate. Tuning the score further
-is explicitly out of scope until ≥5 active installs (see
+only against the current row above (same local embedding/rerank configuration);
+the historical hosted scores are not regression gates. Every artifact stamps
+its own stack, so verify the comparison from `stack` rather than the filename.
+Tuning the score further is explicitly out of scope until ≥5 active installs
+(see
 [open-source-positioning.md §5](https://github.com/twilightt1/orivory-private/blob/main/docs/ideas/open-source-positioning.md) (private)).
