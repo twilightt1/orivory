@@ -72,7 +72,6 @@ class Settings(BaseSettings):
     APP_TAGLINE: str = "Personal AI Second Brain"
     CONTACT_EMAIL: str = "hello@orivory.local"
 
-    LEDGER_RETENTION_DAYS: int = 90
     # Compression-before-storage (claude-mem adopt-learn): off by default —
     # opt-in per deployment; failures degrade to storing raw content.
     COMPRESSION_ENABLED: bool = False
@@ -109,16 +108,7 @@ class Settings(BaseSettings):
     # under burst. Cap how many agent LLM calls hit the provider at once;
     # the SDK retries with backoff (see llm_client.DEFAULT_LLM_MAX_RETRIES).
     LLM_MAX_CONCURRENCY: int = 3
-    # Factual RAG answers should be near-deterministic; the global 0.7 is for
-    # other/creative uses. The answer agent uses this lower value to reduce
-    # hallucination and verbosity.
-    ANSWER_TEMPERATURE: float = 0.0
     LLM_MAX_TOKENS: int = 2048
-    # Approx character budget for the assembled LLM context (~4 chars/token).
-    # Guards against silently overflowing the model context window.
-    CONTEXT_CHAR_BUDGET: int = 24000
-
-
 
     OPENAI_API_KEY: str = ""
     EMBED_MODEL: str = "text-embedding-3-small"
@@ -211,38 +201,7 @@ class Settings(BaseSettings):
     # download persists on the data volume.
     LOCAL_E5_DIR: str = ""
 
-    # ── Corrective-RAG (CRAG) ────────────────────────────────────────────────────
-    # CRAG self-critiques retrieval quality and falls back to web search when needed.
-    # Reference: Yan et al., arXiv 2401.15884
-    CRAG_ENABLED: bool = True
-    CRAG_GRADING_MODEL: str = "openai/gpt-4o-mini"  # Model for grading (smaller = faster)
-    CRAG_RELEVANCE_THRESHOLD: float = 0.7  # Score >= this = RELEVANT
-    CRAG_PARTIAL_THRESHOLD: float = 0.4  # Score >= this = PARTIAL
-    CRAG_FALLBACK_THRESHOLD: float = 0.5  # % of docs needed to avoid web fallback
-    CRAG_MAX_WEB_RESULTS: int = 10  # Max web search results to include
-    CRAG_MAX_WEB_CHARS: int = 4000  # Per-doc cap on raw web page text kept in context
-    TAVILY_API_KEY: str = ""  # Tavily API key for web search fallback
-
-    # ── HyDE (Hypothetical Document Embeddings) ────────────────────────────────
-    # HyDE generates hypothetical documents for better retrieval.
-    # Reference: Gao et al., arXiv 2309.08830
-    HYDE_ENABLED: bool = True
-    HYDE_MODEL: str = "openai/gpt-4o-mini"  # Model for generating hypothetical docs
-    HYDE_PASSAGE_COUNT: int = 3  # Number of hypothetical passages to generate
-    HYDE_USE_IN_RETRIEVAL: bool = True  # Use HyDE embeddings in retrieval
-
-    # ── Multi-hop Reasoning (EfficientRAG) ─────────────────────────────────────
-    # Multi-hop query decomposition and reasoning.
-    # Reference: EfficientRAG - EMNLP 2024
-    MULTIHOP_ENABLED: bool = True
-    MULTIHOP_MODEL: str = "openai/gpt-4o-mini"  # Model for multi-hop reasoning
-    MULTIHOP_MAX_HOPS: int = 3  # Maximum number of reasoning hops
-    FEEDBACK_MAX_WEIGHT: float = 2.0  # Max document weight
-    FEEDBACK_MIN_WEIGHT: float = 0.5  # Min document weight
-
-
     EVALUATOR_FAILURE_MODE: str = "warn_only"
-
 
     RATE_LIMIT_PER_MINUTE: int = 60
     RATE_LIMIT_PER_DAY: int = 1000
