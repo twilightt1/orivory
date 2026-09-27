@@ -53,10 +53,13 @@ jobs:
         run: python -m pytest --confcutdir=tests/rag tests/rag -q
 
       - name: Run evaluation tests
-        # The whole tests/eval directory, not a hand-picked subset: the
-        # benchmark-artifact integrity tests (the run/resume verdict seam) were
-        # silently unselected here, so a regression in them could not fail CI.
-        run: python -m pytest --confcutdir=tests/eval tests/eval -q
+        # The whole directory, not a hand-picked list: the run/resume verdict
+        # seam's tests were silently unselected. The one excluded file asserts
+        # a real dataset hash and needs the 277MB dataset, which this job does
+        # not download.
+        run: >-
+          python -m pytest --confcutdir=tests/eval tests/eval
+          --ignore=tests/eval/test_benchmark_metadata.py -q
 
       - name: Run middleware unit tests (DB-free)
         run: python -m pytest --confcutdir=tests/middleware tests/middleware -q

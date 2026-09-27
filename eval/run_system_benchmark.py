@@ -150,6 +150,22 @@ RELATIVE_TIME_CUE = re.compile(
 )
 
 
+def file_sha256(path: Path) -> str | None:
+    """Hash a file without reading it all into memory.
+
+    The dataset is 277MB: ``read_bytes()`` made writing one metadata field
+    cost a full copy of it. Returns None when the file is absent, so a
+    metadata build reports a missing dataset instead of raising.
+    """
+    if not path.exists():
+        return None
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def build_stack_metadata(
     *,
     top_k: int,
@@ -234,7 +250,7 @@ def build_stack_metadata(
         "git_dirty": git_dirty,
         "dataset_path": str(dataset_path),
         "dataset_source": dataset_source,
-        "dataset_sha256": hashlib.sha256(dataset_path.read_bytes()).hexdigest(),
+        "dataset_sha256": file_sha256(dataset_path),
         "selected_question_ids": selected_question_ids,
         "sample_seed": sample_seed,
         "runtime": {
