@@ -173,6 +173,23 @@ def test_malformed_or_absent_run_metadata_is_not_a_compatible_run():
     assert not run_contracts_match(_stack(), "not-a-dict")
 
 
+def test_a_run_policy_the_resume_path_cannot_honour_is_refused_on_either_side():
+    """The resume path RE-APPLIES the recorded graph switch and context
+    policy, so a policy it cannot read blocks the resume whichever side it is
+    missing from. Same corrupt value on both sides still has to fail: equality
+    alone would call two identical un-honourable policies compatible."""
+    garbage = _stack()
+    garbage["graph_builds"] = ["on"]  # a list where a policy belongs
+    assert not run_contracts_match(garbage, _stack())
+    assert not run_contracts_match(_stack(), garbage)
+    assert not run_contracts_match(garbage, garbage)
+
+    current_without_policy = _stack()
+    del current_without_policy["execution"]["context_policy"]
+    assert not run_contracts_match(_stack(), current_without_policy)
+    assert not run_contracts_match(current_without_policy, current_without_policy)
+
+
 # --- the recorded-policy readers the resume path applies ------------------
 
 
@@ -282,6 +299,16 @@ def test_a_record_that_errored_or_recalled_nothing_needs_a_re_run():
     assert verdict["totals"]["errors"] == 1
 
 
+def test_a_corrupt_row_counts_as_an_error_instead_of_crashing_the_totals():
+    """A record that is not even a dict is counted as unscoreable; the verdict
+    must still produce totals rather than raise, because a half-written
+    artifact is exactly when resume needs an answer."""
+    verdict = run_verdict([_record("q1"), "half-written"], recorded_partial=False)
+
+    assert verdict["totals"]["questions"] == 1
+    assert verdict["totals"]["errors"] == 1
+
+
 def test_a_short_or_contaminated_run_is_not_complete():
     records = [_record("q1")]
 
@@ -322,6 +349,8 @@ def test_the_baseline_delta_is_computed_once_from_the_verdict():
     assert run_verdict(
         records, recorded_partial=False, baseline_mean="n/a"
     )["comparison_delta"] is None
+    # Nothing scored at all: 0 - baseline is a comparison against nothing.
+    assert run_verdict([], recorded_partial=False, baseline_mean=0.5)["comparison_delta"] is None
 
 
 def test_provenance_keys_are_dotted_paths_not_a_flat_blocklist():

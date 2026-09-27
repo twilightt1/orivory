@@ -185,7 +185,7 @@ def wilson_95(correct: int, total: int) -> list[float] | None:
 
 
 def run_verdict(
-    records: list[dict],
+    records: list[Any],
     *,
     expected_count: int | None = None,
     recorded_partial: bool | None = None,
@@ -195,6 +195,10 @@ def run_verdict(
     baseline_mean: Any = None,
 ) -> dict[str, Any]:
     """What a record set adds up to, and whether it still owes a re-run.
+
+    ``records`` is whatever the artifact holds, including a row that is not
+    even a dict: a half-written artifact is exactly when this is asked, so a
+    corrupt row is counted as unscoreable rather than raising.
 
     ``recorded_partial`` is the flag the artifact carried: ``True``/``False``
     when it was written, ``None`` for an artifact that predates the flag — where
