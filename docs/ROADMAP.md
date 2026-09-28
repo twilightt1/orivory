@@ -22,7 +22,10 @@
   two NEGATIVE results recorded honestly (session chunking, map-reduce).
   The hosted lane is retired; those historical scores are not reproducible
   from the shipped default retrieval config. The current local lane measures
-  **0.730** (n=100, Wilson [0.636, 0.807]) — see `eval/README.md`.
+  **0.710** (n=100, Wilson [0.615, 0.790]) on `multilingual-e5-small`, and
+  **0.730** on the English-first `snowflake-arctic-embed-xs` — paired over the
+  same 100 questions, e5 is the default at a −0.020 measured cost. See
+  `eval/README.md`.
 - Judge hardening (exact-token match, judged pilot).
 
 ### Review + remediation batch (2026-09-10)

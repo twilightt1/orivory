@@ -129,22 +129,46 @@ When a real query fails or produces weak citations, add it to the dataset with:
 
 ### Current — local embeddings + local rerank, n=100
 
-| Run | File | Score |
-|---|---|---|
-| Single-pass + local ONNX rerank, n=100 | `benchmarks/results/longmemeval_s_system_n100_20260927T200310.json` | **0.730**, Wilson 95% CI [0.636, 0.807] |
+| Run | Embedder | File | Score |
+|---|---|---|---|
+| Single-pass + local ONNX rerank, n=100 | `local-e5` (current default) | `benchmarks/results/longmemeval_s_system_n100_20260928T085334.json` | **0.710**, Wilson 95% CI [0.615, 0.790] |
+| Single-pass + local ONNX rerank, n=100 | `local-arctic` | `benchmarks/results/longmemeval_s_system_n100_20260927T200310.json` | **0.730**, Wilson 95% CI [0.636, 0.807] |
 
-Stack, read from the artifact's own `stack` block: Arctic-embed-xs 384-dim
-ONNX, `gte-multilingual-reranker-base` int8 (top_n 15), hybrid off, graph builds
-off during bench ingest, answerer and judge `stealth/space-bunny-alpha`, seed
-`20260906`, 73/100 correct, 0 errors. Retrieval is `recall_top_k 10` with
-per-turn chunking (`session_level: false`, `chunk_chars: 0`) — the harness
-DEFAULTS (`eval/run_system_benchmark.py:988,995,1008`). The reranker is pinned
-at import so a stale `.env` cannot change it (`RERANK_TOP_N=15`,
+Both rows are the same measurement apart from the embedder: 100 questions,
+seed `20260906`, one dataset sha, `gte-multilingual-reranker-base` int8 at
+`top_n` 15, hybrid off, graph builds off during bench ingest, answerer and
+judge `stealth/space-bunny-alpha`, 0 errors. Retrieval is `recall_top_k 10`
+with per-turn chunking (`session_level: false`, `chunk_chars: 0`) — the
+harness DEFAULTS (`eval/run_system_benchmark.py:988,995,1008`). The reranker
+is pinned at import so a stale `.env` cannot change it (`RERANK_TOP_N=15`,
 `RETRIEVAL_SEMANTIC_RERANK=1`), but `top_k` and chunking are CLI flags: a run
 with `--top-k 15 --session --chunk-chars 4000` is a DIFFERENT measurement
 (0.740, not committed) and the two must not be compared. Read the artifact's
 `stack.execution.context_policy` and `stack.recall_top_k` before comparing
 runs, never the filename.
+
+**e5 is the default, and the −0.020 is a deliberate trade.** Paired over the
+same 100 questions e5 wins 9 and loses 11, inside the overlapping CIs, so
+the English bench does not separate them. The slices do:
+
+| slice | arctic | e5 |
+|---|---|---|
+| multi-session | 14/26 | **16/26** |
+| knowledge-update | 14/17 | **15/17** |
+| single-session-user | 11/13 | 11/13 |
+| temporal-reasoning | **18/22** | 16/22 |
+| single-session-assistant | **14/14** | 13/14 |
+| single-session-preference | 2/8 | 0/8 |
+
+e5 gains where the question spans sessions and loses where it aggregates
+stated preferences. The default takes a multilingual, Vietnamese-capable
+embedder at a small measured cost on English. Re-measure before treating
+either number as a regression gate: `LOCAL_EMBED_MODEL` lives in `.env`, and
+switching either way needs a fresh reindex — both backends are 384-dim but
+the vectors are incompatible, and the generation guard refuses to mix them.
+The guard reads the manifest in SQLite, not the collection directory, so a
+stale store fails with `fresh reindex required` and indexes nothing rather
+than serving bad results.
 
 ### Historical — hosted models, not reproducible from this tree
 

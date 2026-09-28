@@ -33,12 +33,15 @@ Three ideas make it different from a chat-with-docs app:
 3. **Provable, not marketed.** The eval harness ships with the repo
    (LongMemEval-S + MemoryAgentBench adapters) so quality claims can be
    checked, not just claimed — including two **negative** results we
-   published anyway. Current on the shipped local lane: **0.730**
-   LongMemEval-S (n=100, 73/100 correct, 0 errors, Wilson 95% CI
-   [0.636, 0.807]). The earlier **0.570** was measured with a hosted
-   reranker and hosted embeddings this tree no longer ships, so it stays as
-   provenance, not a current claim — full stack, artifacts and the comparison
-   rule in [eval/README.md](eval/README.md#current-baseline-v110-local-lane-and-historical-baselines),
+   published anyway. Current on the shipped local lane: **0.710**
+   LongMemEval-S (n=100, 71/100 correct, 0 errors, Wilson 95% CI
+   [0.615, 0.790]) on `multilingual-e5-small`; the English-first
+   `snowflake-arctic-embed-xs` measures **0.730** on the same 100 questions,
+   and the default takes the multilingual embedder at that measured cost. The
+   earlier **0.570** was measured with a hosted reranker and hosted embeddings
+   this tree no longer ships, so it stays as provenance, not a current claim —
+   full stack, artifacts and the comparison rule in
+   [eval/README.md](eval/README.md#current-baseline-v110-local-lane-and-historical-baselines),
    history in [CHANGELOG](CHANGELOG.md).
 
 Your data stays on your infrastructure. MIT-licensed, self-hosted, plain
@@ -54,7 +57,7 @@ SQLite + embedded Qdrant under the hood — one container, no external services.
 | **📜 Access ledger** | Append-only audit log: which agent read or wrote which memory, when |
 | **🗑️ Erasure receipts** | Right-to-be-forgotten with verification: cascade deletion across rows, links and vectors, re-checked and receipted |
 | **📥 Import paths** | One-shot upload of ChatGPT / Claude / PAM / generic-JSON exports with dedup |
-| **📊 Benchmarks** | LongMemEval-S + MemoryAgentBench harness. **0.730** on the shipped local lane (n=100, Wilson 95% CI [0.636, 0.807]); the 0.570 headline is a retired hosted-rerank artifact kept as provenance — [results](eval/benchmarks/results/), [how to run](eval/README.md) |
+| **📊 Benchmarks** | LongMemEval-S + MemoryAgentBench harness. **0.710** on the shipped local lane (n=100, Wilson 95% CI [0.615, 0.790]); 0.570 is a retired hosted-rerank artifact kept as provenance — [results](eval/benchmarks/results/), [how to run](eval/README.md) |
 | **💰 Cost ledger** | Every LLM call's usage is recorded per request, so spend is observable without a second service |
 
 ## Quick start

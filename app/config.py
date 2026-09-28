@@ -188,14 +188,22 @@ class Settings(BaseSettings):
     # cost). OpenAI-compatible embeddings remain an explicit legacy opt-in;
     # do not mix backends in one store (the fingerprint guard refuses it).
     USE_LOCAL_EMBEDDINGS: bool = True
-    # Which local model backs USE_LOCAL_EMBEDDINGS: "arctic"
-    # (snowflake-arctic-embed-xs, default — best English bench, CLS pooling) or
-    # "e5" (multilingual, opt-in Vietnamese, mean pooling). Both 384-dim but
-    # semantically incompatible — the dim guard records them as different
-    # backends and refuses to mix them; switching on an existing store
-    # requires reindexing into a fresh collection. Anything else (the old
-    # chroma-bundled "minilm", a typo) is refused at load.
-    LOCAL_EMBED_MODEL: str = "arctic"
+    # Which local model backs USE_LOCAL_EMBEDDINGS: "e5" (multilingual-e5-small
+    # — the default; required prefixes `query: `/`passage: `, mean pooling) or
+    # "arctic" (snowflake-arctic-embed-xs; the better English bench, CLS
+    # pooling). Measured on LongMemEval-S n=100, paired over the same 100
+    # questions, same rerank: e5 0.710 vs arctic 0.730 — e5 wins 9, loses 11,
+    # inside the overlapping CIs. The split is by slice, not total: e5 gains on
+    # multi-session (16/26 vs 14/26) and knowledge-update (15/17 vs 14/17),
+    # loses on temporal-reasoning (16/22 vs 18/22) and single-session-
+    # preference (0/8 vs 2/8). e5 is the default because it is the multilingual
+    # one; arctic is the opt-in for an English-first corpus.
+    # Both are 384-dim but semantically incompatible — the dim guard records
+    # them as different backends and refuses to mix them, so switching on an
+    # existing store requires a fresh reindex (the manifest in SQLite, not the
+    # collection directory, is what holds the old contract). Anything else
+    # (the old chroma-bundled "minilm", a typo) is refused at load.
+    LOCAL_EMBED_MODEL: str = "e5"
     # Where the e5 onnx/tokenizer files live (downloaded once on first use).
     # Empty = ~/.cache/orivory/e5; the lite image sets /data/models/e5 so the
     # download persists on the data volume.

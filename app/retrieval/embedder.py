@@ -482,7 +482,7 @@ async def _embed_with_openai(texts: list[str]) -> list[list[float]]:
 
 
 def _embed_with_local(texts: list[str], *, query: bool = False) -> list[list[float]]:
-    """Embed fully locally — arctic XS (default) or e5-multilingual.
+    """Embed fully locally — e5-multilingual (default) or arctic XS.
 
     384-dim vectors either way, but different contracts: arctic pools CLS and
     prefixes queries only, e5 pools the masked mean and requires both

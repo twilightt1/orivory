@@ -245,8 +245,7 @@ def test_local_embed_model_rejects_removed_and_unknown_values_at_load(value):
 
 
 def test_local_embed_model_accepts_arctic_and_e5():
-    assert Settings(_env_file=None).LOCAL_EMBED_MODEL == "arctic"
-    assert Settings(_env_file=None, LOCAL_EMBED_MODEL="e5").LOCAL_EMBED_MODEL == "e5"
+    assert Settings(_env_file=None).LOCAL_EMBED_MODEL == "e5"
     assert Settings(_env_file=None, LOCAL_EMBED_MODEL="arctic").LOCAL_EMBED_MODEL == "arctic"
 
 
