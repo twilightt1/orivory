@@ -8,7 +8,6 @@ Changes vs. original:
   - The chunk rows and their durable index intents (delete for the ids
     leaving, upsert for the children entering) share ONE transaction; the
     vector write is the post-commit attempt, never the record of truth
-  - Caches PARENT chunks in Redis via parent_store
   - BM25 index built on PARENT content (better semantic units)
 """
 from __future__ import annotations
@@ -82,7 +81,6 @@ def _ingest(db, document_id: str) -> None:
         enqueue_chunk_delete_sync,
         enqueue_chunk_upsert_sync,
     )
-    from app.retrieval.parent_store import store_parents_sync
     from app.retrieval.retrieval_cache import invalidate_query_cache_sync
     from app.utils.chunker import build_parent_child_chunks, extract_text
 
@@ -164,14 +162,6 @@ def _ingest(db, document_id: str) -> None:
             )
     except Exception as exc:
         raise _stage_error("chunk_transaction", exc) from exc
-
-    try:
-        store_parents_sync(
-            conversation_id,
-            [{"id": p.id, "content": p.content, "metadata": p.metadata} for p in parents],
-        )
-    except Exception as exc:
-        raise _stage_error("redis_parent_cache", exc) from exc
 
     parent_dicts = [
         {"id": parent.id, "content": parent.content, "metadata": parent.metadata}

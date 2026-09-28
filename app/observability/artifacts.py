@@ -9,7 +9,6 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
-from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -90,16 +89,4 @@ class ArtifactStore:
         return meta
 
 
-def attach_run_artifacts(
-    store: ArtifactStore,
-    tracker: Any,
-    run_id: str,
-    items: Iterable[tuple[str, dict[str, Any]]],
-) -> list[dict[str, Any]]:
-    """Save each (name, payload) and log to the tracker."""
-    saved: list[dict[str, Any]] = []
-    for name, payload in items:
-        meta = store.save_json(name, payload)
-        tracker.log_artifact(meta["path"], run_id=run_id)
-        saved.append(meta)
-    return saved
+

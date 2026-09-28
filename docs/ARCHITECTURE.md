@@ -229,14 +229,13 @@ What remains is the shared LLM plumbing that every server-side seam calls.
 |---|---|
 | `llm_client.py` | ONE client factory. `ResilientAsyncOpenAI` wraps `chat.completions` so EVERY call site inherits the whole provider policy: the `LLM_MAX_CONCURRENCY` shared gate, the structured-outputs 400 fallback, and one retry on a `choices=None` blip. `complete()` is a thin kwargs wrapper over it |
 | `llm_parsing.py` | Structured-output parsing (`parse_llm_json_object`) |
-| `state.py` | The `AgentState` TypedDict the retrieval seams pass around |
 
 Callers: recall's query rewrite + entity extraction
 (`app/retrieval/memory/query_rewriter.py` — a failed or malformed rewrite falls
 back to the original query with an empty entity list), the graph write-back
 (`app/graph/extraction.py`), the consolidation rule
-(`app/retrieval/memory/consolidation.py`, `tag-summary.v1`) and HyDE
-(`app/retrieval/hyde_agent.py`). None of them take the gate themselves: the
+(`app/retrieval/memory/consolidation.py`, `tag-summary.v1`). None of them take
+the gate themselves: the
 wrapper owns it, so a new call site cannot burst the provider by forgetting
 (`tests/agents/test_llm_client_gate.py`).
 

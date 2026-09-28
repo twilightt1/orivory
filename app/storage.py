@@ -58,20 +58,5 @@ async def remove_object(object_name: str) -> None:
     _fs_path(object_name).unlink(missing_ok=True)
 
 
-async def list_objects(prefix: str) -> list[str]:
-    root = _fs_root_dir()
-    return sorted(
-        str(p.relative_to(root))
-        for p in root.rglob("*")
-        if p.is_file() and str(p.relative_to(root)).startswith(prefix)
-    )
-
-
 def get_object_sync(object_name: str) -> bytes:
     return _fs_path(object_name).read_bytes()
-
-
-def put_object_sync(object_name: str, data: bytes, content_type: str) -> None:
-    path = _fs_path(object_name)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(data)

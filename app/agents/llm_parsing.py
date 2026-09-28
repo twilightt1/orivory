@@ -101,20 +101,6 @@ def parse_llm_json_object(raw: object) -> LLMJsonParseResult:
     return LLMJsonParseResult(data=None, error="json_not_object", raw_preview=preview)
 
 
-def coerce_bool(value: object, default: bool) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        normalized = value.strip().casefold()
-        if normalized in {"true", "yes", "y", "1"}:
-            return True
-        if normalized in {"false", "no", "n", "0"}:
-            return False
-    if isinstance(value, int) and value in {0, 1}:
-        return bool(value)
-    return default
-
-
 def coerce_float(value: object, default: float = 0.0, *, minimum: float | None = None, maximum: float | None = None) -> float:
     try:
         coerced = float(value)

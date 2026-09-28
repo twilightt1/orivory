@@ -443,7 +443,6 @@ def test_reingest_enqueues_chunk_intents_in_the_row_transaction(sync_db, monkeyp
     monkeypatch.setattr(pipeline, "_project_document_to_memories", lambda *a, **k: None)
     monkeypatch.setattr("app.storage.get_object_sync", lambda *a, **k: b"file bytes")
     monkeypatch.setattr("app.utils.chunker.extract_text", lambda *a, **k: "Body text. " * 200)
-    monkeypatch.setattr("app.retrieval.parent_store.store_parents_sync", lambda *a, **k: None)
     monkeypatch.setattr(
         "app.retrieval.bm25_retriever.bm25_retriever.publish_build_sync", lambda *a, **k: None)
     monkeypatch.setattr(

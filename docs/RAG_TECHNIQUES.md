@@ -104,7 +104,7 @@ Two transformations ship, and neither fans out into query variants:
    SKIPS the call entirely for queries with no pronouns
    ([`app/retrieval/memory/correction.py`](../app/retrieval/memory/correction.py) —
    `needs_rewrite`, `rewrite_skipped` on the trace).
-2. **HyDE — the document path.** [`app/retrieval/hyde_agent.py`](../app/retrieval/hyde_agent.py)
+2. **HyDE — the document path.** `app/retrieval/hyde_agent.py` (deleted)
    generates hypothetical passages (Gao et al., arXiv 2309.08830), and
    [`app/retrieval/vector_retriever.py`](../app/retrieval/vector_retriever.py) —
    `search(..., hyde_text=...)` embeds the hypothetical text instead of the
@@ -186,34 +186,23 @@ decision helpers it used (`MAX_RETRIES = 3`, `route_after_grade_docs`,
 `route_after_grade_gen`, the retry / `record_*_retry_limit` edge names) lived in
 `app/agents/routing.py`, which nothing imported and which went with the
 lite-only consolidation (git history keeps it). `AgentState`
-([`app/agents/state.py`](../app/agents/state.py)) still carries the fields and
-appears only as a `TYPE_CHECKING` annotation
-([`app/retrieval/hyde_agent.py`](../app/retrieval/hyde_agent.py)).
+(`app/agents/state.py`) went with them — its last importer was `hyde_agent`.
+(`app/retrieval/hyde_agent.py` (deleted)).
 
 ---
 
-## 8. Parent-chunk cache (Redis)
+## 8. Parent-chunk cache — REMOVED
 
-The ingestion pipeline caches a document's parent chunks in Redis when it
-finishes ([`app/ingestion/pipeline.py`](../app/ingestion/pipeline.py) →
-[`app/retrieval/parent_store.py`](../app/retrieval/parent_store.py)): key
-`parent_chunk:{conversation_id}:{parent_id}`, TTL 7200 s. The read helpers
-(`get_parent`, `get_parents_batch`) serve from Redis, fall back to
-`document_chunks` and repopulate the cache, and `invalidate_conversation`
-drops a conversation's entries. The pipeline's synchronous write
-(`store_parents_sync`) is skipped — a sync caller cannot reach the async
-in-memory store — so reads go straight to the DB after synchronous ingestion.
-
-**Trade-off.** The cache is process-local: `get_redis()` always hands out the
-in-memory stand-in ([`app/redis_client.py`](../app/redis_client.py)), so it is
-lost on restart and never shared across processes.
+The parent-chunk cache (`app/retrieval/parent_store.py`) is gone. It never
+worked: the only writer was a no-op, and no read helper had a call site. See
+§8 Legacy below for what replaced it.
 
 **Legacy.** [`app/retrieval/retrieval_cache.py`](../app/retrieval/retrieval_cache.py)
 holds a per-conversation query-result cache (`rag:query:conv:...`, TTL 300 s)
 whose get/set helpers have no call site in the shipped app — only the
-invalidation hooks run, when documents change. Nothing reads the parent cache
-back yet either: the BM25/document leg rebuilds from `document_chunks` and
-keys its per-process indexes off a Redis generation counter
+invalidation hooks run, when documents change. The BM25/document leg
+rebuilds from `document_chunks` and keys its per-process indexes off a Redis
+generation counter
 ([`app/retrieval/bm25_retriever.py`](../app/retrieval/bm25_retriever.py)).
 
 ---
@@ -260,8 +249,8 @@ above, plus the exact-ID and English slices, over the real FTS5 leg.
 Prompts are module-level constants inside the module that uses them, not a
 registry: `REWRITER_SYSTEM`
 ([`app/retrieval/memory/query_rewriter.py`](../app/retrieval/memory/query_rewriter.py)),
-`HYDE_GENERATION_PROMPT` / `HYDE_REFINEMENT_PROMPT`
-([`app/retrieval/hyde_agent.py`](../app/retrieval/hyde_agent.py)),
+the HyDE prompts (`app/retrieval/hyde_agent.py`, deleted with the HyDE
+feature),
 `ENTITY_EXTRACTION_PROMPT` / `RELATION_EXTRACTION_PROMPT`
 ([`app/graph/extraction.py`](../app/graph/extraction.py)) and `_SYSTEM_PROMPT`
 ([`app/services/compression_service.py`](../app/services/compression_service.py)).

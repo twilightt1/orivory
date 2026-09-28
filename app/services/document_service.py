@@ -5,10 +5,9 @@ import asyncio
 import hashlib
 import logging
 import uuid
-from uuid import UUID
 
 from fastapi import HTTPException, UploadFile
-from sqlalchemy import and_, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.conversation import Conversation
@@ -101,27 +100,6 @@ async def upload_document(db: AsyncSession, conversation: Conversation, file: Up
     await asyncio.to_thread(process_document_sync, str(doc.id))
 
     log.info("Document uploaded", extra={"doc_id": doc_id, "conversation_id": str(conversation.id)})
-    return doc
-
-
-async def list_documents(db: AsyncSession, conversation_id: UUID) -> list[Document]:
-    result = await db.execute(
-        select(Document)
-        .where(Document.conversation_id == conversation_id)
-        .order_by(Document.created_at.desc())
-    )
-    return list(result.scalars().all())
-
-
-async def get_document(db: AsyncSession, document_id: UUID, conversation_id: UUID) -> Document:
-    doc = await db.scalar(
-        select(Document).where(and_(
-            Document.id == document_id,
-            Document.conversation_id == conversation_id,
-        ))
-    )
-    if not doc:
-        raise HTTPException(404, detail="Document not found.")
     return doc
 
 
