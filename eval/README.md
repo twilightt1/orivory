@@ -131,7 +131,7 @@ When a real query fails or produces weak citations, add it to the dataset with:
 
 | Run | Embedder | File | Score |
 |---|---|---|---|
-| Single-pass + local ONNX rerank, n=100 | `local-e5` (current default) | `benchmarks/results/longmemeval_s_system_n100_20260928T085334.json` | **0.710**, Wilson 95% CI [0.615, 0.790] |
+| Single-pass + local ONNX rerank, n=100 | `local-e5` (current default) | `benchmarks/results/longmemeval_s_system_n100_20260928T085334.json` | **0.710** (71/100, 0 errors), Wilson 95% CI [0.615, 0.79] |
 | Single-pass + local ONNX rerank, n=100 | `local-arctic` | `benchmarks/results/longmemeval_s_system_n100_20260927T200310.json` | **0.730**, Wilson 95% CI [0.636, 0.807] |
 
 Both rows are the same measurement apart from the embedder: 100 questions,
