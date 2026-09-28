@@ -801,7 +801,6 @@ async def test_document_reingest_and_delete_leave_no_orphan_vectors(live, monkey
     # Out-of-process seams only: object storage, the Redis parent cache, BM25.
     monkeypatch.setattr("app.storage.get_object_sync", lambda *a, **k: b"gate bytes")
     monkeypatch.setattr("app.utils.chunker.extract_text", lambda *a, **k: "Gate body. " * 140)
-    monkeypatch.setattr("app.retrieval.parent_store.store_parents_sync", lambda *a, **k: None)
     monkeypatch.setattr("app.retrieval.bm25_retriever.bm25_retriever.publish_build_sync",
                         lambda *a, **k: None)
     monkeypatch.setattr("app.retrieval.retrieval_cache.invalidate_query_cache_sync",
@@ -1015,7 +1014,6 @@ async def test_rollback_reconciles_writes_made_after_cutover(
 
     monkeypatch.setattr("app.storage.get_object_sync", lambda *a, **k: b"gate bytes")
     monkeypatch.setattr("app.utils.chunker.extract_text", lambda *a, **k: "Reingested body. " * 140)
-    monkeypatch.setattr("app.retrieval.parent_store.store_parents_sync", lambda *a, **k: None)
     monkeypatch.setattr("app.retrieval.bm25_retriever.bm25_retriever.publish_build_sync",
                         lambda *a, **k: None)
     monkeypatch.setattr("app.retrieval.retrieval_cache.invalidate_query_cache_sync",

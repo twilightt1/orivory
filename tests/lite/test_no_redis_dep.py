@@ -51,11 +51,9 @@ def test_lite_cache_stack_without_redis_package(no_redis_package, monkeypatch):
 
     asyncio.run(_roundtrip())
 
-    from app.retrieval.parent_store import store_parents_sync
     from app.retrieval.retrieval_cache import invalidate_query_cache_sync
 
     assert invalidate_query_cache_sync("cid") == 0
-    assert store_parents_sync("cid", []) is None
 
 
 async def test_inmemory_mget_is_expiry_aware():

@@ -170,6 +170,3 @@ def build_parent_child_chunks(
     return parents, children
 
 
-def chunk_text(text: str, chunk_size: int = 500, overlap: int = 50) -> list[str]:
-    """Legacy simple splitter — kept for backward compat."""
-    return _recursive_split(text, chunk_size, overlap)

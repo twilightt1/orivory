@@ -238,7 +238,6 @@ def _stub_out_of_process(monkeypatch) -> None:
     monkeypatch.setattr("app.storage.put_object", _none)
     monkeypatch.setattr("app.storage.get_object_sync", lambda *a, **k: b"loop gate bytes")
     monkeypatch.setattr("app.utils.chunker.extract_text", lambda *a, **k: _DOCUMENT_BODY)
-    monkeypatch.setattr("app.retrieval.parent_store.store_parents_sync", lambda *a, **k: None)
     monkeypatch.setattr(
         "app.retrieval.bm25_retriever.bm25_retriever.publish_build_sync", lambda *a, **k: None
     )

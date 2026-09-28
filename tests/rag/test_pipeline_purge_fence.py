@@ -146,7 +146,6 @@ def fence(tmp_path, monkeypatch):
     # the retrieval cache, and the doc→memory projection (its own suite).
     monkeypatch.setattr("app.storage.get_object_sync", lambda *a, **k: b"fence bytes")
     monkeypatch.setattr("app.utils.chunker.extract_text", lambda *a, **k: "Fence body. " * 140)
-    monkeypatch.setattr("app.retrieval.parent_store.store_parents_sync", lambda *a, **k: None)
     monkeypatch.setattr(
         "app.retrieval.bm25_retriever.bm25_retriever.publish_build_sync", lambda *a, **k: None
     )

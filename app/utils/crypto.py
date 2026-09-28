@@ -77,5 +77,3 @@ def decrypt_str(value: str) -> str:
         raise ValueError("Failed to decrypt value: key mismatch or corrupted data") from None
 
 
-def is_encrypted(value: str) -> bool:
-    return isinstance(value, str) and value.startswith(_PREFIX)
