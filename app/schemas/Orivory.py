@@ -118,44 +118,11 @@ class DigestResponse(BaseModel):
     resurfaced:       list[DigestResurfacedMemory]  # 'on this day' from the past
 
 
-# ─── Entity ─────────────────────────────────────────────────────────────────
-
-class EntityResponse(BaseModel):
-    id:            UUID
-    name:          str
-    entity_type:   str
-    aliases:       list[str]
-    description:   str | None
-    first_seen_at: datetime
-    last_seen_at:  datetime
-    mention_count: int
-    metadata:      dict
-    created_at:    datetime
-    updated_at:    datetime
-
-    model_config = ConfigDict(from_attributes=True)
-
-
-# ─── Relation ───────────────────────────────────────────────────────────────
-
 class GraphEdge(BaseModel):
     source: str           # entity name
     target: str           # entity name
     relation: str
     weight: float
-
-
-class GraphNode(BaseModel):
-    id:   str             # entity name
-    type: str
-    mentions: int
-
-
-class GraphCluster(BaseModel):
-    id:    str
-    nodes: list[GraphNode]
-    edges: list[GraphEdge]
-    score: float
 
 
 # ─── Recall (Phase 3) ───────────────────────────────────────────────────────
