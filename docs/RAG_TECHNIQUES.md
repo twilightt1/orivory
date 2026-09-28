@@ -218,17 +218,21 @@ generation counter
   ([`app/retrieval/memory/query_rewriter.py`](../app/retrieval/memory/query_rewriter.py)),
   and the pronoun heuristic that gates it is bilingual — "it/this/that" plus
   "nó/chúng/đó" ([`app/retrieval/memory/correction.py`](../app/retrieval/memory/correction.py)).
-- **The dense leg is the configured embedder's.** `LOCAL_EMBED_MODEL="e5"` is
-  the multilingual, opt-in model; the default `arctic` is English-first, and
-  the dim guard refuses to mix the two on one store
+- **The dense leg is the configured embedder's.** `LOCAL_EMBED_MODEL="e5"`
+  (multilingual-e5-small) is the default; `"arctic"` is the opt-in for an
+  English-first corpus, and the dim guard refuses to mix the two on one store
   ([`app/config.py`](../app/config.py)).
-- **e5 is opt-in for a measured reason.** On LongMemEval-S n=100 with a fresh
-  store, the two local backends' own runs came out at **0.490** (default
-  `arctic`, fp32) and **0.430** (quantized e5, int8) — separate runs, with
-  their confidence intervals in the CHANGELOG. Both are ~384-dim, with
-  incompatible vectors, so switching either way reindexes. Vietnamese-heavy
-  corpora are the case for `LOCAL_EMBED_MODEL=e5`; the English bench is not.
-  fp32 e5 was never tried: ~470 MB is over the lite budget.
+- **e5 is the default, arctic the English opt-in.** Paired on LongMemEval-S
+  n=100 — same 100 questions, same rerank, only the embedder differs — e5
+  measures **0.710** and arctic **0.730**. e5 wins 9 questions and loses 11,
+  inside the overlapping CIs, so the English bench does not separate them; the
+  slices do. e5 gains on multi-session (16/26 vs 14/26) and knowledge-update
+  (15/17 vs 14/17) and loses on temporal-reasoning (16/22 vs 18/22) and
+  single-session-preference (0/8 vs 2/8). The default takes the multilingual
+  embedder at that measured cost. Both are ~384-dim with incompatible vectors,
+  so switching either way reindexes — and the guard that refuses the mix reads
+  the manifest in SQLite, not the collection directory. fp32 e5 was never
+  tried: ~470 MB is over the lite budget.
 
 **Not in this repo:** NFC normalization, `underthesea` syllable segmentation
 and Vietnamese/English stopword lists — no such dependency and no such code

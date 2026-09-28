@@ -21,7 +21,10 @@ if str(ROOT) not in sys.path:
 
 RESULTS = ROOT / "eval/benchmarks/results"
 README = ROOT / "eval/README.md"
-ARTIFACT = "longmemeval_s_system_n100_20260927T200310.json"
+# The DEFAULT lane's artifact. This moves when the default embedder changes —
+# e5 replaced arctic as the default in PR #107, and the doc-claim gate has to
+# follow it, or it would police a comparison row instead of the headline.
+ARTIFACT = "longmemeval_s_system_n100_20260928T085334.json"
 
 
 def _current_section() -> str:
