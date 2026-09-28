@@ -104,24 +104,21 @@ Two transformations ship, and neither fans out into query variants:
    SKIPS the call entirely for queries with no pronouns
    ([`app/retrieval/memory/correction.py`](../app/retrieval/memory/correction.py) —
    `needs_rewrite`, `rewrite_skipped` on the trace).
-2. **HyDE — the document path.** `app/retrieval/hyde_agent.py` (deleted)
-   generates hypothetical passages (Gao et al., arXiv 2309.08830), and
-   [`app/retrieval/vector_retriever.py`](../app/retrieval/vector_retriever.py) —
-   `search(..., hyde_text=...)` embeds the hypothetical text instead of the
-   query when handed one. `HYDE_ENABLED` (default true) gates the generator,
-   but no shipped caller passes `hyde_text`: the HyDE node belonged to the
-   LangGraph workflow (§6/§7).
+2. **HyDE — removed.** The generator (`app/retrieval/hyde_agent.py`) and its
+   config gate are gone. `search(..., hyde_text=...)` still accepts the
+   argument on
+   [`app/retrieval/vector_retriever.py`](../app/retrieval/vector_retriever.py),
+   but no caller passes it and nothing produces one, so the path is
+   unreachable. Git history keeps the implementation.
 
 **Not implemented: "multi-query".** There is no code path that issues 3 lexical
 variants or fuses their results (`grep -r multi_query app/` finds nothing).
 
 **Trade-off.** The rewrite adds one LLM call to recall; the pronoun fast-path
-keeps it off the common query. HyDE trades an LLM call for a denser query in
-the document path.
+keeps it off the common query.
 
-**Test.** [`tests/test_hyde_agent.py`](../tests/test_hyde_agent.py) covers the
-HyDE generator; the rewriter is exercised through the recall suites, which
-patch its client seam (e.g. `_seams` in
+**Test.** The rewriter is exercised through the recall suites, which patch
+its client seam (e.g. `_seams` in
 [`tests/retrieval/test_p2_gate.py`](../tests/retrieval/test_p2_gate.py)).
 
 ---
