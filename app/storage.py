@@ -14,11 +14,6 @@ from app.config import settings
 _fs_root: Path | None = None
 
 
-
-
-def get_object_sync(object_name: str) -> bytes:
-    return _fs_path(object_name).read_bytes()
-
 def _fs_root_dir() -> Path:
     global _fs_root
     if _fs_root is None:
@@ -63,7 +58,5 @@ async def remove_object(object_name: str) -> None:
     _fs_path(object_name).unlink(missing_ok=True)
 
 
-
+def get_object_sync(object_name: str) -> bytes:
     return _fs_path(object_name).read_bytes()
-
-
